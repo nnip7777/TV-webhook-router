@@ -282,9 +282,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             contract_display = str(contract_meta.get('displayName') or '').upper()
             is_non_crypto_index = bool(contract_asset.startswith('NCSI') or 'NASDAQ' in contract_display or 'DXY' in contract_display)
             api_position_side = position_side
-            if is_non_crypto_index and str(position_side or 'BOTH').upper() == 'BOTH':
-                api_position_side = 'LONG' if side == 'buy' else 'SHORT'
-                request_payload['positionSideMode'] = 'directional_for_non_crypto'
+            if is_non_crypto_index:
+                api_position_side = 'BOTH'
+                request_payload['positionSideMode'] = 'one_way_for_non_crypto'
             if dry_run:
                 _set_stage('dry_run_ready')
                 return {
@@ -311,7 +311,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             if api_position_side in (None, 'LONG', 'SHORT'):
                 requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
 
-            if risk_pct is not None and risk_pct > 0:
+            risk_control_enabled = bool(risk_pct is not None and risk_pct > 0 and not is_non_crypto_index)
+            if is_non_crypto_index and risk_pct is not None:
+                request_payload['riskControlMode'] = 'skipped_for_non_crypto'
+
+            if risk_control_enabled:
                 _set_stage('get_balance_before')
                 balance = client.get_balance()
                 equity = _bingx_account_equity(balance)
@@ -364,7 +368,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     client_order_id=client_order_id,
                 )
 
-            if risk_pct is not None and risk_pct > 0:
+            if risk_control_enabled:
                 _set_stage('get_balance_after')
                 balance = margin_ops.get('balance') or client.get_balance()
                 equity = _bingx_account_equity(balance)
