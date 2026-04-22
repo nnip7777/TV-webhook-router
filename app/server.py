@@ -23,6 +23,7 @@ from bybit_adapter import BybitBroker
 from finam_adapter import auth_check_sync as finam_auth_check_sync
 from schwab.client.base import BaseClient
 from schwab_adapter import SchwabBroker
+from bingx_adapter import _bingx_rows
 from execution import execute_route_sync
 from settings import (
     ALOR_API_BASE_URL,
@@ -454,32 +455,86 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
     elif broker == 'bingx':
         bingx_cfg = (config.get('brokers', {}).get('bingx', {}) or {}).get('defaultDestination', {}) or {}
         bingx = BingXBroker(testnet=bool(bingx_cfg.get('testnet', False)))
-        data = bingx.get_contracts()
+        symbols_v3 = bingx.get_symbols_v3()
+        contracts_v2 = bingx.get_contracts()
         limits = broker_cfg.setdefault('symbolLimits', {})
-        for item in (data.get('data') or []):
+        symbol_rows = _bingx_rows(symbols_v3)
+        contract_rows = _bingx_rows(contracts_v2)
+        contract_index = {
+            str(item.get('symbol') or '').strip(): item
+            for item in contract_rows if isinstance(item, dict) and str(item.get('symbol') or '').strip()
+        }
+        raw_count = len(symbol_rows)
+        filtered_out_closed = 0
+        filtered_out_invalid = 0
+        sample_symbols = []
+        contains_gas = False
+        source_rows = symbol_rows if symbol_rows else contract_rows
+        for item in source_rows:
             if not isinstance(item, dict):
+                filtered_out_invalid += 1
                 continue
             symbol = str(item.get('symbol') or '').strip()
             if not symbol:
+                filtered_out_invalid += 1
                 continue
-            if str(item.get('apiStateOpen', 'true')).lower() == 'false':
-                continue
-            if str(item.get('brokerState', 'true')).lower() == 'false':
-                continue
+            if len(sample_symbols) < 30:
+                sample_symbols.append(symbol)
+            if symbol == 'GAS-USDT':
+                contains_gas = True
+            api_open = str(item.get('apiStateOpen', 'true')).lower() != 'false'
+            broker_open_raw = item.get('brokerState', 'true')
+            broker_open = str(broker_open_raw).lower() != 'false'
+            if not api_open or not broker_open:
+                filtered_out_closed += 1
             symbols.append(symbol)
+            display_name = str(item.get('displayName') or '').strip()
+            asset_name = str(item.get('asset') or '').strip()
+            for alias in (display_name, asset_name):
+                if alias:
+                    symbols.append(alias)
             venues.append('swap')
-            normalized_symbol = str(symbol).replace('-', '').upper()
-            limits[symbol] = {
-                'minQty': item.get('tradeMinQuantity') or item.get('minQty') or item.get('minOrderQty') or item.get('minTradeAmount'),
-                'minUsdt': item.get('tradeMinUSDT') or item.get('minNotional'),
-                'qtyStep': item.get('size') or item.get('stepSize') or item.get('quantityStep') or item.get('qtyStep'),
-                'priceStep': item.get('tickSize') or item.get('priceStep') or ((10 ** (-int(item.get('pricePrecision')))) if str(item.get('pricePrecision', '')).isdigit() else None),
-                'quantityPrecision': item.get('quantityPrecision'),
-                'pricePrecision': item.get('pricePrecision'),
-                'raw': item,
+            normalized_symbol = str(symbol).replace('-', '').replace('_', '').replace('.P', '').replace('/', '').upper()
+            contract_item = contract_index.get(symbol) or contract_index.get(normalized_symbol) or item or {}
+            limit_payload = {
+                'minQty': contract_item.get('tradeMinQuantity') or contract_item.get('minQty') or contract_item.get('minOrderQty') or contract_item.get('minTradeAmount'),
+                'minUsdt': contract_item.get('tradeMinUSDT') or contract_item.get('minNotional'),
+                'qtyStep': contract_item.get('size') or contract_item.get('stepSize') or contract_item.get('quantityStep') or contract_item.get('qtyStep'),
+                'priceStep': contract_item.get('tickSize') or contract_item.get('priceStep') or ((10 ** (-int(contract_item.get('pricePrecision')))) if str(contract_item.get('pricePrecision', '')).isdigit() else None),
+                'quantityPrecision': contract_item.get('quantityPrecision'),
+                'pricePrecision': contract_item.get('pricePrecision'),
+                'raw': {
+                    'symbol': item,
+                    'contract': contract_item,
+                },
             }
-            if normalized_symbol and normalized_symbol not in limits:
-                limits[normalized_symbol] = limits[symbol]
+            for alias in (symbol, normalized_symbol, display_name, asset_name):
+                alias_key = str(alias or '').strip()
+                if alias_key:
+                    limits[alias_key] = limit_payload
+                    alias_normalized = alias_key.replace('-', '').replace('_', '').replace('.P', '').replace('/', '').upper()
+                    if alias_normalized:
+                        limits[alias_normalized] = limit_payload
+        broker_cfg['_lastLookupDebug'] = {
+            'broker': 'bingx',
+            'endpoint': 'v3:/openApi/swap/v3/quote/symbols + v2:/openApi/swap/v2/quote/contracts',
+            'httpStatus': {'v3': symbols_v3.get('_http_status'), 'v2': contracts_v2.get('_http_status')},
+            'baseUrl': {'v3': symbols_v3.get('_base_url'), 'v2': contracts_v2.get('_base_url')},
+            'code': {'v3': symbols_v3.get('code'), 'v2': contracts_v2.get('code')},
+            'msg': {'v3': symbols_v3.get('msg'), 'v2': contracts_v2.get('msg')},
+            'requestPath': {'v3': symbols_v3.get('_request_path'), 'v2': contracts_v2.get('_request_path')},
+            'requestQuery': {'v3': symbols_v3.get('_request_query'), 'v2': contracts_v2.get('_request_query')},
+            'requestMode': {'v3': symbols_v3.get('_request_mode'), 'v2': contracts_v2.get('_request_mode')},
+            'responseSnippet': {'v3': symbols_v3.get('_response_snippet'), 'v2': contracts_v2.get('_response_snippet')},
+            'rawCount': raw_count,
+            'contractCount': len(contract_rows),
+            'filteredOutClosed': filtered_out_closed,
+            'filteredOutInvalid': filtered_out_invalid,
+            'symbolsKept': len(symbols),
+            'containsGasUsdt': contains_gas,
+            'sampleSymbols': sample_symbols,
+            'usedFallbackContracts': not bool(symbol_rows),
+        }
     elif broker == 'finam':
         import httpx
         data = httpx.get('https://tradeapi.finam.ru/api/v1/securities/', params={'board': 'RTSX'}, timeout=30).json()
@@ -509,6 +564,10 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
     else:
         return {'ok': False, 'details': f'unknown broker: {broker}'}
 
+    if broker == 'bingx' and not symbols:
+        existing_symbols = list(broker_cfg.get('lookupSymbols', []))
+        if existing_symbols:
+            symbols = existing_symbols
     broker_cfg['lookupSymbols'] = _dedupe_keep_order(list(broker_cfg.get('lookupSymbols', [])) + symbols)
     broker_cfg['lookupVenues'] = _dedupe_keep_order(list(broker_cfg.get('lookupVenues', [])) + venues)
     active_symbols = []
@@ -531,7 +590,7 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
         if limits_entry:
             active_with_limits.append(symbol)
     save_config(config)
-    return {
+    result_payload = {
         'ok': True,
         'details': f"lookup synced: symbols={len(symbols)} venues={len(venues)} totalSymbols={len(broker_cfg.get('lookupSymbols', []))} active={len(active_symbols)} activeWithLimits={len(active_with_limits)} updatedRoutes={updated_routes}",
         'symbolsCount': len(symbols),
@@ -541,6 +600,11 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
         'activeWithLimits': active_with_limits,
         'updatedRoutes': updated_routes,
     }
+    lookup_debug = broker_cfg.get('_lastLookupDebug')
+    if isinstance(lookup_debug, dict):
+        result_payload['debug'] = lookup_debug
+        result_payload['details'] += f" | rawCount={lookup_debug.get('rawCount')} kept={lookup_debug.get('symbolsKept')} gas={lookup_debug.get('containsGasUsdt')}"
+    return result_payload
 
 
 def _broker_connection_test(broker: str) -> Dict[str, Any]:
@@ -1173,6 +1237,71 @@ def _result_is_dry_run(result_obj: Any) -> bool:
     return False
 
 
+def _safe_append_journal(entry: Dict[str, Any]) -> None:
+    try:
+        append_journal(entry)
+    except Exception:
+        try:
+            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            fallback = {
+                'time': _utcnow_iso(),
+                'kind': 'journal-write-error',
+                'status': 'error',
+                'details': traceback.format_exc()[:2000],
+                'entry': entry,
+            }
+            with LOG_PATH.open('a') as f:
+                f.write(json.dumps(fallback, ensure_ascii=False, default=str) + '\n')
+        except Exception:
+            pass
+
+
+def _quick_order_response_summary(result: Dict[str, Any]) -> str:
+    try:
+        return _short_json(result, 600)
+    except Exception:
+        return _short_text(result, 600)
+
+
+def _extract_bingx_risk_details(destination: Dict[str, Any]) -> str:
+    if str(destination.get('broker') or '') != 'bingx':
+        return ''
+    request = destination.get('request') or {}
+    result = destination.get('results') or {}
+    parts = []
+    stage = request.get('stage') or result.get('stage')
+    stage_trace = request.get('stageTrace') or result.get('stageTrace') or []
+    if stage:
+        parts.append(f"stage={stage}")
+    if stage_trace:
+        parts.append(f"stageTrace={'>'.join([str(x) for x in stage_trace])}")
+    risk = request.get('riskControl') or {}
+    if not isinstance(risk, dict) or not risk:
+        return ' | '.join(parts)
+    for key in (
+        'equity',
+        'allowedLoss',
+        'beforeQty',
+        'incomingQty',
+        'expectedFinalQty',
+        'finalQty',
+        'expectedNotional',
+        'finalNotional',
+        'preTradeLeverage',
+        'currentMarginValue',
+        'currentMarginPctOfEquity',
+        'targetMargin',
+        'targetMarginPctOfEquity',
+        'addMargin',
+        'addMarginPctOfEquity',
+        'liquidationPrice',
+    ):
+        value = risk.get(key)
+        if value not in (None, ''):
+            parts.append(f"{key}={value}")
+    return ' | '.join(parts)
+
+
 def _append_multi_destination_journal(status: str, received_at: str, payload: Dict[str, Any], materialized: Any, details_builder) -> None:
     destinations = _route_destinations(materialized)
     if len(destinations) <= 1:
@@ -1684,6 +1813,7 @@ def _current_mapping(config: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, An
                     'qtyMode': destination.get('qtyMode', 'pass-through'),
                     'qty': destination.get('qty', ''),
                     'qtyMultiplier': destination.get('qtyMultiplier', ''),
+                    'riskPct': destination.get('riskPct', ''),
                     'limits': copy.deepcopy(destination.get('limits', {})),
                 }
     return mapping
@@ -1758,6 +1888,16 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
     symbol_limits = _lookup_symbol_limits(broker_cfg, destination.get('symbol'))
     if symbol_limits:
         destination['limits'] = copy.deepcopy(symbol_limits)
+
+    risk_pct_raw = str(options.get('riskPct', '')).strip().replace('%', '')
+    if broker_name == 'bingx' and risk_pct_raw:
+        try:
+            risk_pct_value = float(risk_pct_raw)
+            if risk_pct_value > 0:
+                destination['riskPct'] = risk_pct_value
+                destination['marginType'] = 'ISOLATED'
+        except Exception:
+            pass
 
     qty_raw = str(options.get('qty', '')).strip()
     if qty_raw:
@@ -2575,17 +2715,52 @@ async def _alor_get_positions(client_id: str, access_token: str):
         return []
 
 
+def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_options: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    merged = copy.deepcopy(broker_options or {})
+    for destination in (previous_route or {}).get('destinations', []) or []:
+        broker_name = str(destination.get('broker') or '').strip()
+        if not broker_name:
+            continue
+        bucket = merged.setdefault(broker_name, {
+            'enabled': True,
+            'symbol': '',
+            'venue': '',
+            'qty': '',
+            'qtyMultiplier': '',
+            'riskPct': '',
+            'limits': {},
+        })
+        if bucket.get('enabled'):
+            continue
+        bucket['enabled'] = True
+        bucket['symbol'] = bucket.get('symbol') or destination.get('symbol', '')
+        venue_key = _broker_venue_key(broker_name)
+        bucket['venue'] = bucket.get('venue') or destination.get(venue_key, '')
+        bucket['qty'] = bucket.get('qty') or destination.get('qty', '')
+        bucket['qtyMultiplier'] = bucket.get('qtyMultiplier') or destination.get('qtyMultiplier', '')
+        bucket['riskPct'] = bucket.get('riskPct') or destination.get('riskPct', '')
+        bucket['limits'] = bucket.get('limits') or copy.deepcopy(destination.get('limits', {}))
+    return merged
+
+
 def _build_ui_route(config: Dict[str, Any], ticker: str, broker_options: Dict[str, Dict[str, Any]], atomic_qty: str = '', previous_route: Dict[str, Any] = None) -> Dict[str, Any]:
+    previous_route = previous_route or {}
+    merged_options = _merge_previous_broker_options(previous_route, broker_options)
+    existing_brokers = {
+        str(destination.get('broker') or '').strip()
+        for destination in (previous_route.get('destinations') or [])
+        if destination.get('broker')
+    }
     enabled_brokers = [
-        broker_name for broker_name, options in broker_options.items()
-        if options.get('enabled') and config.get('brokers', {}).get(broker_name, {}).get('enabled', False)
+        broker_name for broker_name, options in merged_options.items()
+        if (options.get('enabled') or broker_name in existing_brokers) and config.get('brokers', {}).get(broker_name, {}).get('enabled', False)
     ]
     if not enabled_brokers:
         return {}
 
     instruments = load_instruments()
     destinations = [
-        _build_destination_for_broker(config, broker_name, ticker, broker_options.get(broker_name, {}), instruments=instruments)
+        _build_destination_for_broker(config, broker_name, ticker, merged_options.get(broker_name, {}), instruments=instruments)
         for broker_name in enabled_brokers
     ]
     prev = previous_route or {}
@@ -2631,7 +2806,8 @@ def save_single_ticker_mapping(config: Dict[str, Any], ticker: str, broker_optio
     replaced = False
     route_id = _safe_route_id(ticker)
     previous_route = _get_ui_route_for_ticker(config, ticker)
-    new_route = _build_ui_route(config, ticker, broker_options, atomic_qty, previous_route=previous_route)
+    merged_broker_options = _merge_previous_broker_options(previous_route, broker_options)
+    new_route = _build_ui_route(config, ticker, merged_broker_options, atomic_qty, previous_route=previous_route)
 
     for route in config.get('routes', []):
         if route.get('id') == route_id and route.get('uiManaged'):
@@ -2646,7 +2822,10 @@ def save_single_ticker_mapping(config: Dict[str, Any], ticker: str, broker_optio
 
     config['routes'] = routes
     save_config(config)
-    _append_routing_journal(ticker, previous_route, new_route)
+    previous_for_journal = previous_route
+    if not previous_for_journal and replaced and new_route:
+        previous_for_journal = {'id': route_id, 'destinations': []}
+    _append_routing_journal(ticker, previous_for_journal, new_route)
     return config
 
 
@@ -2715,6 +2894,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
         for broker_name, broker_cfg in brokers:
             current = row_mapping.get(broker_name, {})
             is_checked = 'checked' if current else ''
+            risk_value = html.escape(str(current.get('riskPct', '')))
             best_candidate = _best_catalog_candidate(ticker, broker_name, instruments)
             symbol_raw = str(current.get('symbol') or best_candidate.get('symbol') or broker_cfg.get('symbolMap', {}).get(ticker, ticker))
             symbol_value = html.escape(symbol_raw)
@@ -2745,6 +2925,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 limit_parts.append(f"pxStep {limits.get('priceStep')}")
             if limit_parts:
                 margin_hint = ((margin_hint + ' · ') if margin_hint else '') + ', '.join(limit_parts)
+            risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name == 'bingx' else ''
             broker_cells.append(
                 f'<td class="broker-cell" data-broker-cell="{html.escape(broker_name)}" data-broker-symbol="{html.escape(margin_symbol)}">'
                 f"<div class='symbol-line'><label class='checkline-inline'><input type='checkbox' name='map|{html.escape(ticker)}|{html.escape(broker_name)}' {is_checked}></label>"
@@ -2752,6 +2933,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<input list='{venue_list_id}' autocomplete='off' class='mini-input venue-inline' type='text' name='venue|{html.escape(ticker)}|{html.escape(broker_name)}' value='{venue_value}' placeholder='{venue_placeholder}'>"
                 f"<input autocomplete='off' class='mini-input position-inline {position_qty_class}' type='text' value='{html.escape(position_qty_value)}' placeholder='pos' readonly tabindex='-1'></div>"
                 f"<div class='quick-line'><button type='button' class='quick-btn buy-btn' data-quick-order data-side='buy' data-broker='{html.escape(broker_name)}'>buy</button><input autocomplete='off' class='mini-input quick-qty {order_qty_class}' data-base-qty value='{html.escape(order_qty_value or broker_default_qty or '1')}' type='text' name='qty|{html.escape(ticker)}|{html.escape(broker_name)}' value='{html.escape(order_qty_value or broker_default_qty or '1')}' placeholder='qty'><button type='button' class='quick-btn sell-btn' data-quick-order data-side='sell' data-broker='{html.escape(broker_name)}'>sell</button><button type='button' class='quick-btn book-btn' data-book-view data-broker='{html.escape(broker_name)}'>book</button><span class='cell-subhint'>{html.escape(margin_hint)}</span></div>"
+                f"{risk_line}"
                 f"<input type='hidden' name='qtyMultiplier|{html.escape(ticker)}|{html.escape(broker_name)}' value=''>"
                 '</td>'
             )
@@ -3449,6 +3631,9 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             piece += f"@{venue}"
         if req:
             piece += f" req={_short_json(req, 220)}"
+        risk_details = _extract_bingx_risk_details(dest)
+        if risk_details:
+            piece += f" risk={risk_details[:260]}"
         if err:
             piece += f" err={err[:220]}"
         destination_debug.append(piece)
@@ -3463,7 +3648,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             'status': broker_status,
             'symbol': symbol,
             'venue': venue,
-            'details': f"payload={_short_json(payload)}" + (f" | request={_short_json(req, 260)}" if req else '') + (f" | result={_short_json(result_obj, 260)}" if result_obj else '') + (f" | error={err[:260]}" if err else ''),
+            'details': f"payload={_short_json(payload)}" + (f" | request={_short_json(req, 260)}" if req else '') + (f" | risk={risk_details}" if risk_details else '') + (f" | result={_short_json(result_obj, 260)}" if result_obj else '') + (f" | error={err[:260]}" if err else ''),
         })
 
     summary_needed = bool(decision.get('error')) or len(destinations) <= 1
@@ -3947,6 +4132,7 @@ class Handler(BaseHTTPRequestHandler):
                     'venue': '',
                     'qty': '',
                     'qtyMultiplier': '',
+                    'riskPct': '',
                     'limits': {},
                 })
                 if field == 'map':
@@ -3959,6 +4145,8 @@ class Handler(BaseHTTPRequestHandler):
                     bucket['qty'] = form.get(key, [''])[0]
                 elif field == 'qtyMultiplier':
                     bucket['qtyMultiplier'] = form.get(key, [''])[0]
+                elif field == 'riskPct':
+                    bucket['riskPct'] = form.get(key, [''])[0]
 
             target_ticker = form.get('saveTicker', [''])[0].strip()
             config = load_config()
@@ -4154,101 +4342,167 @@ class Handler(BaseHTTPRequestHandler):
             qty = form.get('qty', [''])[0]
             symbol = form.get('symbol', [''])[0]
             venue = form.get('venue', [''])[0]
-
-            config = load_config()
-            destination = _current_destination(config, ticker, broker)
-            destination['symbol'] = symbol or destination.get('symbol')
-            venue_key = _broker_venue_key(broker)
-            destination[venue_key] = venue or destination.get(venue_key)
-
-            if qty in ('', None):
-                return self._json(400, {'error': 'missing_quick_qty', 'ticker': ticker, 'broker': broker})
-            try:
-                quick_qty_num = abs(float(qty))
-            except Exception:
-                return self._json(400, {'error': 'invalid_quick_qty', 'qty': qty, 'ticker': ticker, 'broker': broker})
-            if quick_qty_num <= 0:
-                return self._json(400, {'error': 'invalid_quick_qty', 'qty': qty, 'ticker': ticker, 'broker': broker})
-
-            destination['qtyMode'] = 'fixed'
-            destination['side'] = side
-            destination['qty'] = int(quick_qty_num) if float(quick_qty_num).is_integer() else quick_qty_num
-
-            route = {
-                'id': f'quick-{ticker}-{broker}',
-                'name': f'Quick order {ticker} -> {broker}',
-                'destinations': [destination],
-            }
+            destination = {}
             payload = {
                 'sourceTicker': ticker,
                 'side': side,
-                'qty': destination['qty'],
+                'qty': qty,
             }
 
-            result = execute_route_sync(payload, route)
-            first_dest = ((result or {}).get('destinations') or [{}])[0] or {}
-            broker_result = first_dest.get('results') or {}
-            dry_run = bool(first_dest.get('dryRun') or (isinstance(broker_result, dict) and broker_result.get('dryRun')))
-            broker_ok = True
-            broker_error = ''
-            broker_state = 'ok'
-            if broker == 'bybit':
-                broker_ok = broker_result.get('retCode') == 0
-                broker_error = str(broker_result.get('retMsg') or broker_result.get('raw') or broker_result.get('retCode') or '')
-            elif broker == 'bingx':
-                broker_ok = broker_result.get('code') == 0
-                broker_error = str(broker_result.get('msg') or broker_result.get('raw') or broker_result.get('code') or '')
-            elif broker == 'schwab':
-                status_code = broker_result.get('status_code')
-                order_id = broker_result.get('order_id')
-                order_status = str(broker_result.get('order_status') or '').upper()
-                broker_ok = status_code in (200, 201)
-                broker_error = '' if broker_ok else str(broker_result.get('text') or broker_result.get('error') or f'status_code={status_code}')
-                if broker_ok:
-                    parts = []
-                    if status_code:
-                        parts.append(f"status_code={status_code}")
-                    if order_id:
-                        parts.append(f"order_id={order_id}")
-                    if order_status:
-                        parts.append(f"order_status={order_status}")
-                    broker_error = ' '.join(parts)
-                    if order_status in ERROR_ORDER_STATUSES:
-                        broker_ok = False
-                    elif order_status and order_status not in ('FILLED', 'EXECUTED'):
-                        broker_state = 'accepted'
-            else:
-                broker_error = str(broker_result.get('error') or broker_result.get('details') or '')
-                broker_ok = not bool(broker_error)
-            journal_status = 'dry_run' if dry_run else ('execution_error' if not broker_ok else broker_state)
-            if broker == 'schwab' and not dry_run:
-                _remember_broker_order_state(
-                    'schwab',
-                    symbol or ticker,
-                    broker_result.get('order_status') or ('ACCEPTED' if broker_ok else ''),
-                    broker_result.get('order_id') or '',
-                    f"status_code={broker_result.get('status_code')}" if broker_result.get('status_code') else '',
-                )
-            append_journal({
-                'time': _utcnow_iso(),
-                'kind': 'quick-order',
-                'ticker': ticker,
-                'side': side,
-                'qty': destination['qty'],
-                'brokers': [broker],
-                'status': journal_status,
-                'symbol': symbol,
-                'venue': venue,
-                'details': broker_error,
-            })
+            try:
+                config = load_config()
+                destination = _current_destination(config, ticker, broker)
+                destination['symbol'] = symbol or destination.get('symbol')
+                venue_key = _broker_venue_key(broker)
+                destination[venue_key] = venue or destination.get(venue_key)
 
-            return self._json(200 if broker_ok or dry_run else 500, {
-                'status': ('dry_run' if dry_run else (broker_state if broker_ok else 'error')),
-                'quickOrder': True,
-                'orderQty': destination['qty'],
-                'result': result,
-                'details': broker_error,
-            })
+                if qty in ('', None):
+                    error_payload = {'error': 'missing_quick_qty', 'ticker': ticker, 'broker': broker}
+                    _safe_append_journal({
+                        'time': _utcnow_iso(),
+                        'kind': 'quick-order',
+                        'ticker': ticker,
+                        'side': side,
+                        'qty': qty,
+                        'brokers': [broker],
+                        'status': 'error',
+                        'symbol': destination.get('symbol', symbol),
+                        'venue': destination.get(venue_key, venue),
+                        'details': f"error=missing_quick_qty | payload={_short_json(payload)}",
+                    })
+                    return self._json(400, error_payload)
+                try:
+                    quick_qty_num = abs(float(qty))
+                except Exception:
+                    error_payload = {'error': 'invalid_quick_qty', 'qty': qty, 'ticker': ticker, 'broker': broker}
+                    _safe_append_journal({
+                        'time': _utcnow_iso(),
+                        'kind': 'quick-order',
+                        'ticker': ticker,
+                        'side': side,
+                        'qty': qty,
+                        'brokers': [broker],
+                        'status': 'error',
+                        'symbol': destination.get('symbol', symbol),
+                        'venue': destination.get(venue_key, venue),
+                        'details': f"error=invalid_quick_qty | payload={_short_json(payload)}",
+                    })
+                    return self._json(400, error_payload)
+                if quick_qty_num <= 0:
+                    error_payload = {'error': 'invalid_quick_qty', 'qty': qty, 'ticker': ticker, 'broker': broker}
+                    _safe_append_journal({
+                        'time': _utcnow_iso(),
+                        'kind': 'quick-order',
+                        'ticker': ticker,
+                        'side': side,
+                        'qty': qty,
+                        'brokers': [broker],
+                        'status': 'error',
+                        'symbol': destination.get('symbol', symbol),
+                        'venue': destination.get(venue_key, venue),
+                        'details': f"error=invalid_quick_qty_nonpositive | payload={_short_json(payload)}",
+                    })
+                    return self._json(400, error_payload)
+
+                destination['qtyMode'] = 'fixed'
+                destination['side'] = side
+                destination['qty'] = int(quick_qty_num) if float(quick_qty_num).is_integer() else quick_qty_num
+                payload['qty'] = destination['qty']
+
+                route = {
+                    'id': f'quick-{ticker}-{broker}',
+                    'name': f'Quick order {ticker} -> {broker}',
+                    'destinations': [destination],
+                }
+
+                result = execute_route_sync(payload, route)
+                first_dest = ((result or {}).get('destinations') or [{}])[0] or {}
+                broker_result = first_dest.get('results') or {}
+                dry_run = bool(first_dest.get('dryRun') or (isinstance(broker_result, dict) and broker_result.get('dryRun')))
+                broker_ok = True
+                broker_error = ''
+                broker_state = 'ok'
+                if broker == 'bybit':
+                    broker_ok = broker_result.get('retCode') == 0
+                    broker_error = str(broker_result.get('retMsg') or broker_result.get('raw') or broker_result.get('code') or broker_result.get('retCode') or '')
+                elif broker == 'bingx':
+                    broker_ok = broker_result.get('code') == 0
+                    broker_error = str(broker_result.get('msg') or broker_result.get('raw') or broker_result.get('error') or broker_result.get('code') or '')
+                elif broker == 'schwab':
+                    status_code = broker_result.get('status_code')
+                    order_id = broker_result.get('order_id')
+                    order_status = str(broker_result.get('order_status') or '').upper()
+                    broker_ok = status_code in (200, 201)
+                    broker_error = '' if broker_ok else str(broker_result.get('text') or broker_result.get('error') or f'status_code={status_code}')
+                    if broker_ok:
+                        parts = []
+                        if status_code:
+                            parts.append(f"status_code={status_code}")
+                        if order_id:
+                            parts.append(f"order_id={order_id}")
+                        if order_status:
+                            parts.append(f"order_status={order_status}")
+                        broker_error = ' '.join(parts)
+                        if order_status in ERROR_ORDER_STATUSES:
+                            broker_ok = False
+                        elif order_status and order_status not in ('FILLED', 'EXECUTED'):
+                            broker_state = 'accepted'
+                else:
+                    broker_error = str(first_dest.get('error') or broker_result.get('error') or broker_result.get('details') or '')
+                    broker_ok = not bool(broker_error)
+                journal_status = 'dry_run' if dry_run else ('execution_error' if not broker_ok else broker_state)
+                if broker == 'schwab' and not dry_run:
+                    _remember_broker_order_state(
+                        'schwab',
+                        symbol or ticker,
+                        broker_result.get('order_status') or ('ACCEPTED' if broker_ok else ''),
+                        broker_result.get('order_id') or '',
+                        f"status_code={broker_result.get('status_code')}" if broker_result.get('status_code') else '',
+                    )
+                _safe_append_journal({
+                    'time': _utcnow_iso(),
+                    'kind': 'quick-order',
+                    'ticker': ticker,
+                    'side': side,
+                    'qty': destination['qty'],
+                    'brokers': [broker],
+                    'status': journal_status,
+                    'symbol': destination.get('symbol', symbol),
+                    'venue': destination.get(venue_key, venue),
+                    'details': (
+                        (f"error={broker_error}" if broker_error else 'error=')
+                        + f" | payload={_short_json(payload)}"
+                        + f" | route={_short_json(route, 260)}"
+                        + f" | result={_quick_order_response_summary(result)}"
+                    ),
+                })
+
+                return self._json(200 if broker_ok or dry_run else 500, {
+                    'status': ('dry_run' if dry_run else (broker_state if broker_ok else 'error')),
+                    'quickOrder': True,
+                    'orderQty': destination['qty'],
+                    'result': result,
+                    'details': broker_error,
+                })
+            except Exception as e:
+                _safe_append_journal({
+                    'time': _utcnow_iso(),
+                    'kind': 'quick-order',
+                    'ticker': ticker,
+                    'side': side,
+                    'qty': payload.get('qty', qty),
+                    'brokers': [broker] if broker else [],
+                    'status': 'error',
+                    'symbol': (destination or {}).get('symbol', symbol),
+                    'venue': (destination or {}).get(_broker_venue_key(broker), venue) if broker else venue,
+                    'details': f"error={str(e)} | payload={_short_json(payload)} | traceback={_short_text(traceback.format_exc(), 1200)}",
+                })
+                return self._json(500, {
+                    'error': 'quick_order_internal_error',
+                    'details': str(e),
+                    'ticker': ticker,
+                    'broker': broker,
+                })
 
         if self.path != '/webhook':
             return self._json(404, {'error': 'not_found'})
