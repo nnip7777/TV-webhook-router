@@ -417,7 +417,7 @@ class BingXBroker:
     def place_limit_order(
         self,
         prepared: Dict[str, Any],
-        position_side: str = 'BOTH',
+        position_side: Optional[str] = 'BOTH',
         reduce_only: Optional[bool] = None,
         client_order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -428,8 +428,10 @@ class BingXBroker:
             'quantity': prepared['quantity'],
             'price': prepared['price'],
             'timeInForce': 'GTC',
-            'positionSide': str(position_side or 'BOTH').upper(),
         }
+        normalized_position_side = str(position_side or '').upper().strip()
+        if normalized_position_side:
+            params['positionSide'] = normalized_position_side
         if client_order_id:
             params['clientOrderId'] = str(client_order_id)
         if reduce_only is not None:
