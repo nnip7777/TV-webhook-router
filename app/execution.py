@@ -211,6 +211,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
     reduce_only = destination.get('reduceOnly') if 'reduceOnly' in destination else payload.get('reduceOnly')
     position_side = str(destination.get('positionSide', payload.get('positionSide', 'BOTH')) or 'BOTH').upper()
+    bingx_hedged_mode_raw = destination.get('hedgedMode', payload.get('hedgedMode'))
+    bingx_hedged_mode = None if bingx_hedged_mode_raw in (None, '') else bool(bingx_hedged_mode_raw)
     dry_run = bool(destination.get('dryRun', False) or payload.get('dryRun', False))
     testnet = bool(destination.get('testnet', False))
     price = destination.get('price') or payload.get('price')
@@ -232,6 +234,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'stage': 'init',
         'stageTrace': ['init'],
     }
+    if bingx_hedged_mode is not None:
+        request_payload['hedgedMode'] = bingx_hedged_mode
     if reduce_only is not None:
         request_payload['reduceOnly'] = bool(reduce_only)
     if client_order_id:
@@ -282,9 +286,37 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             contract_display = str(contract_meta.get('displayName') or '').upper()
             is_non_crypto_index = bool(contract_asset.startswith('NCSI') or 'NASDAQ' in contract_display or 'DXY' in contract_display)
             api_position_side = position_side
-            if is_non_crypto_index:
+
+            current_position_mode = None
+            if is_non_crypto_index or bingx_hedged_mode is not None:
+                _set_stage('get_position_mode')
+                position_mode_info = client.get_position_mode()
+                request_payload['positionModeInfo'] = position_mode_info
+                dual_side = str(((position_mode_info.get('data') or {}).get('dualSidePosition')) or '').lower()
+                if dual_side in ('true', 'false'):
+                    current_position_mode = (dual_side == 'true')
+                    request_payload['hedgedModeCurrent'] = current_position_mode
+
+            desired_hedged_mode = bingx_hedged_mode
+            if desired_hedged_mode is None and is_non_crypto_index:
+                desired_hedged_mode = True
+                request_payload['hedgedModeDesired'] = True
+
+            if desired_hedged_mode is not None and current_position_mode is not None and desired_hedged_mode != current_position_mode:
+                _set_stage('set_position_mode')
+                mode_change = client.set_position_mode(desired_hedged_mode)
+                request_payload['positionModeChange'] = mode_change
+                refreshed_dual_side = str((((mode_change.get('data') or {}).get('dualSidePosition')) or '')).lower()
+                if refreshed_dual_side in ('true', 'false'):
+                    current_position_mode = (refreshed_dual_side == 'true')
+                    request_payload['hedgedModeCurrent'] = current_position_mode
+
+            if current_position_mode is True:
+                api_position_side = 'LONG' if side == 'buy' else 'SHORT'
+                request_payload['positionSideMode'] = 'hedge'
+            else:
                 api_position_side = 'BOTH'
-                request_payload['positionSideMode'] = 'one_way_for_non_crypto'
+                request_payload['positionSideMode'] = 'one_way'
             if dry_run:
                 _set_stage('dry_run_ready')
                 return {

@@ -221,6 +221,14 @@ class BingXBroker:
             'directionType': int(direction_type),
         })
 
+    def get_position_mode(self) -> Dict[str, Any]:
+        return self._request('GET', '/openApi/swap/v1/positionSide/dual')
+
+    def set_position_mode(self, hedged: bool) -> Dict[str, Any]:
+        return self._request('POST', '/openApi/swap/v1/positionSide/dual', params={
+            'dualSidePosition': 'true' if bool(hedged) else 'false',
+        })
+
     def get_contracts(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {}
         if symbol:
