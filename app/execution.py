@@ -202,6 +202,25 @@ def _bingx_position_qty(position: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _bingx_position_buckets(positions_payload: Dict[str, Any], symbol: str) -> Dict[str, float]:
+    rows = (positions_payload or {}).get('data') or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    symbol_norm = str(symbol or '').replace('-', '').upper()
+    buckets = {'LONG': 0.0, 'SHORT': 0.0}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_symbol = str(row.get('symbol') or '').replace('-', '').upper()
+        if row_symbol != symbol_norm:
+            continue
+        row_side = str(row.get('positionSide') or row.get('side') or '').upper()
+        if row_side not in ('LONG', 'SHORT'):
+            continue
+        buckets[row_side] += _bingx_position_qty(row)
+    return buckets
+
+
 async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -> Dict[str, Any]:
     broker = destination['broker']
     symbol = destination['symbol']
@@ -343,6 +362,24 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             if api_position_side in (None, 'LONG', 'SHORT'):
                 requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
 
+            if is_non_crypto_index and current_position_mode is True:
+                _set_stage('get_positions_before')
+                positions_before_for_netting = client.get_positions(prepared['symbol'])
+                buckets_before = _bingx_position_buckets(positions_before_for_netting, prepared['symbol'])
+                request_payload['positionBucketsBefore'] = buckets_before
+                if side == 'buy':
+                    if buckets_before.get('SHORT', 0.0) > 0:
+                        requested_position_side = 'SHORT'
+                    else:
+                        requested_position_side = 'LONG'
+                else:
+                    if buckets_before.get('LONG', 0.0) > 0:
+                        requested_position_side = 'LONG'
+                    else:
+                        requested_position_side = 'SHORT'
+                api_position_side = requested_position_side
+                request_payload['positionSideNetting'] = requested_position_side
+
             risk_control_enabled = bool(risk_pct is not None and risk_pct > 0)
             if is_non_crypto_index and risk_pct is not None:
                 request_payload['riskControlMode'] = 'enabled_for_non_crypto'
@@ -352,8 +389,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 balance = client.get_balance()
                 equity = _bingx_account_equity(balance)
                 margin_ops['balance'] = balance
-                _set_stage('get_positions_before')
-                positions_before = client.get_positions(prepared['symbol'])
+                if is_non_crypto_index and current_position_mode is True:
+                    positions_before = positions_before_for_netting
+                else:
+                    _set_stage('get_positions_before')
+                    positions_before = client.get_positions(prepared['symbol'])
                 before_position = _bingx_extract_position(positions_before, prepared['symbol'], requested_position_side)
                 before_qty = _bingx_position_qty(before_position)
                 mark_price = float(prepared['price'])
