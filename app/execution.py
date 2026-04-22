@@ -303,7 +303,14 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             contract_meta = prepared.get('contract') or {}
             contract_asset = str(contract_meta.get('asset') or '').upper()
             contract_display = str(contract_meta.get('displayName') or '').upper()
-            is_non_crypto_index = bool(contract_asset.startswith('NCSI') or 'NASDAQ' in contract_display or 'DXY' in contract_display)
+            contract_symbol = str((prepared.get('contract') or {}).get('symbol') or prepared.get('symbol') or '').upper()
+            is_non_crypto_index = bool(
+                contract_asset.startswith('NCS')
+                or contract_symbol.startswith('NCS')
+                or 'NASDAQ' in contract_display
+                or 'SPY' in contract_display
+                or 'DXY' in contract_display
+            )
             api_position_side = position_side
 
             current_position_mode = None
