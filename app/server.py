@@ -2722,7 +2722,7 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
         if not broker_name:
             continue
         bucket = merged.setdefault(broker_name, {
-            'enabled': True,
+            'enabled': False,
             'symbol': '',
             'venue': '',
             'qty': '',
@@ -2730,9 +2730,6 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
             'riskPct': '',
             'limits': {},
         })
-        if bucket.get('enabled'):
-            continue
-        bucket['enabled'] = True
         bucket['symbol'] = bucket.get('symbol') or destination.get('symbol', '')
         venue_key = _broker_venue_key(broker_name)
         bucket['venue'] = bucket.get('venue') or destination.get(venue_key, '')
@@ -2746,14 +2743,9 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
 def _build_ui_route(config: Dict[str, Any], ticker: str, broker_options: Dict[str, Dict[str, Any]], atomic_qty: str = '', previous_route: Dict[str, Any] = None) -> Dict[str, Any]:
     previous_route = previous_route or {}
     merged_options = _merge_previous_broker_options(previous_route, broker_options)
-    existing_brokers = {
-        str(destination.get('broker') or '').strip()
-        for destination in (previous_route.get('destinations') or [])
-        if destination.get('broker')
-    }
     enabled_brokers = [
         broker_name for broker_name, options in merged_options.items()
-        if (options.get('enabled') or broker_name in existing_brokers) and config.get('brokers', {}).get(broker_name, {}).get('enabled', False)
+        if options.get('enabled') and config.get('brokers', {}).get(broker_name, {}).get('enabled', False)
     ]
     if not enabled_brokers:
         return {}

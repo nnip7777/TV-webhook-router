@@ -283,8 +283,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             is_non_crypto_index = bool(contract_asset.startswith('NCSI') or 'NASDAQ' in contract_display or 'DXY' in contract_display)
             api_position_side = position_side
             if is_non_crypto_index and str(position_side or 'BOTH').upper() == 'BOTH':
-                api_position_side = None
-                request_payload['positionSideMode'] = 'omitted_for_non_crypto'
+                api_position_side = 'LONG' if side == 'buy' else 'SHORT'
+                request_payload['positionSideMode'] = 'directional_for_non_crypto'
             if dry_run:
                 _set_stage('dry_run_ready')
                 return {
@@ -308,7 +308,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             requested_position_side = position_side
             if requested_position_side == 'BOTH':
                 requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
-            if api_position_side is None:
+            if api_position_side in (None, 'LONG', 'SHORT'):
                 requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
 
             if risk_pct is not None and risk_pct > 0:
