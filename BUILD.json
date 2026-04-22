@@ -1,15 +1,15 @@
 {
-  "version": "2026.04.22-100",
-  "builtAt": "2026-04-22T08:57:17.262526+00:00",
-  "fileCount": 19,
+  "version": "2026.04.22-101",
+  "builtAt": "2026-04-22T09:17:22.456831+00:00",
+  "fileCount": 18,
   "files": {
     "VERSION": {
-      "sha256": "b077f6578585a732612ddfe4d995368f58ac2264839288d566c799e559c1c3b1",
+      "sha256": "4f46edf0938b7286b9ce77eb9c8b5c015ac5b938776ece3c44cca54aac623688",
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "0b59fed19b7cf019de8ee9e35bf84ec9481ff44003f1a8ccb3e8d94719ce1c33",
-      "bytes": 2663
+      "sha256": "882ae6fa0cb5f505b8828a0ab5da7c91d12623cba601e68ca07830d58533034d",
+      "bytes": 2795
     },
     "CHANGELOG.md": {
       "sha256": "c8f33409c0ff52b47ec3fc3511f1bbcb39a33bfea2c953d3c5431f612318138e",
@@ -30,10 +30,6 @@
     "webhook-router.service.example": {
       "sha256": "4d74b9e233d97c66a8a6798f5677eb75daecce79c691e74df747f3c2419fa4da",
       "bytes": 312
-    },
-    "config/routing.json": {
-      "sha256": "859725ca9e84b91e194e2eaf0622c5d8aefb24b35d82e0317a186c81700b8eaf",
-      "bytes": 6229
     },
     "app/server.py": {
       "sha256": "c2fb9a2da01eff065fe706f638b05e73b20e18639732ab3aec6b061ea3cf1f05",
