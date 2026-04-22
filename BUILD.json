@@ -1,11 +1,15 @@
 {
-  "version": "2026.04.22-99",
-  "builtAt": "2026-04-22T08:56:55.396428+00:00",
-  "fileCount": 18,
+  "version": "2026.04.22-100",
+  "builtAt": "2026-04-22T08:57:17.262526+00:00",
+  "fileCount": 19,
   "files": {
     "VERSION": {
-      "sha256": "7f26a2a7a524139ffce5d363b702b9e89f40243ab345813c01020f814d6b7db5",
-      "bytes": 14
+      "sha256": "b077f6578585a732612ddfe4d995368f58ac2264839288d566c799e559c1c3b1",
+      "bytes": 15
+    },
+    "BUILD.json": {
+      "sha256": "0b59fed19b7cf019de8ee9e35bf84ec9481ff44003f1a8ccb3e8d94719ce1c33",
+      "bytes": 2663
     },
     "CHANGELOG.md": {
       "sha256": "c8f33409c0ff52b47ec3fc3511f1bbcb39a33bfea2c953d3c5431f612318138e",
