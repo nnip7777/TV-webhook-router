@@ -374,13 +374,17 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 positions_before_for_netting = client.get_positions(prepared['symbol'])
                 buckets_before = _bingx_position_buckets(positions_before_for_netting, prepared['symbol'])
                 request_payload['positionBucketsBefore'] = buckets_before
+                long_qty = float(buckets_before.get('LONG', 0.0) or 0.0)
+                short_qty = float(buckets_before.get('SHORT', 0.0) or 0.0)
+                net_qty = long_qty - short_qty
+                request_payload['positionNetBefore'] = net_qty
                 if side == 'buy':
-                    if buckets_before.get('SHORT', 0.0) > 0:
+                    if net_qty < 0:
                         requested_position_side = 'SHORT'
                     else:
                         requested_position_side = 'LONG'
                 else:
-                    if buckets_before.get('LONG', 0.0) > 0:
+                    if net_qty > 0:
                         requested_position_side = 'LONG'
                     else:
                         requested_position_side = 'SHORT'
