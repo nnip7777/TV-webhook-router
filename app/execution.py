@@ -343,9 +343,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             if api_position_side in (None, 'LONG', 'SHORT'):
                 requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
 
-            risk_control_enabled = bool(risk_pct is not None and risk_pct > 0 and not is_non_crypto_index)
+            risk_control_enabled = bool(risk_pct is not None and risk_pct > 0)
             if is_non_crypto_index and risk_pct is not None:
-                request_payload['riskControlMode'] = 'skipped_for_non_crypto'
+                request_payload['riskControlMode'] = 'enabled_for_non_crypto'
 
             if risk_control_enabled:
                 _set_stage('get_balance_before')
@@ -363,8 +363,17 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 expected_notional = abs(mark_price * expected_final_qty)
                 target_margin_pre = min(expected_notional, allowed_loss) if allowed_loss > 0 else 0.0
                 raw_leverage = (expected_notional / target_margin_pre) if target_margin_pre > 0 else 1.0
-                leverage = max(1, min(125, int(math.ceil(raw_leverage))))
+                leverage_cap = 125
+                if is_non_crypto_index:
+                    try:
+                        contract_leverage = int(float(contract_meta.get('maxLongLeverage') or contract_meta.get('maxShortLeverage') or contract_meta.get('maxLeverage') or 0))
+                        if contract_leverage > 0:
+                            leverage_cap = min(leverage_cap, contract_leverage)
+                    except Exception:
+                        leverage_cap = 125
+                leverage = max(1, min(leverage_cap, int(math.ceil(raw_leverage))))
                 request_payload['riskControl'] = {
+                    'mode': 'non_crypto' if is_non_crypto_index else 'standard',
                     'equity': equity,
                     'allowedLoss': allowed_loss,
                     'beforeQty': before_qty,
@@ -376,7 +385,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 _set_stage('set_margin_type')
                 margin_ops['setMarginType'] = client.set_margin_type(prepared['symbol'], 'ISOLATED')
                 _set_stage('set_leverage')
-                margin_ops['setLeverage'] = client.set_leverage(prepared['symbol'], requested_position_side, leverage)
+                leverage_side = requested_position_side
+                if leverage_side not in ('LONG', 'SHORT'):
+                    leverage_side = 'LONG' if side == 'buy' else 'SHORT'
+                margin_ops['setLeverage'] = client.set_leverage(prepared['symbol'], leverage_side, leverage)
 
             _set_stage('place_limit_order')
             result = client.place_limit_order(

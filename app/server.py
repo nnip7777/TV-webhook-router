@@ -485,7 +485,8 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
             api_open = str(item.get('apiStateOpen', 'true')).lower() != 'false'
             broker_open_raw = item.get('brokerState', 'true')
             broker_open = str(broker_open_raw).lower() != 'false'
-            if not api_open or not broker_open:
+            effective_open = api_open if broker_name == 'bingx' else (api_open and broker_open)
+            if not effective_open:
                 filtered_out_closed += 1
             symbols.append(symbol)
             display_name = str(item.get('displayName') or '').strip()
@@ -1876,7 +1877,11 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
     destination['broker'] = broker_name
     symbol_map = broker_cfg.get('symbolMap', {})
     best_candidate = _best_catalog_candidate(ticker, broker_name, instruments or {'instruments': []})
-    destination['symbol'] = (options.get('symbol') or '').strip() or best_candidate.get('symbol') or symbol_map.get(ticker, ticker)
+    manual_symbol = str(options.get('symbol') or '').strip()
+    if manual_symbol:
+        destination['symbol'] = manual_symbol
+    else:
+        destination['symbol'] = best_candidate.get('symbol') or symbol_map.get(ticker, ticker)
 
     venue_key = _broker_venue_key(broker_name)
     venue_value = (options.get('venue') or '').strip()
@@ -2717,10 +2722,12 @@ async def _alor_get_positions(client_id: str, access_token: str):
 
 def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_options: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     merged = copy.deepcopy(broker_options or {})
-    for destination in (previous_route or {}).get('destinations', []) or []:
-        broker_name = str(destination.get('broker') or '').strip()
-        if not broker_name:
-            continue
+    previous_destinations = {
+        str(destination.get('broker') or '').strip(): destination
+        for destination in (previous_route or {}).get('destinations', []) or []
+        if str(destination.get('broker') or '').strip()
+    }
+    for broker_name, destination in previous_destinations.items():
         bucket = merged.setdefault(broker_name, {
             'enabled': False,
             'symbol': '',
@@ -2730,9 +2737,11 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
             'riskPct': '',
             'limits': {},
         })
-        bucket['symbol'] = bucket.get('symbol') or destination.get('symbol', '')
+        if 'enabled' not in bucket:
+            bucket['enabled'] = True
+        bucket['symbol'] = str(bucket.get('symbol') or destination.get('symbol') or '').strip()
         venue_key = _broker_venue_key(broker_name)
-        bucket['venue'] = bucket.get('venue') or destination.get(venue_key, '')
+        bucket['venue'] = str(bucket.get('venue') or destination.get(venue_key) or '').strip()
         bucket['qty'] = bucket.get('qty') or destination.get('qty', '')
         bucket['qtyMultiplier'] = bucket.get('qtyMultiplier') or destination.get('qtyMultiplier', '')
         bucket['riskPct'] = bucket.get('riskPct') or destination.get('riskPct', '')

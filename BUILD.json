@@ -1,10 +1,10 @@
 {
-  "version": "2026.04.22-98",
-  "builtAt": "2026-04-22T07:46:57.290512+00:00",
-  "fileCount": 17,
+  "version": "2026.04.22-99",
+  "builtAt": "2026-04-22T08:56:55.396428+00:00",
+  "fileCount": 18,
   "files": {
     "VERSION": {
-      "sha256": "60e4b82bbf7817ced9b15aa35057974a8a5fc80804ff24a30ed1c87e8b979541",
+      "sha256": "7f26a2a7a524139ffce5d363b702b9e89f40243ab345813c01020f814d6b7db5",
       "bytes": 14
     },
     "CHANGELOG.md": {
@@ -32,16 +32,16 @@
       "bytes": 6229
     },
     "app/server.py": {
-      "sha256": "7083ea10522041a668eb17e87a65b7690238029ccb61dae2e8bdfc7f27e6a381",
-      "bytes": 219064
+      "sha256": "c2fb9a2da01eff065fe706f638b05e73b20e18639732ab3aec6b061ea3cf1f05",
+      "bytes": 219464
     },
     "app/settings.py": {
       "sha256": "0851dcb3408167da4c7524b3ebaaabfe6ea1b4566734f69e32512926c7e57add",
       "bytes": 5225
     },
     "app/execution.py": {
-      "sha256": "9556183bc512b9e578bf7d9f19d5afb7f8328e67871c58f31c81f0df622a1118",
-      "bytes": 26786
+      "sha256": "a97513b301b7834a1cd3022daf7ce37031e79701bd276851db9e04e5fc040f52",
+      "bytes": 27512
     },
     "app/bybit_adapter.py": {
       "sha256": "40479b2fe04a07ba9db55d8f792b7da903ea96dd868dc39a1e5583956b0e58d3",
@@ -62,6 +62,10 @@
     "external/smart_order_executor.py": {
       "sha256": "30c7b739869e39aedf670e6f5a9ad4a7e087ab8dcb55cda25156177de2f27162",
       "bytes": 19451
+    },
+    "scripts/generate_build_manifest.py": {
+      "sha256": "f360f1d6722913bae2dcecad3b7ba6d5f466c1b40e79906318ee43ba2ecfb93a",
+      "bytes": 1582
     },
     "scripts/bingx_split_tunnel_macos.sh": {
       "sha256": "e7743988f6ea856d0f6a635d261daccefd347289371e67a306a507d35e719486",
