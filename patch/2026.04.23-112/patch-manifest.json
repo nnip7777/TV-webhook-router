@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-112",
-  "builtAt": "2026-04-23T05:22:17.312106+00:00",
+  "createdAt": "2026-04-23T05:22:17.397064+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "29196077d4b4d0183791b7dea45faf07cbe511e4e0ede0375edb5e8abb884bc2",
+      "sha256": "f49db403da061e063b1c3597dd3464c7028b36e485c9dd1b1de0081f65172b9d",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Remove dedup, process webhook queue strictly sequentially with single worker"
 }
