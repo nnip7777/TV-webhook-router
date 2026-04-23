@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-108",
-  "builtAt": "2026-04-23T02:24:11.955036+00:00",
+  "createdAt": "2026-04-23T02:24:11.974863+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "573045547841d99fad057fec072714be5d01fe79abeb22c2b7a4343af1edc371",
+      "sha256": "2ef25d39fa1fb9b8fc2e6056297b038beff602ced8aa7ac05db0c09f8c3576f6",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Fix BingX hedge one-webhook-one-step logic: close opposite OR open same-side, never auto-flip"
 }
