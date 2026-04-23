@@ -66,6 +66,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
     symbol = destination['symbol']
     side = str(destination.get('side', payload['side'])).lower()
     quantity = destination.get('qty', payload['qty'])
+    qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
     category = destination.get('category', 'linear')
     execution_mode = destination.get('executionMode', destination.get('mode', 'market'))
     reduce_only = bool(destination.get('reduceOnly', False))
@@ -74,6 +75,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'symbol': symbol,
         'side': side,
         'qty': quantity,
+        'qtyKind': qty_kind,
         'category': category,
         'executionMode': execution_mode,
         'reduceOnly': reduce_only,
@@ -226,6 +228,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
     symbol = destination['symbol']
     side = str(destination.get('side', payload['side'])).lower()
     quantity = destination.get('qty', payload['qty'])
+    qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
     category = destination.get('category', 'swap')
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
     reduce_only = destination.get('reduceOnly') if 'reduceOnly' in destination else payload.get('reduceOnly')
@@ -247,6 +250,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'symbol': symbol,
         'side': side,
         'qty': quantity,
+        'qtyKind': qty_kind,
         'category': category,
         'executionMode': execution_mode,
         'positionSide': position_side,
@@ -378,18 +382,20 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 short_qty = float(buckets_before.get('SHORT', 0.0) or 0.0)
                 net_qty = long_qty - short_qty
                 request_payload['positionNetBefore'] = net_qty
-                if side == 'buy':
-                    if net_qty < 0:
-                        requested_position_side = 'SHORT'
-                    else:
-                        requested_position_side = 'LONG'
+                opposite_qty = short_qty if side == 'buy' else long_qty
+                same_side_qty = long_qty if side == 'buy' else short_qty
+                request_payload['positionOppositeBefore'] = opposite_qty
+                request_payload['positionSameSideBefore'] = same_side_qty
+                if opposite_qty > 0:
+                    requested_position_side = 'SHORT' if side == 'buy' else 'LONG'
+                    api_position_side = requested_position_side
+                    request_payload['positionSideNetting'] = requested_position_side
+                    request_payload['nettingAction'] = 'close_opposite_leg'
                 else:
-                    if net_qty > 0:
-                        requested_position_side = 'LONG'
-                    else:
-                        requested_position_side = 'SHORT'
-                api_position_side = requested_position_side
-                request_payload['positionSideNetting'] = requested_position_side
+                    requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
+                    api_position_side = requested_position_side
+                    request_payload['positionSideNetting'] = requested_position_side
+                    request_payload['nettingAction'] = 'open_same_side_leg'
 
             risk_control_enabled = bool(risk_pct is not None and risk_pct > 0)
             if is_non_crypto_index and risk_pct is not None:

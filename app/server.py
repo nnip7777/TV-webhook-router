@@ -1649,12 +1649,18 @@ def _render_template(value: Any, context: Dict[str, Any]):
 def _resolve_qty(payload: Dict[str, Any], destination: Dict[str, Any]) -> Any:
     mode = destination.get('qtyMode', 'pass-through')
     payload_qty = payload.get('qty')
+    payload_qty_kind = str(payload.get('qtyKind') or payload.get('sizeKind') or 'contracts').strip().lower()
+    destination_qty_kind = str(destination.get('qtyKind') or destination.get('sizeKind') or payload_qty_kind or 'contracts').strip().lower()
 
     if mode == 'fixed':
         return destination.get('qty')
     if mode == 'multiplier':
         multiplier = destination.get('qtyMultiplier', 1)
         return float(payload_qty) * float(multiplier)
+    if mode == 'pass-through':
+        if destination_qty_kind != payload_qty_kind:
+            destination['qtyResolutionError'] = f'qty kind mismatch: payload={payload_qty_kind}, destination={destination_qty_kind}'
+        return payload_qty
     return payload_qty
 
 
@@ -1675,6 +1681,7 @@ def materialize_route(payload: Dict[str, Any], route: Dict[str, Any], config: Di
         }
         rendered = _render_template(merged, context)
         rendered['qty'] = _resolve_qty(payload, rendered)
+        rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or 'contracts').strip().lower()
         if 'side' not in rendered:
             rendered['side'] = payload.get('side')
         materialized_destinations.append(rendered)
@@ -1913,6 +1920,7 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
                 raise ValueError(f'min_qty:{min_qty_raw}')
             destination['qtyMode'] = 'fixed'
             destination['qty'] = int(qty_value) if qty_value.is_integer() else qty_value
+            destination['qtyKind'] = 'contracts'
             destination['sideMode'] = 'sign'
         except Exception:
             pass
