@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-115",
-  "builtAt": "2026-04-23T14:46:29.242587+00:00",
+  "createdAt": "2026-04-23T14:46:29.548736+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "1729eb1451e754909febe04bb9859e3624e46980149026ed0af22aaa1ebe2bce",
+      "sha256": "f7d71d492fb5ce2dc803291f95f61bac97905692e05f0903d169b85a6dc6620c",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Use BingX closePosition endpoint for hedge-mode opposite-leg closes"
 }
