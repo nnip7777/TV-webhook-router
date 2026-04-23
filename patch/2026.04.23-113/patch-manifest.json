@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-113",
-  "builtAt": "2026-04-23T09:58:46.500917+00:00",
+  "createdAt": "2026-04-23T09:58:46.519863+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "814eb2bbe17666ecbfed9c7e06e84df27fdd417bcbf7d74905237de2af18f9db",
+      "sha256": "b228b4bcdb6bbe82135eb07c94fb3d10c411a51c1019e5f70d996d9a7b87fd2f",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Unify quick-order with webhook queue by enqueueing into the same execution pipeline"
 }
