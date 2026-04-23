@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-106",
-  "builtAt": "2026-04-23T01:31:40.391894+00:00",
+  "createdAt": "2026-04-23T01:31:40.441922+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "dc84eba144218fbc993b654d3c6a99aa8373c262122fc640a1283bad07c85000",
+      "sha256": "1e162533b2173c16e7b40ca30bcd3d6226641724d55df1c2c2591b4cc693c6b4",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Full patch with VERSION/BUILD for qtyKind propagation and BingX hedge leg netting fix"
 }
