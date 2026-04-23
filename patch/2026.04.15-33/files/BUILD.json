@@ -1,0 +1,59 @@
+{
+  "version": "2026.04.15-33",
+  "builtAt": "2026-04-14T21:05:24.111461+00:00",
+  "fileCount": 13,
+  "files": {
+    "VERSION": {
+      "sha256": "b4ac8d1a507c034fdf0718f622d1ea0414ade8c56cec8f3d5901cf24d1c4b537",
+      "bytes": 14
+    },
+    "CHANGELOG.md": {
+      "sha256": "f828933699004c1a4d5736a8b4904d06e5d4d1280851eb911f38d897956a4928",
+      "bytes": 10931
+    },
+    "README.md": {
+      "sha256": "a25361728a0ca63a09cd1ce7632d3875becebd3c7946a75f17a5d3564bab8f2b",
+      "bytes": 3650
+    },
+    ".env.example": {
+      "sha256": "d1195904e09c5462e04256b05a238c70bbf8acb0a6a351cdf614381ccf774988",
+      "bytes": 1180
+    },
+    "requirements.txt": {
+      "sha256": "4c15f1120179e641222fbd8da60ab9e147d63a3f536a2f8168bd6df902a67ed6",
+      "bytes": 55
+    },
+    "webhook-router.service.example": {
+      "sha256": "4d74b9e233d97c66a8a6798f5677eb75daecce79c691e74df747f3c2419fa4da",
+      "bytes": 312
+    },
+    "app/server.py": {
+      "sha256": "b3446050641f97b79170e81ca635e9c26d63a1a8af7f445f60001d7908db5295",
+      "bytes": 137236
+    },
+    "app/settings.py": {
+      "sha256": "e299c63517244844f66b01fb1637519433ba738c0a0af39ec2b35ca9a88b36e1",
+      "bytes": 3967
+    },
+    "app/execution.py": {
+      "sha256": "2d2ef88c8b8a4b3b712c11eb0f8d3022903bfc056165860966e8310aba019a7f",
+      "bytes": 9246
+    },
+    "app/bybit_adapter.py": {
+      "sha256": "b20d7edba6e28e8d2f9751216ef35f1e0b1fa5cffb8763e78dc6e6c57cdf0e42",
+      "bytes": 4876
+    },
+    "app/finam_adapter.py": {
+      "sha256": "bcd5430000749180f559fddc5ad31e220131692abd227488a4f525a0ed6521e7",
+      "bytes": 1869
+    },
+    "app/schwab_adapter.py": {
+      "sha256": "5f61b136f1833784c35531299130feec0e4b99bc2e2d07ba8e1b432c5380ba79",
+      "bytes": 2829
+    },
+    "external/smart_order_executor.py": {
+      "sha256": "a98fe1daff1def874c9c7525917a20cd9ac89a27a28e1f1f9001dad473f58970",
+      "bytes": 20219
+    }
+  }
+}

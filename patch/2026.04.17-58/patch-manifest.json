@@ -1,0 +1,72 @@
+{
+  "version": "2026.04.17-58",
+  "createdAt": "2026-04-16T21:38:44.527028+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
+  "fileCount": 16,
+  "files": {
+    "VERSION": {
+      "sha256": "e3131e40d8afcb16eacc023493f908e6249595e37a06e6f2e307e1c5d839b5c2",
+      "bytes": 14
+    },
+    "BUILD.json": {
+      "sha256": "c2110362634bdded5a07ff4557aef92f32009612ca58c811da42378a89bd3214",
+      "bytes": 2056
+    },
+    "CHANGELOG.md": {
+      "sha256": "9f0187deae834f360abb3cdb4b16ab62fe8636d612272039b001bb68a4123fe7",
+      "bytes": 22267
+    },
+    "README.md": {
+      "sha256": "a25361728a0ca63a09cd1ce7632d3875becebd3c7946a75f17a5d3564bab8f2b",
+      "bytes": 3650
+    },
+    ".env.example": {
+      "sha256": "e191efc2834b5b64bb1d1668700ecdac2da9d4bb99b894ef0147c3d8af15a800",
+      "bytes": 1565
+    },
+    "requirements.txt": {
+      "sha256": "4c15f1120179e641222fbd8da60ab9e147d63a3f536a2f8168bd6df902a67ed6",
+      "bytes": 55
+    },
+    "webhook-router.service.example": {
+      "sha256": "4d74b9e233d97c66a8a6798f5677eb75daecce79c691e74df747f3c2419fa4da",
+      "bytes": 312
+    },
+    "app/server.py": {
+      "sha256": "add6873849d4d3a2884c2a090c1ba125e9670f11f4dde47adbb6452e3e5cdf82",
+      "bytes": 166737
+    },
+    "app/settings.py": {
+      "sha256": "51be6ff6f4ae372f3e8096625404fbe299115e66f1bed18a4db6404dfaa299dd",
+      "bytes": 4664
+    },
+    "app/execution.py": {
+      "sha256": "87449d66d0218d962867d90c41197345b22367532d8075f51d8cda58980a4702",
+      "bytes": 14001
+    },
+    "app/bybit_adapter.py": {
+      "sha256": "b20d7edba6e28e8d2f9751216ef35f1e0b1fa5cffb8763e78dc6e6c57cdf0e42",
+      "bytes": 4876
+    },
+    "app/bingx_adapter.py": {
+      "sha256": "306bae4222593a02cb76f2796f7e6cb93cf18c61d2db9f47929212e95cf58485",
+      "bytes": 10343
+    },
+    "app/finam_adapter.py": {
+      "sha256": "bcd5430000749180f559fddc5ad31e220131692abd227488a4f525a0ed6521e7",
+      "bytes": 1869
+    },
+    "app/schwab_adapter.py": {
+      "sha256": "02d0ffed1891bf8512f84272e6305e19984c4ebaac14f7ec6b4014780ea2464c",
+      "bytes": 3646
+    },
+    "external/smart_order_executor.py": {
+      "sha256": "30c7b739869e39aedf670e6f5a9ad4a7e087ab8dcb55cda25156177de2f27162",
+      "bytes": 19451
+    },
+    "scripts/generate_build_manifest.py": {
+      "sha256": "a59c89c1300992c0836494a2d6dab38ce580d440241fc952e36390bf9c2110b7",
+      "bytes": 1496
+    }
+  }
+}

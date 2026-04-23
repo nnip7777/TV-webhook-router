@@ -1,0 +1,17 @@
+{
+  "version": "2026.04.23-105",
+  "createdAt": "2026-04-23T01:27:48.992870+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
+  "fileCount": 2,
+  "files": {
+    "app/server.py": {
+      "sha256": "a102c95078fc76b745252b204b6c6770538db3bb384470dd2a8e07cc4afba5c0",
+      "bytes": 220150
+    },
+    "app/execution.py": {
+      "sha256": "6fd66e035a0701e54fae85c6f226a6d6901569998348221bb1e9c999d31ae2ab",
+      "bytes": 30576
+    }
+  },
+  "notes": "Hotfix: qtyKind propagation and BingX hedge leg netting fix"
+}

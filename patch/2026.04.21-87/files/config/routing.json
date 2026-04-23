@@ -1,0 +1,286 @@
+{
+  "version": 3,
+  "defaultExecution": {
+    "mode": "maker",
+    "allowMarket": false,
+    "smartRouting": true
+  },
+  "brokers": {
+    "alor": {
+      "label": "Alor",
+      "enabled": true,
+      "status": "ready",
+      "defaultDestination": {
+        "account": "P095154",
+        "exchange": "FORTS",
+        "executionMode": "maker",
+        "qtyMode": "pass-through"
+      },
+      "lookupVenues": [
+        "FORTS",
+        "MOEX",
+        "SPBX"
+      ],
+      "lookupSymbols": [
+        "NG-4.26",
+        "NG-4.26M270426PA2.35",
+        "DAX-6.26"
+      ],
+      "symbolMap": {
+        "NG1!": "NG-4.26",
+        "NGQ26": "NG-4.26"
+      }
+    },
+    "bybit": {
+      "label": "Bybit",
+      "enabled": true,
+      "status": "ready-live",
+      "defaultDestination": {
+        "account": "unified",
+        "category": "linear",
+        "executionMode": "market",
+        "qtyMode": "pass-through",
+        "testnet": false
+      },
+      "lookupVenues": [
+        "linear",
+        "inverse",
+        "option",
+        "spot"
+      ],
+      "lookupSymbols": [
+        "BTCUSDT",
+        "ETHUSDT",
+        "XAUTUSDT"
+      ],
+      "symbolMap": {
+        "BTCUSDT": "BTCUSDT",
+        "BTCUSDT.P": "BTCUSDT",
+        "XAUTUSDT": "XAUTUSDT",
+        "GOLDUSDT": "XAUTUSDT",
+        "ETHUSDT": "ETHUSDT",
+        "SOLUSDT": "SOLUSDT"
+      }
+    },
+    "bingx": {
+      "label": "BingX",
+      "enabled": true,
+      "status": "ready-live",
+      "defaultDestination": {
+        "account": "swap",
+        "category": "swap",
+        "executionMode": "maker",
+        "qtyMode": "pass-through",
+        "positionSide": "BOTH",
+        "testnet": false
+      },
+      "lookupVenues": [
+        "swap"
+      ],
+      "lookupSymbols": [
+        "BTC-USDT",
+        "ETH-USDT",
+        "SOL-USDT"
+      ],
+      "symbolMap": {
+        "BTCUSDT": "BTC-USDT",
+        "BTCUSDT.P": "BTC-USDT",
+        "ETHUSDT": "ETH-USDT",
+        "ETHUSDT.P": "ETH-USDT",
+        "SOLUSDT": "SOL-USDT",
+        "SOLUSDT.P": "SOL-USDT"
+      }
+    },
+    "finam": {
+      "label": "Finam",
+      "enabled": true,
+      "status": "ready-live",
+      "defaultDestination": {
+        "account": "1915526",
+        "exchange": "RTSX",
+        "executionMode": "maker",
+        "qtyMode": "pass-through"
+      },
+      "lookupVenues": [
+        "RTSX",
+        "FORTS",
+        "MOEX"
+      ],
+      "lookupSymbols": [
+        "DXM6@RTSX",
+        "NG2.35BP6@RTSX"
+      ],
+      "symbolMap": {}
+    },
+    "schwab": {
+      "label": "Schwab",
+      "enabled": true,
+      "status": "ready-live",
+      "defaultDestination": {
+        "account": "primary",
+        "exchange": "NYSE",
+        "executionMode": "market",
+        "qtyMode": "pass-through"
+      },
+      "lookupVenues": [
+        "NYSE",
+        "NASDAQ",
+        "AMEX"
+      ],
+      "lookupSymbols": [
+        "AAPL",
+        "SPY",
+        "QQQ"
+      ],
+      "symbolMap": {}
+    }
+  },
+  "routes": [
+    {
+      "id": "ui-ng-4-26",
+      "name": "UI mapping for NG-4.26",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "NG-4.26"
+        ],
+        "side": "*"
+      },
+      "destinations": [
+        {
+          "account": "P095154",
+          "exchange": "FORTS",
+          "executionMode": "maker",
+          "qtyMode": "fixed",
+          "broker": "alor",
+          "symbol": "NG-4.26",
+          "qty": 2,
+          "sideMode": "sign"
+        }
+      ]
+    },
+    {
+      "id": "ui-ng-4-26m270426pa2-35",
+      "name": "UI mapping for NG-4.26M270426PA2.35",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "NG-4.26M270426PA2.35"
+        ],
+        "side": "*"
+      },
+      "destinations": [
+        {
+          "account": "P095154",
+          "exchange": "FORTS",
+          "executionMode": "maker",
+          "qtyMode": "fixed",
+          "broker": "alor",
+          "symbol": "NG-4.26M270426PA2.35",
+          "qty": 1,
+          "sideMode": "sign"
+        }
+      ]
+    },
+    {
+      "id": "ui-dax-6-26",
+      "name": "UI mapping for DAX-6.26",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "DAX-6.26"
+        ],
+        "side": "*"
+      },
+      "destinations": [
+        {
+          "account": "P095154",
+          "exchange": "FORTS",
+          "executionMode": "maker",
+          "qtyMode": "fixed",
+          "broker": "alor",
+          "symbol": "DAX-6.26",
+          "qty": -2,
+          "sideMode": "sign"
+        }
+      ]
+    },
+    {
+      "id": "ui-ng2-35bp6-rtsx",
+      "name": "UI mapping for NG2.35BP6@RTSX",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "NG2.35BP6@RTSX"
+        ],
+        "side": "*"
+      },
+      "destinations": [
+        {
+          "account": "1915526",
+          "exchange": "RTSX",
+          "executionMode": "maker",
+          "qtyMode": "fixed",
+          "broker": "finam",
+          "symbol": "NG2.35BP6@RTSX",
+          "qty": 1,
+          "sideMode": "sign"
+        }
+      ]
+    },
+    {
+      "id": "ui-dxm6-rtsx",
+      "name": "UI mapping for DXM6@RTSX",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "DXM6@RTSX"
+        ],
+        "side": "*"
+      },
+      "destinations": [
+        {
+          "account": "1915526",
+          "exchange": "RTSX",
+          "executionMode": "maker",
+          "qtyMode": "fixed",
+          "broker": "finam",
+          "symbol": "DXM6@RTSX",
+          "qty": -5,
+          "sideMode": "sign"
+        }
+      ],
+      "atomicQty": 1
+    },
+    {
+      "id": "ui-xautusdt",
+      "name": "UI mapping for XAUTUSDT",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "XAUTUSDT"
+        ],
+        "side": "*"
+      },
+      "destinations": [
+        {
+          "account": "unified",
+          "category": "linear",
+          "executionMode": "market",
+          "qtyMode": "fixed",
+          "testnet": false,
+          "broker": "bybit",
+          "symbol": "XAUTUSDT",
+          "qty": -0.01,
+          "sideMode": "sign"
+        }
+      ]
+    }
+  ]
+}
