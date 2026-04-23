@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-114",
-  "builtAt": "2026-04-23T12:55:45.801584+00:00",
+  "createdAt": "2026-04-23T12:55:45.825264+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "a50bf560a0a3bb5eb6a6bd16d142aae71bd050101be98526178b0412b9f71910",
+      "sha256": "32025ecd9e190d6f9b25d73db82cfea5c5defb6e04be0a9f5eebec92c561380c",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Apply BingX one-step close/open hedge logic to all hedge-mode symbols, not only indices"
 }
