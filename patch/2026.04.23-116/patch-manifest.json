@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-116",
-  "builtAt": "2026-04-23T14:56:13.612857+00:00",
+  "createdAt": "2026-04-23T14:56:13.632497+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "a136ebb6d41cc86f5c10d94ece153d88a0ffbf901400b59d1d9a7d0688bd8052",
+      "sha256": "bd3180b45c918cde7121de971a36c55804e0afa45fa67d2ede3e6435116f5f3f",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Revert closePosition path; keep ordinary one-step order placement only in BingX hedge mode"
 }
