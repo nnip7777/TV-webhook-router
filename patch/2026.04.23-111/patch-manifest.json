@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-111",
-  "builtAt": "2026-04-23T05:18:02.188064+00:00",
+  "createdAt": "2026-04-23T05:18:02.213376+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "418e3195607d34bf29f0f37397be00b76e7e1daf8e8d3f2f5deb230e306ec519",
+      "sha256": "0055a93d8fa82d7d800ab53a9f4bbf482c02b15cd40e3982275c704d61b50c93",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Dedup identical webhook bursts to avoid parallel duplicate closes on BingX hedge mode"
 }
