@@ -1,6 +1,7 @@
 {
   "version": "2026.04.23-110",
-  "builtAt": "2026-04-23T05:12:34.454858+00:00",
+  "createdAt": "2026-04-23T05:12:34.487328+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
   "fileCount": 18,
   "files": {
     "VERSION": {
@@ -8,7 +9,7 @@
       "bytes": 15
     },
     "BUILD.json": {
-      "sha256": "b97b1bfc4636aab75be2fe1bf3cada579411a5bc3d7e2cbb8e019cb8f10c320d",
+      "sha256": "8f942352ab38844e34bd60e4356b865af781cce6c39aa32f6e386cc644e6eb40",
       "bytes": 2655
     },
     "CHANGELOG.md": {
@@ -75,5 +76,6 @@
       "sha256": "93193b6797e9fd12cdd3f73425dfdc4780ec13fc63977ee425bb08f48a14cc90",
       "bytes": 3026
     }
-  }
+  },
+  "notes": "Fix BingX hedge mode: never send reduceOnly field at all"
 }
