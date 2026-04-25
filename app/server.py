@@ -418,6 +418,7 @@ def _ensure_supported_broker_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
                 'executionMode': 'maker',
                 'qtyMode': 'pass-through',
                 'positionSide': 'BOTH',
+                'signalMode': 'step-side',
                 'testnet': False,
             },
             'lookupVenues': ['swap'],
@@ -1025,6 +1026,18 @@ def _render_settings_page(saved: bool = False, error: str = '', message: str = '
     """
 
     section_fields = lambda section: ''.join(_render_env_input(field, env_values, root_value) for field in SETTINGS_FIELDS if field.get('section') == section and _can_access_section(user, str(field.get('section') or '')))
+    webhook_url = (env_values.get('WEBHOOK_ROUTER_PUBLIC_BASE_URL') or f'http://{env_values.get("WEBHOOK_ROUTER_HOST","127.0.0.1")}:{env_values.get("WEBHOOK_ROUTER_PORT","8787")}').rstrip('/') + '/webhook'
+    webhook_examples = [
+        ('1) адрес hook сервера', webhook_url),
+        ('2) старый режим: buy', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "buy",\n  "qty": 1\n}'),
+        ('3) старый режим: sell', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "sell",\n  "qty": 1\n}'),
+        ('4) новый режим: 2long', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2long"\n}'),
+        ('5) новый режим: 2short', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2short"\n}'),
+    ]
+    webhook_examples_html = ''.join(
+        f"<label class='settings-field'><span>{html.escape(label)}</span><textarea readonly onclick='this.select()' style='min-height:{'64px' if idx == 0 else '112px'}'>{html.escape(value)}</textarea></label>"
+        for idx, (label, value) in enumerate(webhook_examples)
+    )
 
     return f"""
 <!doctype html>
@@ -1072,6 +1085,11 @@ def _render_settings_page(saved: bool = False, error: str = '', message: str = '
       <div class='navlinks'><a href='/'>admin</a><a href='/journal'>journal</a><a href='/logout'>logout</a></div>
     </div>
     {flash}
+    <div class='section' style='margin-bottom:14px;'>
+      <h3>TradingView webhook examples</h3>
+      <div class='help' style='margin-bottom:10px;'>Скопируй нужный URL/JSON. Верхние примеры для старого режима buy/sell, нижние для нового режима 2long/2short.</div>
+      {webhook_examples_html}
+    </div>
     <form method='post' action='/settings/save'>
       <div class='grid'>
         <div class='section'>
