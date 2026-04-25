@@ -269,7 +269,12 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
     broker = destination['broker']
     symbol = destination['symbol']
     side = str(destination.get('side', payload['side'])).lower()
-    quantity = destination.get('qty', payload['qty'])
+    signal_mode = str(destination.get('signalMode') or payload.get('signalMode') or 'step-side').strip().lower()
+    target_direction = ''
+    if signal_mode == 'target-direction' and side in ('long', 'short'):
+        target_direction = side
+        side = 'buy' if target_direction == 'long' else 'sell'
+    quantity = destination.get('qty', payload.get('qty'))
     qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
     category = destination.get('category', 'swap')
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
@@ -296,6 +301,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'category': category,
         'executionMode': execution_mode,
         'positionSide': position_side,
+        'signalMode': signal_mode,
+        'targetDirection': target_direction,
         'stage': 'init',
         'stageTrace': ['init'],
     }
@@ -417,6 +424,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
             close_position_side = None
             effective_reduce_only = bool(reduce_only) if reduce_only is not None else None
+            target_mode_close_then_open = False
             if current_position_mode is True:
                 _set_stage('get_positions_before')
                 positions_before_for_netting = client.get_positions(prepared['symbol'])
@@ -430,7 +438,29 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 same_side_qty = long_qty if side == 'buy' else short_qty
                 request_payload['positionOppositeBefore'] = opposite_qty
                 request_payload['positionSameSideBefore'] = same_side_qty
-                if opposite_qty > 0:
+                if signal_mode == 'target-direction':
+                    desired_side = 'LONG' if target_direction == 'long' else 'SHORT'
+                    opposite_side = 'SHORT' if desired_side == 'LONG' else 'LONG'
+                    opposite_qty_target = float(buckets_before.get(opposite_side, 0.0) or 0.0)
+                    same_qty_target = float(buckets_before.get(desired_side, 0.0) or 0.0)
+                    request_payload['targetDirectionOppositeQty'] = opposite_qty_target
+                    request_payload['targetDirectionSameQty'] = same_qty_target
+                    if opposite_qty_target > 0:
+                        close_position_side = opposite_side
+                        api_position_side = opposite_side
+                        effective_reduce_only = None
+                        request_payload['positionSideNetting'] = opposite_side
+                        request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
+                        request_payload['hedgeCloseUsesReduceOnly'] = False
+                        target_mode_close_then_open = True
+                    else:
+                        requested_position_side = desired_side
+                        api_position_side = desired_side
+                        effective_reduce_only = None
+                        request_payload['positionSideNetting'] = desired_side
+                        request_payload['nettingAction'] = 'target_direction_open_or_increase_target'
+                        request_payload['hedgeOpenUsesReduceOnly'] = False
+                elif opposite_qty > 0:
                     close_position_side = 'SHORT' if side == 'buy' else 'LONG'
                     api_position_side = close_position_side
                     effective_reduce_only = None
@@ -496,101 +526,146 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 margin_ops['setLeverage'] = client.set_leverage(prepared['symbol'], leverage_side, leverage)
 
             effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
-            order_attempts = []
-            poll_plan_ms = [350, 700, 1200]
-            max_reposts = 5
-            current_prepared = dict(prepared)
-            remaining_qty = str(current_prepared.get('quantity'))
-            result = None
-            final_order_row = {}
+            def _run_limit_repost_loop(loop_prepared: Dict[str, Any], loop_position_side: str, loop_reduce_only: Any, stage_prefix: str = ''):
+                order_attempts = []
+                poll_plan_ms = [350, 700, 1200]
+                max_reposts = 5
+                current_prepared = dict(loop_prepared)
+                remaining_qty = str(current_prepared.get('quantity'))
+                loop_result = None
+                loop_final_order_row = {}
+                loop_effective_position_side = loop_position_side
 
-            for attempt_index in range(max_reposts + 1):
-                current_prepared['quantity'] = remaining_qty
-                _set_stage('place_limit_order' if attempt_index == 0 else 'place_limit_order_repost')
-                attempt_result = client.place_limit_order(
-                    current_prepared,
-                    position_side=api_position_side,
-                    reduce_only=effective_reduce_only,
-                    client_order_id=client_order_id,
-                )
-
-                message = str((attempt_result or {}).get('msg') or '')
-                if api_position_side == 'BOTH' and 'Hedge mode' in message:
-                    retry_position_side = 'LONG' if side == 'buy' else 'SHORT'
-                    request_payload['positionSideRetry'] = retry_position_side
-                    effective_position_side = retry_position_side
-                    _set_stage('place_limit_order_retry_hedge')
+                for attempt_index in range(max_reposts + 1):
+                    current_prepared['quantity'] = remaining_qty
+                    _set_stage(f"{stage_prefix}place_limit_order" if attempt_index == 0 else f"{stage_prefix}place_limit_order_repost")
                     attempt_result = client.place_limit_order(
                         current_prepared,
-                        position_side=retry_position_side,
-                        reduce_only=effective_reduce_only,
+                        position_side=loop_position_side,
+                        reduce_only=loop_reduce_only,
                         client_order_id=client_order_id,
                     )
 
-                result = attempt_result
-                order_row = _bingx_extract_order_row(attempt_result)
-                order_id = _bingx_order_id(order_row)
-                attempt_entry = {
-                    'attempt': attempt_index + 1,
-                    'placedQty': current_prepared.get('quantity'),
-                    'placedPrice': current_prepared.get('price'),
-                    'result': attempt_result,
-                    'orderId': order_id,
-                }
-                order_attempts.append(attempt_entry)
+                    message = str((attempt_result or {}).get('msg') or '')
+                    if loop_position_side == 'BOTH' and 'Hedge mode' in message:
+                        retry_position_side = 'LONG' if side == 'buy' else 'SHORT'
+                        request_payload['positionSideRetry'] = retry_position_side
+                        loop_effective_position_side = retry_position_side
+                        _set_stage(f'{stage_prefix}place_limit_order_retry_hedge')
+                        attempt_result = client.place_limit_order(
+                            current_prepared,
+                            position_side=retry_position_side,
+                            reduce_only=loop_reduce_only,
+                            client_order_id=client_order_id,
+                        )
 
-                if not isinstance(attempt_result, dict) or attempt_result.get('code') not in (None, 0, '0'):
-                    break
+                    loop_result = attempt_result
+                    order_row = _bingx_extract_order_row(attempt_result)
+                    order_id = _bingx_order_id(order_row)
+                    attempt_entry = {
+                        'attempt': attempt_index + 1,
+                        'placedQty': current_prepared.get('quantity'),
+                        'placedPrice': current_prepared.get('price'),
+                        'result': attempt_result,
+                        'orderId': order_id,
+                    }
+                    order_attempts.append(attempt_entry)
 
-                latest_order = order_row
-                for wait_ms in poll_plan_ms:
-                    time.sleep(wait_ms / 1000.0)
+                    if not isinstance(attempt_result, dict) or attempt_result.get('code') not in (None, 0, '0'):
+                        break
+
+                    latest_order = order_row
+                    for wait_ms in poll_plan_ms:
+                        time.sleep(wait_ms / 1000.0)
+                        if not order_id:
+                            break
+                        _set_stage(f"{stage_prefix}poll_open_order" if attempt_index == 0 else f"{stage_prefix}poll_open_order_repost")
+                        polled = client.get_order(current_prepared['symbol'], order_id=order_id)
+                        polled_row = _bingx_extract_order_row(polled)
+                        if polled_row:
+                            latest_order = polled_row
+                            attempt_entry.setdefault('polls', []).append(polled)
+                        status = _bingx_order_status(latest_order)
+                        if status in ('FILLED', 'CANCELED', 'EXPIRED'):
+                            break
+
+                    loop_final_order_row = latest_order or order_row
+                    final_status = _bingx_order_status(loop_final_order_row)
+                    executed_qty = _bingx_order_executed_qty(loop_final_order_row)
+                    total_qty = Decimal(str(current_prepared.get('quantity') or '0'))
+                    quantity_precision = int((prepared.get('contract') or {}).get('quantityPrecision') or 0)
+                    remaining_qty = _bingx_remaining_qty(total_qty, executed_qty, quantity_precision)
+                    attempt_entry['finalStatus'] = final_status
+                    attempt_entry['executedQty'] = str(executed_qty)
+                    attempt_entry['remainingQty'] = remaining_qty
+
+                    if final_status == 'FILLED' or Decimal(remaining_qty) <= 0:
+                        break
+
+                    if final_status not in ('NEW', 'PARTIALLY_FILLED'):
+                        break
+
                     if not order_id:
                         break
-                    _set_stage('poll_open_order' if attempt_index == 0 else 'poll_open_order_repost')
-                    polled = client.get_order(current_prepared['symbol'], order_id=order_id)
-                    polled_row = _bingx_extract_order_row(polled)
-                    if polled_row:
-                        latest_order = polled_row
-                        attempt_entry.setdefault('polls', []).append(polled)
-                    status = _bingx_order_status(latest_order)
-                    if status in ('FILLED', 'CANCELED', 'EXPIRED'):
+
+                    _set_stage(f"{stage_prefix}cancel_remainder" if attempt_index == 0 else f"{stage_prefix}cancel_remainder_repost")
+                    cancel_result = client.cancel_order(current_prepared['symbol'], order_id=order_id)
+                    attempt_entry['cancelResult'] = cancel_result
+
+                    if attempt_index >= max_reposts:
                         break
 
-                final_order_row = latest_order or order_row
-                final_status = _bingx_order_status(final_order_row)
-                executed_qty = _bingx_order_executed_qty(final_order_row)
-                total_qty = Decimal(str(current_prepared.get('quantity') or '0'))
-                quantity_precision = int((prepared.get('contract') or {}).get('quantityPrecision') or 0)
-                remaining_qty = _bingx_remaining_qty(total_qty, executed_qty, quantity_precision)
-                attempt_entry['finalStatus'] = final_status
-                attempt_entry['executedQty'] = str(executed_qty)
-                attempt_entry['remainingQty'] = remaining_qty
+                    _set_stage(f'{stage_prefix}prepare_repost_price')
+                    repost_prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=remaining_qty, price=None)
+                    current_prepared = repost_prepared
+                    request_payload['repostCount'] = request_payload.get('repostCount', 0) + 1
 
-                if final_status == 'FILLED' or Decimal(remaining_qty) <= 0:
-                    break
+                return loop_result, loop_final_order_row, remaining_qty, order_attempts, loop_effective_position_side
 
-                if final_status not in ('NEW', 'PARTIALLY_FILLED'):
-                    break
+            result, final_order_row, remaining_qty, order_attempts, effective_position_side = _run_limit_repost_loop(
+                prepared,
+                api_position_side,
+                effective_reduce_only,
+                stage_prefix='',
+            )
 
-                if not order_id:
-                    break
-
-                _set_stage('cancel_remainder' if attempt_index == 0 else 'cancel_remainder_repost')
-                cancel_result = client.cancel_order(current_prepared['symbol'], order_id=order_id)
-                attempt_entry['cancelResult'] = cancel_result
-
-                if attempt_index >= max_reposts:
-                    break
-
-                _set_stage('prepare_repost_price')
-                repost_prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=remaining_qty, price=None)
-                current_prepared = repost_prepared
-                request_payload['repostCount'] = attempt_index + 1
+            if target_mode_close_then_open and isinstance(result, dict) and result.get('code') in (None, 0, '0'):
+                close_remaining = Decimal(str(remaining_qty or '0')) if remaining_qty not in (None, '') else Decimal('0')
+                if close_remaining > 0:
+                    request_payload['targetDirectionCloseRemainder'] = str(close_remaining)
+                else:
+                    open_side = 'buy' if target_direction == 'long' else 'sell'
+                    open_position_side = 'LONG' if target_direction == 'long' else 'SHORT'
+                    _set_stage('target_direction_prepare_open')
+                    open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None)
+                    open_result, open_final_order_row, open_remaining_qty, open_attempts, _ = _run_limit_repost_loop(
+                        open_prepared,
+                        open_position_side,
+                        None,
+                        stage_prefix='target_open_',
+                    )
+                    request_payload['targetOpenAttempts'] = [
+                        {
+                            'attempt': item.get('attempt'),
+                            'placedQty': item.get('placedQty'),
+                            'placedPrice': item.get('placedPrice'),
+                            'orderId': item.get('orderId'),
+                            'finalStatus': item.get('finalStatus'),
+                            'executedQty': item.get('executedQty'),
+                            'remainingQty': item.get('remainingQty'),
+                        }
+                        for item in open_attempts
+                    ]
+                    request_payload['targetOpenFinalRemainingQty'] = open_remaining_qty
+                    result = open_result
+                    final_order_row = open_final_order_row
+                    remaining_qty = open_remaining_qty
+                    order_attempts.extend([{**item, 'phase': 'target-open'} for item in open_attempts])
 
             request_payload['orderAttempts'] = [
                 {
                     'attempt': item.get('attempt'),
+                    'phase': item.get('phase', 'primary'),
                     'placedQty': item.get('placedQty'),
                     'placedPrice': item.get('placedPrice'),
                     'orderId': item.get('orderId'),
