@@ -5,7 +5,7 @@ import json
 import os
 import socket
 import time
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Dict, List, Optional
 
 
@@ -247,6 +247,22 @@ class BingXBroker:
     def get_depth(self, symbol: str, limit: int = 20) -> Dict[str, Any]:
         return self._request('GET', '/openApi/swap/v2/quote/depth', params={'symbol': symbol, 'limit': limit})
 
+    def get_order(self, symbol: str, order_id: Optional[str] = None, client_order_id: Optional[str] = None) -> Dict[str, Any]:
+        params: Dict[str, Any] = {'symbol': symbol}
+        if order_id:
+            params['orderId'] = str(order_id)
+        if client_order_id:
+            params['clientOrderId'] = str(client_order_id)
+        return self._request('GET', '/openApi/swap/v2/trade/order', params=params)
+
+    def cancel_order(self, symbol: str, order_id: Optional[str] = None, client_order_id: Optional[str] = None) -> Dict[str, Any]:
+        params: Dict[str, Any] = {'symbol': symbol}
+        if order_id:
+            params['orderId'] = str(order_id)
+        if client_order_id:
+            params['clientOrderId'] = str(client_order_id)
+        return self._request('DELETE', '/openApi/swap/v2/trade/order', params=params)
+
     def auth_check(self) -> Dict[str, Any]:
         try:
             balance = self.get_balance()
@@ -454,12 +470,22 @@ def _safe_int(value: Any, default: int = 8) -> int:
         return default
 
 
-def _decimal_text(value: Any, precision: int) -> str:
+def _decimal_text(value: Any, precision: int, rounding=ROUND_DOWN) -> str:
     dec = Decimal(str(value))
     if precision >= 0:
         quantum = Decimal('1').scaleb(-precision)
-        dec = dec.quantize(quantum, rounding=ROUND_DOWN)
+        dec = dec.quantize(quantum, rounding=rounding)
     text = format(dec, 'f')
     if '.' in text:
         text = text.rstrip('0').rstrip('.')
     return text or '0'
+
+
+def _extract_order_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = (payload or {}).get('data') or {}
+    if isinstance(data, dict):
+        if isinstance(data.get('order'), dict):
+            return data.get('order') or {}
+        return data
+    rows = _bingx_rows(payload)
+    return rows[0] if rows else {}

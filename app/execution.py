@@ -2,6 +2,8 @@
 import asyncio
 import importlib.util
 import math
+import time
+from decimal import Decimal, ROUND_UP
 from typing import Any, Dict, List
 
 from bingx_adapter import BingXBroker
@@ -221,6 +223,46 @@ def _bingx_position_buckets(positions_payload: Dict[str, Any], symbol: str) -> D
             continue
         buckets[row_side] += _bingx_position_qty(row)
     return buckets
+
+
+def _bingx_extract_order_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = (payload or {}).get('data') or {}
+    if isinstance(data, dict):
+        if isinstance(data.get('order'), dict):
+            return data.get('order') or {}
+        return data
+    return {}
+
+
+def _bingx_order_id(order_row: Dict[str, Any]) -> str:
+    return str(order_row.get('orderID') or order_row.get('orderId') or '').strip()
+
+
+def _bingx_order_status(order_row: Dict[str, Any]) -> str:
+    return str(order_row.get('status') or '').strip().upper()
+
+
+def _bingx_order_executed_qty(order_row: Dict[str, Any]) -> Decimal:
+    for key in ('executedQty', 'cumExecQty', 'filledQty'):
+        value = order_row.get(key)
+        if value not in (None, ''):
+            try:
+                return Decimal(str(value))
+            except Exception:
+                pass
+    return Decimal('0')
+
+
+def _bingx_remaining_qty(total_qty: Any, executed_qty: Any, quantity_precision: int) -> str:
+    total_dec = Decimal(str(total_qty))
+    executed_dec = Decimal(str(executed_qty))
+    remaining = total_dec - executed_dec
+    if remaining <= 0:
+        return '0'
+    quantum = Decimal('1').scaleb(-max(0, int(quantity_precision)))
+    remaining = remaining.quantize(quantum, rounding=ROUND_UP)
+    text = format(remaining, 'f').rstrip('0').rstrip('.')
+    return text or '0'
 
 
 async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -> Dict[str, Any]:
@@ -454,27 +496,114 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 margin_ops['setLeverage'] = client.set_leverage(prepared['symbol'], leverage_side, leverage)
 
             effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
-            _set_stage('place_limit_order')
-            result = client.place_limit_order(
-                prepared,
-                position_side=api_position_side,
-                reduce_only=effective_reduce_only,
-                client_order_id=client_order_id,
-            )
+            order_attempts = []
+            poll_plan_ms = [350, 700, 1200]
+            max_reposts = 5
+            current_prepared = dict(prepared)
+            remaining_qty = str(current_prepared.get('quantity'))
+            result = None
+            final_order_row = {}
 
-            message = str((result or {}).get('msg') or '')
-            if api_position_side == 'BOTH' and 'Hedge mode' in message:
-                retry_position_side = 'LONG' if side == 'buy' else 'SHORT'
-                request_payload['positionSideRetry'] = retry_position_side
-                effective_position_side = retry_position_side
-                _set_stage('place_limit_order_retry_hedge')
-                result = client.place_limit_order(
-                    prepared,
-                    position_side=retry_position_side,
+            for attempt_index in range(max_reposts + 1):
+                current_prepared['quantity'] = remaining_qty
+                _set_stage('place_limit_order' if attempt_index == 0 else 'place_limit_order_repost')
+                attempt_result = client.place_limit_order(
+                    current_prepared,
+                    position_side=api_position_side,
                     reduce_only=effective_reduce_only,
                     client_order_id=client_order_id,
                 )
 
+                message = str((attempt_result or {}).get('msg') or '')
+                if api_position_side == 'BOTH' and 'Hedge mode' in message:
+                    retry_position_side = 'LONG' if side == 'buy' else 'SHORT'
+                    request_payload['positionSideRetry'] = retry_position_side
+                    effective_position_side = retry_position_side
+                    _set_stage('place_limit_order_retry_hedge')
+                    attempt_result = client.place_limit_order(
+                        current_prepared,
+                        position_side=retry_position_side,
+                        reduce_only=effective_reduce_only,
+                        client_order_id=client_order_id,
+                    )
+
+                result = attempt_result
+                order_row = _bingx_extract_order_row(attempt_result)
+                order_id = _bingx_order_id(order_row)
+                attempt_entry = {
+                    'attempt': attempt_index + 1,
+                    'placedQty': current_prepared.get('quantity'),
+                    'placedPrice': current_prepared.get('price'),
+                    'result': attempt_result,
+                    'orderId': order_id,
+                }
+                order_attempts.append(attempt_entry)
+
+                if not isinstance(attempt_result, dict) or attempt_result.get('code') not in (None, 0, '0'):
+                    break
+
+                latest_order = order_row
+                for wait_ms in poll_plan_ms:
+                    time.sleep(wait_ms / 1000.0)
+                    if not order_id:
+                        break
+                    _set_stage('poll_open_order' if attempt_index == 0 else 'poll_open_order_repost')
+                    polled = client.get_order(current_prepared['symbol'], order_id=order_id)
+                    polled_row = _bingx_extract_order_row(polled)
+                    if polled_row:
+                        latest_order = polled_row
+                        attempt_entry.setdefault('polls', []).append(polled)
+                    status = _bingx_order_status(latest_order)
+                    if status in ('FILLED', 'CANCELED', 'EXPIRED'):
+                        break
+
+                final_order_row = latest_order or order_row
+                final_status = _bingx_order_status(final_order_row)
+                executed_qty = _bingx_order_executed_qty(final_order_row)
+                total_qty = Decimal(str(current_prepared.get('quantity') or '0'))
+                quantity_precision = int((prepared.get('contract') or {}).get('quantityPrecision') or 0)
+                remaining_qty = _bingx_remaining_qty(total_qty, executed_qty, quantity_precision)
+                attempt_entry['finalStatus'] = final_status
+                attempt_entry['executedQty'] = str(executed_qty)
+                attempt_entry['remainingQty'] = remaining_qty
+
+                if final_status == 'FILLED' or Decimal(remaining_qty) <= 0:
+                    break
+
+                if final_status not in ('NEW', 'PARTIALLY_FILLED'):
+                    break
+
+                if not order_id:
+                    break
+
+                _set_stage('cancel_remainder' if attempt_index == 0 else 'cancel_remainder_repost')
+                cancel_result = client.cancel_order(current_prepared['symbol'], order_id=order_id)
+                attempt_entry['cancelResult'] = cancel_result
+
+                if attempt_index >= max_reposts:
+                    break
+
+                _set_stage('prepare_repost_price')
+                repost_prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=remaining_qty, price=None)
+                current_prepared = repost_prepared
+                request_payload['repostCount'] = attempt_index + 1
+
+            request_payload['orderAttempts'] = [
+                {
+                    'attempt': item.get('attempt'),
+                    'placedQty': item.get('placedQty'),
+                    'placedPrice': item.get('placedPrice'),
+                    'orderId': item.get('orderId'),
+                    'finalStatus': item.get('finalStatus'),
+                    'executedQty': item.get('executedQty'),
+                    'remainingQty': item.get('remainingQty'),
+                }
+                for item in order_attempts
+            ]
+            if final_order_row:
+                request_payload['finalOrderStatus'] = _bingx_order_status(final_order_row)
+                request_payload['finalExecutedQty'] = str(_bingx_order_executed_qty(final_order_row))
+                request_payload['finalRemainingQty'] = remaining_qty
 
             if risk_control_enabled:
                 _set_stage('get_balance_after')
@@ -536,6 +665,12 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         business_error = ''
         if not dry_run and isinstance(result, dict) and result.get('code') not in (None, 0, '0'):
             business_error = str(result.get('msg') or result.get('code') or 'bingx_error')
+        elif request_payload.get('finalRemainingQty') not in (None, '', '0'):
+            try:
+                if Decimal(str(request_payload.get('finalRemainingQty'))) > 0:
+                    business_error = f"unfilled_remainder:{request_payload.get('finalRemainingQty')}"
+            except Exception:
+                pass
 
         response_payload = {
             'broker': broker,
