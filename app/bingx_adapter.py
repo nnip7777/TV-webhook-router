@@ -364,7 +364,7 @@ class BingXBroker:
             return ranked[0][1]
         return {}
 
-    def prepare_limit_order(self, symbol: str, side: str, qty: Any, price: Optional[Any] = None) -> Dict[str, Any]:
+    def prepare_limit_order(self, symbol: str, side: str, qty: Any, price: Optional[Any] = None, qty_kind: str = 'contracts') -> Dict[str, Any]:
         contract = self.get_contract(symbol)
         if not contract:
             raise RuntimeError(f'BingX contract not found: {symbol}')
@@ -375,6 +375,7 @@ class BingXBroker:
         book = {}
         selected_price = price
         side_normalized = str(side or '').strip().lower()
+        qty_kind_normalized = str(qty_kind or 'contracts').strip().lower()
         if side_normalized not in ('buy', 'sell'):
             raise ValueError(f'Unsupported side for BingX: {side}')
 
@@ -406,12 +407,24 @@ class BingXBroker:
                     f" | contract={json.dumps(contract, ensure_ascii=False)}"
                 )
 
-        quantity_text = _decimal_text(qty, quantity_precision)
         price_text = _decimal_text(selected_price, price_precision)
-        if Decimal(quantity_text) <= 0:
-            raise ValueError('BingX quantity must be greater than 0')
         if Decimal(price_text) <= 0:
             raise ValueError('BingX price must be greater than 0')
+
+        qty_decimal = Decimal(str(qty))
+        if qty_kind_normalized in ('usdt', 'notional', 'quote', 'quote_usdt'):
+            contract_size_raw = contract.get('size') or contract.get('contractSize') or contract.get('tradeSize') or 1
+            try:
+                contract_size = Decimal(str(contract_size_raw))
+            except Exception:
+                contract_size = Decimal('1')
+            if contract_size <= 0:
+                contract_size = Decimal('1')
+            qty_decimal = qty_decimal / (Decimal(price_text) * contract_size)
+
+        quantity_text = _decimal_text(qty_decimal, quantity_precision)
+        if Decimal(quantity_text) <= 0:
+            raise ValueError('BingX quantity must be greater than 0')
 
         return {
             'symbol': contract_symbol,
@@ -420,6 +433,8 @@ class BingXBroker:
             'price': price_text,
             'contract': contract,
             'bookTicker': book,
+            'inputQty': str(qty),
+            'inputQtyKind': qty_kind_normalized,
         }
 
     def place_limit_order(

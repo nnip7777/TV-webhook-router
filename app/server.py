@@ -1649,8 +1649,8 @@ def _render_template(value: Any, context: Dict[str, Any]):
 def _resolve_qty(payload: Dict[str, Any], destination: Dict[str, Any]) -> Any:
     mode = destination.get('qtyMode', 'pass-through')
     payload_qty = payload.get('qty')
-    payload_qty_kind = str(payload.get('qtyKind') or payload.get('sizeKind') or 'contracts').strip().lower()
-    destination_qty_kind = str(destination.get('qtyKind') or destination.get('sizeKind') or payload_qty_kind or 'contracts').strip().lower()
+    payload_qty_kind = str(payload.get('qtyKind') or payload.get('sizeKind') or 'usdt').strip().lower()
+    destination_qty_kind = str(destination.get('qtyKind') or destination.get('sizeKind') or payload_qty_kind or 'usdt').strip().lower()
 
     if mode == 'fixed':
         return destination.get('qty')
@@ -1681,7 +1681,7 @@ def materialize_route(payload: Dict[str, Any], route: Dict[str, Any], config: Di
         }
         rendered = _render_template(merged, context)
         rendered['qty'] = _resolve_qty(payload, rendered)
-        rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or 'contracts').strip().lower()
+        rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or 'usdt').strip().lower()
         if 'side' not in rendered:
             rendered['side'] = payload.get('side')
         materialized_destinations.append(rendered)
@@ -1920,7 +1920,7 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
                 raise ValueError(f'min_qty:{min_qty_raw}')
             destination['qtyMode'] = 'fixed'
             destination['qty'] = int(qty_value) if qty_value.is_integer() else qty_value
-            destination['qtyKind'] = 'contracts'
+            destination['qtyKind'] = 'usdt'
             destination['sideMode'] = 'sign'
         except Exception:
             pass
@@ -2164,6 +2164,8 @@ def _fmt_qty_text(value: Any) -> str:
 
 
 def _quick_order_base_qty(instrument: Dict[str, Any], broker_name: str, current: Dict[str, Any]) -> str:
+    if broker_name == 'bingx':
+        return '2'
     current_qty = current.get('qty')
     if current_qty not in (None, ''):
         try:
@@ -4356,6 +4358,7 @@ class Handler(BaseHTTPRequestHandler):
                 'sourceTicker': ticker,
                 'side': side,
                 'qty': qty,
+                'qtyKind': 'usdt',
             }
 
             try:
@@ -4416,7 +4419,9 @@ class Handler(BaseHTTPRequestHandler):
                 destination['qtyMode'] = 'fixed'
                 destination['side'] = side
                 destination['qty'] = int(quick_qty_num) if float(quick_qty_num).is_integer() else quick_qty_num
+                destination['qtyKind'] = 'usdt'
                 payload['qty'] = destination['qty']
+                payload['qtyKind'] = 'usdt'
 
                 route = {
                     'id': f'quick-{ticker}-{broker}',
