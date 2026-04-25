@@ -1439,7 +1439,7 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
             week_values.append(value)
     week_options = ''.join(f"<option value='{html.escape(v)}' {'selected' if week == v else ''}>{html.escape(v)}</option>" for v in week_values)
     broker_options = ''.join(f"<option value='{name}' {'selected' if broker == name else ''}>{name}</option>" for name in ['alor','bybit','bingx','finam','schwab'])
-    status_options = ''.join(f"<option value='{name}' {'selected' if status == name else ''}>{name}</option>" for name in ['accepted','executed','execution_error','partial_error','route_not_found','invalid_json','missing_fields','ok','error'])
+    status_options = ''.join(f"<option value='{name}' {'selected' if status == name else ''}>{name}</option>" for name in ['accepted','placed','executed','execution_error','partial_error','route_not_found','invalid_json','missing_fields','ok','error'])
     kind_options = ''.join(f"<option value='{name}' {'selected' if kind == name else ''}>{name}</option>" for name in ['webhook','quick-order','settings-save','settings-sync','server-start'])
     prev_link = f"/journal?week={html.escape(week)}&broker={html.escape(broker)}&ticker={html.escape(ticker)}&status={html.escape(status)}&kind={html.escape(kind)}&sort={html.escape(sort)}&page={page-1}" if page > 1 else ''
     next_link = f"/journal?week={html.escape(week)}&broker={html.escape(broker)}&ticker={html.escape(ticker)}&status={html.escape(status)}&kind={html.escape(kind)}&sort={html.escape(sort)}&page={page+1}" if end_idx < total else ''
@@ -3634,7 +3634,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
         result_obj = dest.get('results') or {}
         err = str(dest.get('error') or _result_error_text(result_obj) or '')
         dry_run = bool(dest.get('dryRun') or _result_is_dry_run(result_obj))
-        broker_status = 'dry_run' if dry_run else ('execution_error' if err else 'executed')
+        broker_status = 'dry_run' if dry_run else ('execution_error' if err else 'placed')
         piece = f"{broker}:{symbol}"
         if venue:
             piece += f"@{venue}"
@@ -3702,9 +3702,9 @@ def _process_webhook_job(job: Dict[str, Any]) -> None:
             elif err:
                 per_statuses.append('execution_error')
             else:
-                per_statuses.append('executed')
-        if per_statuses and all(status == 'executed' for status in per_statuses):
-            decision['status'] = 'executed'
+                per_statuses.append('placed')
+        if per_statuses and all(status == 'placed' for status in per_statuses):
+            decision['status'] = 'placed'
         elif per_statuses and all(status == 'dry_run' for status in per_statuses):
             decision['status'] = 'dry_run'
         elif per_statuses and any(status == 'execution_error' for status in per_statuses):
