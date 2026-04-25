@@ -1925,7 +1925,7 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
     best_candidate = _best_catalog_candidate(ticker, broker_name, instruments or {'instruments': []})
     manual_symbol = str(options.get('symbol') or '').strip()
     if manual_symbol:
-        destination['symbol'] = manual_symbol
+        destination['symbol'] = manual_symbol.split('|', 1)[0].strip()
     else:
         destination['symbol'] = best_candidate.get('symbol') or symbol_map.get(ticker, ticker)
 
@@ -2325,6 +2325,33 @@ def _live_symbol_qty_text(broker_name: str, *symbols: str) -> str:
     return ''
 
 
+def _bingx_contract_lookup_options() -> List[str]:
+    try:
+        client = BingXBroker()
+        rows = _bingx_rows(client.get_contracts())
+    except Exception:
+        return []
+    options: List[str] = []
+    seen = set()
+    for item in rows:
+        symbol = str(item.get('symbol') or '').strip()
+        if not symbol:
+            continue
+        display_name = str(item.get('displayName') or '').strip()
+        asset = str(item.get('asset') or '').strip()
+        currency = str(item.get('currency') or '').strip()
+        for value in [
+            symbol,
+            ' | '.join([part for part in [symbol, display_name, asset, currency] if part]),
+            ' | '.join([part for part in [symbol, asset, currency] if part]),
+        ]:
+            value = str(value or '').strip()
+            if value and value not in seen:
+                seen.add(value)
+                options.append(value)
+    return options
+
+
 def _broker_lookup_symbols(config: Dict[str, Any], broker_name: str, instruments: Dict[str, Any]) -> List[str]:
     broker_cfg = config.get('brokers', {}).get(broker_name, {})
     options = set(broker_cfg.get('lookupSymbols', []))
@@ -2339,6 +2366,8 @@ def _broker_lookup_symbols(config: Dict[str, Any], broker_name: str, instruments
         for destination in route.get('destinations', []):
             if destination.get('broker') == broker_name and destination.get('symbol'):
                 options.add(str(destination.get('symbol')))
+    if broker_name == 'bingx':
+        options.update(_bingx_contract_lookup_options())
     return sorted(options)
 
 
@@ -2947,7 +2976,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             is_checked = 'checked' if current else ''
             risk_value = html.escape(str(current.get('riskPct', '')))
             best_candidate = _best_catalog_candidate(ticker, broker_name, instruments)
-            symbol_raw = str(current.get('symbol') or best_candidate.get('symbol') or broker_cfg.get('symbolMap', {}).get(ticker, ticker))
+            symbol_raw = str(current.get('symbol') or best_candidate.get('symbol') or broker_cfg.get('symbolMap', {}).get(ticker, ticker)).split('|', 1)[0].strip()
             symbol_value = html.escape(symbol_raw)
             venue_default = broker_cfg.get('defaultDestination', {}).get(_broker_venue_key(broker_name), '')
             venue_value = html.escape(str(current.get('venue') or best_candidate.get('venue') or ('linear' if broker_name == 'bybit' else ('swap' if broker_name == 'bingx' else venue_default))))
