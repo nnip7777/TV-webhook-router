@@ -247,15 +247,24 @@ def _bingx_order_executed_qty(order_row: Dict[str, Any]) -> Decimal:
         value = order_row.get(key)
         if value not in (None, ''):
             try:
-                return Decimal(str(value))
+                text = str(value).strip()
+                if not text:
+                    continue
+                return Decimal(text)
             except Exception:
-                pass
+                continue
     return Decimal('0')
 
 
 def _bingx_remaining_qty(total_qty: Any, executed_qty: Any, quantity_precision: int) -> str:
-    total_dec = Decimal(str(total_qty))
-    executed_dec = Decimal(str(executed_qty))
+    try:
+        total_dec = Decimal(str(total_qty).strip())
+    except Exception:
+        return '0'
+    try:
+        executed_dec = Decimal(str(executed_qty).strip())
+    except Exception:
+        executed_dec = Decimal('0')
     remaining = total_dec - executed_dec
     if remaining <= 0:
         return '0'
@@ -285,6 +294,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         side = 'buy' if target_direction == 'long' else 'sell'
     quantity = destination.get('qty', payload.get('qty'))
     qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
+    if signal_mode == 'target-direction':
+        if payload.get('qty') not in (None, ''):
+            quantity = payload.get('qty')
+        qty_kind = 'usdt'
     category = destination.get('category', 'swap')
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
     reduce_only = destination.get('reduceOnly') if 'reduceOnly' in destination else payload.get('reduceOnly')
@@ -351,7 +364,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             _set_stage('prepare_limit_order')
             open_qty_kind = qty_kind
             if signal_mode == 'target-direction':
-                open_qty_kind = str(destination.get('openQtyKind') or payload.get('openQtyKind') or qty_kind or 'usdt').lower()
+                open_qty_kind = 'usdt'
             prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=quantity, price=price, qty_kind=open_qty_kind)
             request_payload['price'] = prepared['price']
             request_payload['symbol'] = prepared['symbol']
@@ -605,7 +618,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     loop_final_order_row = latest_order or order_row
                     final_status = _bingx_order_status(loop_final_order_row)
                     executed_qty = _bingx_order_executed_qty(loop_final_order_row)
-                    total_qty = Decimal(str(current_prepared.get('quantity') or '0'))
+                    total_qty = current_prepared.get('quantity') or '0'
                     quantity_precision = int((prepared.get('contract') or {}).get('quantityPrecision') or 0)
                     remaining_qty = _bingx_remaining_qty(total_qty, executed_qty, quantity_precision)
                     attempt_entry['finalStatus'] = final_status
@@ -629,7 +642,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         break
 
                     _set_stage(f'{stage_prefix}prepare_repost_price')
-                    repost_prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=remaining_qty, price=None)
+                    repost_prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=remaining_qty, price=None, qty_kind='contracts')
                     current_prepared = repost_prepared
                     request_payload['repostCount'] = request_payload.get('repostCount', 0) + 1
 
@@ -650,7 +663,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     open_side = 'buy' if target_direction == 'long' else 'sell'
                     open_position_side = 'LONG' if target_direction == 'long' else 'SHORT'
                     _set_stage('target_direction_prepare_open')
-                    open_qty_kind = str(destination.get('openQtyKind') or payload.get('openQtyKind') or qty_kind or 'usdt').lower()
+                    open_qty_kind = 'usdt'
                     open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None, qty_kind=open_qty_kind)
                     request_payload['targetOpenQtyKind'] = open_qty_kind
                     open_result, open_final_order_row, open_remaining_qty, open_attempts, _ = _run_limit_repost_loop(
