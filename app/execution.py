@@ -66,7 +66,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
     symbol = destination['symbol']
     side = str(destination.get('side', payload['side'])).lower()
     quantity = destination.get('qty', payload['qty'])
-    qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'usdt').lower()
+    qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
     category = destination.get('category', 'linear')
     execution_mode = destination.get('executionMode', destination.get('mode', 'market'))
     reduce_only = bool(destination.get('reduceOnly', False))
@@ -228,7 +228,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
     symbol = destination['symbol']
     side = str(destination.get('side', payload['side'])).lower()
     quantity = destination.get('qty', payload['qty'])
-    qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'usdt').lower()
+    qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
     category = destination.get('category', 'swap')
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
     reduce_only = destination.get('reduceOnly') if 'reduceOnly' in destination else payload.get('reduceOnly')
@@ -291,12 +291,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         def _run() -> Dict[str, Any]:
             client = BingXBroker(testnet=testnet)
             _set_stage('prepare_limit_order')
-            prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=quantity, price=price, qty_kind=qty_kind)
+            prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=quantity, price=price)
             request_payload['price'] = prepared['price']
             request_payload['symbol'] = prepared['symbol']
             request_payload['qty'] = prepared['quantity']
-            request_payload['inputQty'] = prepared.get('inputQty', quantity)
-            request_payload['inputQtyKind'] = prepared.get('inputQtyKind', qty_kind)
             request_payload['positionSide'] = position_side
             request_payload['bookTicker'] = prepared.get('bookTicker') or {}
             request_payload['contract'] = {
