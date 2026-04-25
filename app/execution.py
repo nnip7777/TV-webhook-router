@@ -375,7 +375,6 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
             close_position_side = None
             effective_reduce_only = bool(reduce_only) if reduce_only is not None else None
-            close_then_open_same_signal = False
             if current_position_mode is True:
                 _set_stage('get_positions_before')
                 positions_before_for_netting = client.get_positions(prepared['symbol'])
@@ -394,9 +393,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     api_position_side = close_position_side
                     effective_reduce_only = None
                     request_payload['positionSideNetting'] = close_position_side
-                    request_payload['nettingAction'] = 'close_opposite_leg_then_open_same_signal'
+                    request_payload['nettingAction'] = 'close_opposite_leg_only'
                     request_payload['hedgeCloseUsesReduceOnly'] = False
-                    close_then_open_same_signal = True
                 else:
                     requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
                     api_position_side = requested_position_side
@@ -477,29 +475,6 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     client_order_id=client_order_id,
                 )
 
-            if close_then_open_same_signal and isinstance(result, dict) and result.get('code') in (None, 0, '0'):
-                open_position_side = 'LONG' if side == 'buy' else 'SHORT'
-                _set_stage('place_limit_order_open_after_close')
-                open_result = client.place_limit_order(
-                    prepared,
-                    position_side=open_position_side,
-                    reduce_only=None,
-                    client_order_id=client_order_id,
-                )
-                request_payload['openAfterClosePositionSide'] = open_position_side
-                if isinstance(result, dict):
-                    result = {
-                        'code': open_result.get('code', result.get('code')),
-                        'msg': open_result.get('msg') or result.get('msg') or '',
-                        'data': {
-                            'closeOrder': result.get('data'),
-                            'openOrder': open_result.get('data'),
-                        },
-                        '_closeOrder': result,
-                        '_openOrder': open_result,
-                    }
-                if isinstance(open_result, dict) and open_result.get('code') not in (None, 0, '0'):
-                    request_payload['openAfterCloseError'] = open_result.get('msg') or open_result.get('code')
 
             if risk_control_enabled:
                 _set_stage('get_balance_after')
