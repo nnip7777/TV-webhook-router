@@ -4463,7 +4463,12 @@ class Handler(BaseHTTPRequestHandler):
                 destination['qtyMode'] = 'fixed'
                 destination['side'] = side
                 destination['qty'] = int(quick_qty_num) if float(quick_qty_num).is_integer() else quick_qty_num
+                if broker == 'bingx':
+                    destination['qtyKind'] = 'usdt'
+                    destination['openQtyKind'] = 'usdt'
                 payload['qty'] = destination['qty']
+                if broker == 'bingx':
+                    payload['qtyKind'] = 'usdt'
 
                 route = {
                     'id': f'quick-{ticker}-{broker}',
