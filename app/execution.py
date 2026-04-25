@@ -340,10 +340,14 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         def _run() -> Dict[str, Any]:
             client = BingXBroker(testnet=testnet)
             _set_stage('prepare_limit_order')
-            prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=quantity, price=price)
+            open_qty_kind = qty_kind
+            if signal_mode == 'target-direction':
+                open_qty_kind = str(destination.get('openQtyKind') or payload.get('openQtyKind') or qty_kind or 'usdt').lower()
+            prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=quantity, price=price, qty_kind=open_qty_kind)
             request_payload['price'] = prepared['price']
             request_payload['symbol'] = prepared['symbol']
-            request_payload['qty'] = prepared['quantity']
+            request_payload['qty'] = prepared.get('quantity', prepared.get('quoteOrderQty', quantity))
+            request_payload['openQtyKind'] = open_qty_kind
             request_payload['positionSide'] = position_side
             request_payload['bookTicker'] = prepared.get('bookTicker') or {}
             request_payload['contract'] = {
@@ -637,7 +641,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     open_side = 'buy' if target_direction == 'long' else 'sell'
                     open_position_side = 'LONG' if target_direction == 'long' else 'SHORT'
                     _set_stage('target_direction_prepare_open')
-                    open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None)
+                    open_qty_kind = str(destination.get('openQtyKind') or payload.get('openQtyKind') or qty_kind or 'usdt').lower()
+                    open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None, qty_kind=open_qty_kind)
+                    request_payload['targetOpenQtyKind'] = open_qty_kind
                     open_result, open_final_order_row, open_remaining_qty, open_attempts, _ = _run_limit_repost_loop(
                         open_prepared,
                         open_position_side,

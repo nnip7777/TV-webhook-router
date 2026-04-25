@@ -380,7 +380,7 @@ class BingXBroker:
             return ranked[0][1]
         return {}
 
-    def prepare_limit_order(self, symbol: str, side: str, qty: Any, price: Optional[Any] = None) -> Dict[str, Any]:
+    def prepare_limit_order(self, symbol: str, side: str, qty: Any, price: Optional[Any] = None, qty_kind: str = 'contracts') -> Dict[str, Any]:
         contract = self.get_contract(symbol)
         if not contract:
             raise RuntimeError(f'BingX contract not found: {symbol}')
@@ -391,6 +391,7 @@ class BingXBroker:
         book = {}
         selected_price = price
         side_normalized = str(side or '').strip().lower()
+        qty_kind_normalized = str(qty_kind or 'contracts').strip().lower()
         if side_normalized not in ('buy', 'sell'):
             raise ValueError(f'Unsupported side for BingX: {side}')
 
@@ -422,21 +423,30 @@ class BingXBroker:
                     f" | contract={json.dumps(contract, ensure_ascii=False)}"
                 )
 
-        quantity_text = _decimal_text(qty, quantity_precision)
         price_text = _decimal_text(selected_price, price_precision)
-        if Decimal(quantity_text) <= 0:
-            raise ValueError('BingX quantity must be greater than 0')
         if Decimal(price_text) <= 0:
             raise ValueError('BingX price must be greater than 0')
 
-        return {
+        prepared = {
             'symbol': contract_symbol,
             'side': 'BUY' if side_normalized == 'buy' else 'SELL',
-            'quantity': quantity_text,
             'price': price_text,
             'contract': contract,
             'bookTicker': book,
+            'qtyKind': qty_kind_normalized,
         }
+        if qty_kind_normalized in ('usdt', 'quote', 'quote_usdt', 'notional'):
+            quote_order_qty = _decimal_text(qty, max(2, quantity_precision))
+            if Decimal(quote_order_qty) <= 0:
+                raise ValueError('BingX quoteOrderQty must be greater than 0')
+            prepared['quoteOrderQty'] = quote_order_qty
+            return prepared
+
+        quantity_text = _decimal_text(qty, quantity_precision)
+        if Decimal(quantity_text) <= 0:
+            raise ValueError('BingX quantity must be greater than 0')
+        prepared['quantity'] = quantity_text
+        return prepared
 
     def place_limit_order(
         self,
@@ -449,10 +459,13 @@ class BingXBroker:
             'symbol': prepared['symbol'],
             'side': prepared['side'],
             'type': 'LIMIT',
-            'quantity': prepared['quantity'],
             'price': prepared['price'],
             'timeInForce': 'GTC',
         }
+        if prepared.get('quoteOrderQty') not in (None, ''):
+            params['quoteOrderQty'] = prepared['quoteOrderQty']
+        else:
+            params['quantity'] = prepared['quantity']
         normalized_position_side = str(position_side or '').upper().strip()
         if normalized_position_side:
             params['positionSide'] = normalized_position_side

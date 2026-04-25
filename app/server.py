@@ -1681,7 +1681,10 @@ def materialize_route(payload: Dict[str, Any], route: Dict[str, Any], config: Di
         }
         rendered = _render_template(merged, context)
         rendered['qty'] = _resolve_qty(payload, rendered)
-        rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or 'contracts').strip().lower()
+        default_qty_kind = 'usdt' if str(rendered.get('signalMode') or payload.get('signalMode') or '').strip().lower() == 'target-direction' else 'contracts'
+        rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or default_qty_kind).strip().lower()
+        if str(rendered.get('signalMode') or '').strip().lower() == 'target-direction' and not rendered.get('openQtyKind'):
+            rendered['openQtyKind'] = str(rendered.get('qtyKind') or 'usdt').strip().lower()
         if 'side' not in rendered:
             rendered['side'] = payload.get('side')
         materialized_destinations.append(rendered)
@@ -1920,7 +1923,10 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
                 raise ValueError(f'min_qty:{min_qty_raw}')
             destination['qtyMode'] = 'fixed'
             destination['qty'] = int(qty_value) if qty_value.is_integer() else qty_value
-            destination['qtyKind'] = 'contracts'
+            signal_mode = str(options.get('signalMode') or destination.get('signalMode') or '').strip().lower()
+            destination['qtyKind'] = 'usdt' if signal_mode == 'target-direction' else 'contracts'
+            if signal_mode == 'target-direction':
+                destination['openQtyKind'] = destination['qtyKind']
             destination['sideMode'] = 'sign'
         except Exception:
             pass
