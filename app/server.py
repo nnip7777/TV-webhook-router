@@ -1664,11 +1664,18 @@ def _render_template(value: Any, context: Dict[str, Any]):
     return value
 
 
+def _payload_implies_target_direction(payload: Dict[str, Any]) -> bool:
+    side = str(payload.get('side') or '').strip().lower()
+    return side in ('2long', '2short', 'long', 'short')
+
+
 def _resolve_qty(payload: Dict[str, Any], destination: Dict[str, Any]) -> Any:
     mode = destination.get('qtyMode', 'pass-through')
     payload_qty = payload.get('qty')
-    payload_qty_kind = str(payload.get('qtyKind') or payload.get('sizeKind') or 'contracts').strip().lower()
-    destination_qty_kind = str(destination.get('qtyKind') or destination.get('sizeKind') or payload_qty_kind or 'contracts').strip().lower()
+    payload_target_mode = _payload_implies_target_direction(payload)
+    payload_default_qty_kind = 'usdt' if payload_target_mode else 'contracts'
+    payload_qty_kind = str(payload.get('qtyKind') or payload.get('sizeKind') or payload_default_qty_kind).strip().lower()
+    destination_qty_kind = str(destination.get('qtyKind') or destination.get('sizeKind') or payload_qty_kind or payload_default_qty_kind).strip().lower()
 
     if mode == 'fixed':
         return destination.get('qty')
@@ -1698,11 +1705,16 @@ def materialize_route(payload: Dict[str, Any], route: Dict[str, Any], config: Di
             'destination': merged,
         }
         rendered = _render_template(merged, context)
+        payload_target_mode = _payload_implies_target_direction(payload)
+        if payload_target_mode and not str(rendered.get('signalMode') or '').strip():
+            rendered['signalMode'] = 'target-direction'
+        elif payload_target_mode and str(rendered.get('signalMode') or '').strip().lower() == 'step-side':
+            rendered['signalMode'] = 'target-direction'
         rendered['qty'] = _resolve_qty(payload, rendered)
-        default_qty_kind = 'usdt' if str(rendered.get('signalMode') or payload.get('signalMode') or '').strip().lower() == 'target-direction' else 'contracts'
+        default_qty_kind = 'usdt' if (payload_target_mode or str(rendered.get('signalMode') or payload.get('signalMode') or '').strip().lower() == 'target-direction') else 'contracts'
         rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or default_qty_kind).strip().lower()
-        if str(rendered.get('signalMode') or '').strip().lower() == 'target-direction' and not rendered.get('openQtyKind'):
-            rendered['openQtyKind'] = str(rendered.get('qtyKind') or 'usdt').strip().lower()
+        if (payload_target_mode or str(rendered.get('signalMode') or '').strip().lower() == 'target-direction') and not rendered.get('openQtyKind'):
+            rendered['openQtyKind'] = 'usdt'
         if 'side' not in rendered:
             rendered['side'] = payload.get('side')
         materialized_destinations.append(rendered)
@@ -1779,8 +1791,14 @@ def _routing_details(route: Dict[str, Any]) -> str:
         piece = f"{broker}:{symbol}"
         if venue:
             piece += f"@{venue}"
+        signal_mode = destination.get('signalMode')
+        qty_kind = destination.get('qtyKind')
         if qty not in (None, ''):
             piece += f" qty={qty}"
+        if signal_mode:
+            piece += f" signalMode={signal_mode}"
+        if qty_kind:
+            piece += f" qtyKind={qty_kind}"
         parts.append(piece)
     return ' | '.join(parts) if parts else 'no active destinations'
 
