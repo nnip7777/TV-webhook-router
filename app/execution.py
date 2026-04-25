@@ -294,9 +294,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=quantity, price=price, qty_kind=qty_kind)
             request_payload['price'] = prepared['price']
             request_payload['symbol'] = prepared['symbol']
-            request_payload['qty'] = prepared['quantity']
+            request_payload['qty'] = prepared.get('quantity', prepared.get('quoteOrderQty', quantity))
             request_payload['inputQty'] = prepared.get('inputQty', quantity)
             request_payload['inputQtyKind'] = prepared.get('inputQtyKind', qty_kind)
+            if prepared.get('quoteOrderQty') not in (None, ''):
+                request_payload['quoteOrderQty'] = prepared.get('quoteOrderQty')
             request_payload['positionSide'] = position_side
             request_payload['bookTicker'] = prepared.get('bookTicker') or {}
             request_payload['contract'] = {

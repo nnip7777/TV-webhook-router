@@ -411,31 +411,28 @@ class BingXBroker:
         if Decimal(price_text) <= 0:
             raise ValueError('BingX price must be greater than 0')
 
-        qty_decimal = Decimal(str(qty))
-        if qty_kind_normalized in ('usdt', 'notional', 'quote', 'quote_usdt'):
-            contract_size_raw = contract.get('size') or contract.get('contractSize') or contract.get('tradeSize') or 1
-            try:
-                contract_size = Decimal(str(contract_size_raw))
-            except Exception:
-                contract_size = Decimal('1')
-            if contract_size <= 0:
-                contract_size = Decimal('1')
-            qty_decimal = qty_decimal / (Decimal(price_text) * contract_size)
-
-        quantity_text = _decimal_text(qty_decimal, quantity_precision)
-        if Decimal(quantity_text) <= 0:
-            raise ValueError('BingX quantity must be greater than 0')
-
-        return {
+        prepared = {
             'symbol': contract_symbol,
             'side': 'BUY' if side_normalized == 'buy' else 'SELL',
-            'quantity': quantity_text,
             'price': price_text,
             'contract': contract,
             'bookTicker': book,
             'inputQty': str(qty),
             'inputQtyKind': qty_kind_normalized,
         }
+
+        if qty_kind_normalized in ('usdt', 'notional', 'quote', 'quote_usdt'):
+            quote_order_qty = _decimal_text(qty, max(2, quantity_precision))
+            if Decimal(quote_order_qty) <= 0:
+                raise ValueError('BingX quoteOrderQty must be greater than 0')
+            prepared['quoteOrderQty'] = quote_order_qty
+            return prepared
+
+        quantity_text = _decimal_text(qty, quantity_precision)
+        if Decimal(quantity_text) <= 0:
+            raise ValueError('BingX quantity must be greater than 0')
+        prepared['quantity'] = quantity_text
+        return prepared
 
     def place_limit_order(
         self,
@@ -448,10 +445,13 @@ class BingXBroker:
             'symbol': prepared['symbol'],
             'side': prepared['side'],
             'type': 'LIMIT',
-            'quantity': prepared['quantity'],
             'price': prepared['price'],
             'timeInForce': 'GTC',
         }
+        if prepared.get('quoteOrderQty') not in (None, ''):
+            params['quoteOrderQty'] = prepared['quoteOrderQty']
+        else:
+            params['quantity'] = prepared['quantity']
         normalized_position_side = str(position_side or '').upper().strip()
         if normalized_position_side:
             params['positionSide'] = normalized_position_side
