@@ -268,11 +268,20 @@ def _bingx_remaining_qty(total_qty: Any, executed_qty: Any, quantity_precision: 
 async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -> Dict[str, Any]:
     broker = destination['broker']
     symbol = destination['symbol']
-    side = str(destination.get('side', payload['side'])).lower()
+    side_raw = str(destination.get('side', payload['side'])).strip().lower()
     signal_mode = str(destination.get('signalMode') or payload.get('signalMode') or 'step-side').strip().lower()
     target_direction = ''
-    if signal_mode == 'target-direction' and side in ('long', 'short'):
-        target_direction = side
+    side = side_raw
+    if side_raw in ('2long', 'long'):
+        signal_mode = 'target-direction'
+        target_direction = 'long'
+        side = 'buy'
+    elif side_raw in ('2short', 'short'):
+        signal_mode = 'target-direction'
+        target_direction = 'short'
+        side = 'sell'
+    elif signal_mode == 'target-direction' and side_raw in ('long', 'short'):
+        target_direction = side_raw
         side = 'buy' if target_direction == 'long' else 'sell'
     quantity = destination.get('qty', payload.get('qty'))
     qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
