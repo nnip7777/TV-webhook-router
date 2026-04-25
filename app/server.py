@@ -3666,6 +3666,9 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
     with LOG_PATH.open('a') as f:
         f.write(json.dumps(decision, ensure_ascii=False, default=str) + '\n')
 
+    origin = str(decision.get('origin') or 'webhook').strip() or 'webhook'
+    destination_kind = 'quick-order-destination' if origin == 'quick-order' else 'webhook-destination'
+    summary_kind = 'quick-order' if origin == 'quick-order' else 'webhook'
     destinations = ((decision.get('executionResult') or {}).get('destinations') or [])
     destination_debug = []
     for dest in destinations:
@@ -3691,7 +3694,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
 
         append_journal({
             'time': decision.get('receivedAt'),
-            'kind': 'webhook-destination',
+            'kind': destination_kind,
             'ticker': payload.get('sourceTicker'),
             'side': payload.get('side'),
             'qty': payload.get('qty'),
@@ -3708,7 +3711,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
         single_destination = route_destinations[:1]
         append_journal({
             'time': decision.get('receivedAt'),
-            'kind': 'webhook',
+            'kind': summary_kind,
             'ticker': payload.get('sourceTicker'),
             'side': payload.get('side'),
             'qty': payload.get('qty'),
@@ -3724,6 +3727,7 @@ def _process_webhook_job(job: Dict[str, Any]) -> None:
     decision = {
         'receivedAt': job.get('receivedAt') or _utcnow_iso(),
         'jobId': job.get('jobId'),
+        'origin': job.get('origin') or 'webhook',
         'payload': payload,
         'execution': job.get('execution') or {},
         'route': materialized,
@@ -3796,11 +3800,12 @@ def _webhook_worker_loop() -> None:
             WEBHOOK_QUEUE.task_done()
 
 
-def _enqueue_webhook_job(payload: Dict[str, Any], materialized: Dict[str, Any], default_execution: Dict[str, Any]) -> Dict[str, Any]:
+def _enqueue_webhook_job(payload: Dict[str, Any], materialized: Dict[str, Any], default_execution: Dict[str, Any], origin: str = 'webhook') -> Dict[str, Any]:
     received_at = _utcnow_iso()
     job = {
         'jobId': secrets.token_hex(8),
         'receivedAt': received_at,
+        'origin': origin,
         'payload': copy.deepcopy(payload),
         'route': copy.deepcopy(materialized),
         'execution': copy.deepcopy(default_execution),
@@ -4466,7 +4471,7 @@ class Handler(BaseHTTPRequestHandler):
                     'destinations': [destination],
                 }
 
-                decision = _enqueue_webhook_job(payload, route, config.get('defaultExecution', {}))
+                decision = _enqueue_webhook_job(payload, route, config.get('defaultExecution', {}), origin='quick-order')
                 _safe_append_journal({
                     'time': _utcnow_iso(),
                     'kind': 'quick-order',
