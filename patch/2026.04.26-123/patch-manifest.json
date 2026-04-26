@@ -1,15 +1,20 @@
 {
   "version": "2026.04.26-123",
-  "builtAt": "2026-04-26T16:59:35.341296+00:00",
-  "fileCount": 16,
+  "createdAt": "2026-04-26T16:59:35.431488+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
+  "fileCount": 18,
   "files": {
     "VERSION": {
-      "sha256": "10bf913215d93e782ebf678f55ade82c990ec13d2e4fc14228e56a0b7d0cde1d",
+      "sha256": "c8c3ded26fbaf181b88c1a455c2e558eefcb0cde272d6856597429ec4777c51b",
       "bytes": 15
     },
+    "BUILD.json": {
+      "sha256": "a3b4addebf45b5fe716aaddfd479fe59182aa3c8ca2727913384da34130ef580",
+      "bytes": 2369
+    },
     "CHANGELOG.md": {
-      "sha256": "c8f33409c0ff52b47ec3fc3511f1bbcb39a33bfea2c953d3c5431f612318138e",
-      "bytes": 22754
+      "sha256": "9d2f565b9725433946a5d4d293c4a8e819a22a9b3380dffe3d378bd4b08228c0",
+      "bytes": 23675
     },
     "README.md": {
       "sha256": "e606c7da89ccad1618da80f8ac0c0da32099d21620609a24f078fe2f9c222997",
@@ -36,8 +41,8 @@
       "bytes": 5225
     },
     "app/execution.py": {
-      "sha256": "c8715d5a2850d4359b7cfad85c5d49dee119e05ab670083c550b8f50eb1c7d19",
-      "bytes": 43347
+      "sha256": "5acd9273dd8d95d841e76831324ab1110d3c19183d55f6fceec352caccb43ba6",
+      "bytes": 43453
     },
     "app/bybit_adapter.py": {
       "sha256": "40479b2fe04a07ba9db55d8f792b7da903ea96dd868dc39a1e5583956b0e58d3",
@@ -58,6 +63,10 @@
     "external/smart_order_executor.py": {
       "sha256": "30c7b739869e39aedf670e6f5a9ad4a7e087ab8dcb55cda25156177de2f27162",
       "bytes": 19451
+    },
+    "scripts/generate_build_manifest.py": {
+      "sha256": "f360f1d6722913bae2dcecad3b7ba6d5f466c1b40e79906318ee43ba2ecfb93a",
+      "bytes": 1582
     },
     "scripts/bingx_split_tunnel_macos.sh": {
       "sha256": "e7743988f6ea856d0f6a635d261daccefd347289371e67a306a507d35e719486",
