@@ -1,6 +1,6 @@
 ## 2026.04.28-127
-- Fixed BingX `target-direction` idempotency in hedge-mode (`positionSide=BOTH`): when the target-side leg already exists and no opposite leg is open, repeated same-direction signals now skip duplicate opens instead of increasing into a second leg.
-- Execution journaling now distinguishes `target_direction_already_on_target` from real open/increase flows, making repeated-webhook diagnosis much clearer.
+- Reverted the incorrect BingX `target-direction` idempotency change: repeated same-direction signals must still increase the existing target-side leg.
+- Continued hardening of target-direction close/reconcile flow remains in place; repeated signals should only fail when an opposite leg cannot actually be flattened.
 
 ## 2026.04.28-126
 - Hardened BingX target-direction execution against fractional-contract drift by carrying close-leg remaining quantities as `Decimal` buckets and quantizing close retries upward to executable contract precision.

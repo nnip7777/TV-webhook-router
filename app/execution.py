@@ -499,20 +499,12 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
                         request_payload['hedgeCloseUsesReduceOnly'] = False
                         target_mode_close_then_open = True
-                    elif same_qty_target > 0:
-                        requested_position_side = desired_side
-                        api_position_side = desired_side
-                        effective_reduce_only = None
-                        request_payload['positionSideNetting'] = desired_side
-                        request_payload['nettingAction'] = 'target_direction_already_on_target'
-                        request_payload['hedgeOpenUsesReduceOnly'] = False
-                        request_payload['skipPrimaryOrder'] = True
                     else:
                         requested_position_side = desired_side
                         api_position_side = desired_side
                         effective_reduce_only = None
                         request_payload['positionSideNetting'] = desired_side
-                        request_payload['nettingAction'] = 'target_direction_open_target'
+                        request_payload['nettingAction'] = 'target_direction_open_or_increase_target'
                         request_payload['hedgeOpenUsesReduceOnly'] = False
                 elif opposite_qty > 0:
                     close_position_side = 'SHORT' if side == 'buy' else 'LONG'
@@ -676,25 +668,12 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
                 return loop_result, loop_final_order_row, remaining_qty, order_attempts, loop_effective_position_side
 
-            skip_primary_order = bool(request_payload.get('skipPrimaryOrder'))
-            if skip_primary_order:
-                _set_stage('target_direction_skip_existing_target')
-                result = {
-                    'code': 0,
-                    'msg': 'target-direction already on target side, skipped duplicate open',
-                    'data': {},
-                }
-                final_order_row = {}
-                remaining_qty = '0'
-                order_attempts = []
-                effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
-            else:
-                result, final_order_row, remaining_qty, order_attempts, effective_position_side = _run_limit_repost_loop(
-                    prepared,
-                    api_position_side,
-                    effective_reduce_only,
-                    stage_prefix='',
-                )
+            result, final_order_row, remaining_qty, order_attempts, effective_position_side = _run_limit_repost_loop(
+                prepared,
+                api_position_side,
+                effective_reduce_only,
+                stage_prefix='',
+            )
 
             if target_mode_close_then_open and isinstance(result, dict) and result.get('code') in (None, 0, '0'):
                 close_phase_attempts = []
