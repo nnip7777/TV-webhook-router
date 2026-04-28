@@ -66,8 +66,23 @@ async def _execute_via_workspace_executor(payload: Dict[str, Any], destination: 
 async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -> Dict[str, Any]:
     broker = destination['broker']
     symbol = destination['symbol']
-    side = str(destination.get('side', payload['side'])).lower()
-    quantity = destination.get('qty', payload['qty'])
+    side_raw = str(destination.get('side', payload['side'])).strip().lower()
+    signal_mode = str(destination.get('signalMode') or payload.get('signalMode') or 'step-side').strip().lower()
+    target_direction = ''
+    side = side_raw
+    if side_raw in ('2long', 'long'):
+        signal_mode = 'target-direction'
+        target_direction = 'long'
+        side = 'buy'
+    elif side_raw in ('2short', 'short'):
+        signal_mode = 'target-direction'
+        target_direction = 'short'
+        side = 'sell'
+    elif signal_mode == 'target-direction' and side_raw in ('long', 'short'):
+        target_direction = side_raw
+        side = 'buy' if target_direction == 'long' else 'sell'
+
+    quantity = destination.get('qty', payload.get('qty'))
     qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
     category = destination.get('category', 'linear')
     execution_mode = destination.get('executionMode', destination.get('mode', 'market'))
@@ -75,12 +90,14 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
     dry_run = bool(destination.get('dryRun', False) or payload.get('dryRun', False))
     request_payload = {
         'symbol': symbol,
-        'side': side,
+        'side': side_raw,
         'qty': quantity,
         'qtyKind': qty_kind,
         'category': category,
         'executionMode': execution_mode,
         'reduceOnly': reduce_only,
+        'signalMode': signal_mode,
+        'targetDirection': target_direction,
     }
 
     if dry_run:
@@ -96,6 +113,91 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
     try:
         def _run() -> Dict[str, Any]:
             client = BybitBroker(testnet=bool(destination.get('testnet', False)))
+            position_idx = destination.get('positionIdx')
+            target_mode_close_then_open = False
+            close_order_result: Dict[str, Any] | None = None
+
+            if signal_mode == 'target-direction':
+                positions = client.get_positions(category=category, symbol=symbol)
+                request_payload['positionListRaw'] = positions
+                rows = (((positions or {}).get('result') or {}).get('list') or [])
+                long_size = 0.0
+                short_size = 0.0
+                long_idx = 0
+                short_idx = 0
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get('symbol') or '').upper() != str(symbol).upper():
+                        continue
+                    try:
+                        size = abs(float(row.get('size') or 0))
+                    except Exception:
+                        size = 0.0
+                    try:
+                        row_idx = int(row.get('positionIdx') or 0)
+                    except Exception:
+                        row_idx = 0
+                    row_side = str(row.get('side') or '').strip().lower()
+                    if row_side == 'buy' and size > 0:
+                        long_size += size
+                        if row_idx:
+                            long_idx = row_idx
+                    elif row_side == 'sell' and size > 0:
+                        short_size += size
+                        if row_idx:
+                            short_idx = row_idx
+                request_payload['positionSnapshot'] = {
+                    'longSize': long_size,
+                    'shortSize': short_size,
+                    'longPositionIdx': long_idx,
+                    'shortPositionIdx': short_idx,
+                }
+
+                desired_side = 'buy' if target_direction == 'long' else 'sell'
+                if target_direction == 'long' and short_size > 0:
+                    target_mode_close_then_open = True
+                    close_qty = short_size
+                    close_side = 'buy'
+                    close_position_idx = short_idx or 2
+                elif target_direction == 'short' and long_size > 0:
+                    target_mode_close_then_open = True
+                    close_qty = long_size
+                    close_side = 'sell'
+                    close_position_idx = long_idx or 1
+                else:
+                    close_qty = 0.0
+                    close_side = ''
+                    close_position_idx = None
+
+                if target_mode_close_then_open:
+                    request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
+                    request_payload['closeOpposite'] = {
+                        'side': close_side,
+                        'qty': close_qty,
+                        'positionIdx': close_position_idx,
+                    }
+                    close_order_result = client.place_order(
+                        symbol=symbol,
+                        side=close_side,
+                        qty=close_qty,
+                        category=category,
+                        order_type='Market',
+                        reduce_only=True,
+                        position_idx=close_position_idx,
+                    )
+                    request_payload['closeOppositeResult'] = close_order_result
+                    close_ret = (close_order_result or {}).get('retCode')
+                    if close_ret not in (None, 0, '0'):
+                        return close_order_result
+                    time.sleep(0.35)
+                    request_payload['postClosePositionListRaw'] = client.get_positions(category=category, symbol=symbol)
+                else:
+                    request_payload['nettingAction'] = 'target_direction_open_or_increase_target'
+
+                if position_idx in (None, ''):
+                    position_idx = 1 if desired_side == 'buy' else 2
+                request_payload['openPositionIdx'] = int(position_idx)
 
             if str(execution_mode).lower() == 'limit':
                 price = destination.get('price') or payload.get('price')
@@ -108,6 +210,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     order_type='Limit',
                     price=price,
                     reduce_only=reduce_only,
+                    position_idx=None if position_idx in (None, '') else int(position_idx),
                 )
             return client.place_order(
                 symbol=symbol,
@@ -116,6 +219,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 category=category,
                 order_type='Market',
                 reduce_only=reduce_only,
+                position_idx=None if position_idx in (None, '') else int(position_idx),
             )
 
         result = await asyncio.to_thread(_run)
