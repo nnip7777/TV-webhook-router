@@ -1,11 +1,16 @@
 {
   "version": "2026.04.28-130",
-  "builtAt": "2026-04-28T13:51:22.981644+00:00",
-  "fileCount": 16,
+  "createdAt": "2026-04-28T13:51:34.254764+00:00",
+  "projectRoot": "/Users/nik/strategy/webhook-router",
+  "fileCount": 18,
   "files": {
     "VERSION": {
       "sha256": "7b52f29b8e29c7d0fb49b58f70db8c6282ef16eaa873716c762896b7b02ddfa2",
       "bytes": 15
+    },
+    "BUILD.json": {
+      "sha256": "a68d39ceafb173a3ba79adfd552eba79072b88190bab6cd0caf3328d67b88405",
+      "bytes": 2369
     },
     "CHANGELOG.md": {
       "sha256": "224aff42a0ec18330cf0991785b0079c60dd777854d18e148bafbdba73fa5cf6",
@@ -58,6 +63,10 @@
     "external/smart_order_executor.py": {
       "sha256": "30c7b739869e39aedf670e6f5a9ad4a7e087ab8dcb55cda25156177de2f27162",
       "bytes": 19451
+    },
+    "scripts/generate_build_manifest.py": {
+      "sha256": "f360f1d6722913bae2dcecad3b7ba6d5f466c1b40e79906318ee43ba2ecfb93a",
+      "bytes": 1582
     },
     "scripts/bingx_split_tunnel_macos.sh": {
       "sha256": "e7743988f6ea856d0f6a635d261daccefd347289371e67a306a507d35e719486",
