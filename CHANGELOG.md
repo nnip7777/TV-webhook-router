@@ -5,6 +5,7 @@
 - Fixed journal/error classification so broker API failures like Bybit `retCode != 0` are recorded as `execution_error` instead of misleading `placed` successes.
 - Added Bybit target-direction flip handling: the router now inspects live positions, closes the opposite leg with a reduce-only market order on the proper `positionIdx`, then opens/increases the target-side leg instead of sending a blind one-step order.
 - Hardened BingX maker repost loop against live hanging orders: `PENDING` is now treated as a cancel-required state, and the router verifies cancel outcome instead of silently leaving a stray open order on the book.
+- Fixed a critical BingX target-direction close-retry bug: remaining opposite-leg close passes now use the true close side and close `positionSide`, instead of accidentally retrying toward the target side and turning a flip into a stray maker open order.
 
 ## 2026.04.28-126
 - Hardened BingX target-direction execution against fractional-contract drift by carrying close-leg remaining quantities as `Decimal` buckets and quantizing close retries upward to executable contract precision.

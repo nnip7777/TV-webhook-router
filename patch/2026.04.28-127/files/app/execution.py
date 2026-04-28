@@ -852,16 +852,17 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         close_verify_error = f'remaining opposite leg {close_still_open_qty} is below executable precision'
                         request_payload['targetDirectionCloseVerifyError'] = close_verify_error
                         break
+                    close_retry_side = 'buy' if close_side_key == 'SHORT' else 'sell'
                     close_retry_prepared = client.prepare_limit_order(
                         symbol=symbol,
-                        side=side,
+                        side=close_retry_side,
                         qty=close_retry_qty,
                         price=None,
                         qty_kind='contracts',
                     )
                     close_result, close_final_order_row, close_remaining_qty, close_order_attempts, effective_position_side = _run_limit_repost_loop(
                         close_retry_prepared,
-                        api_position_side,
+                        close_side_key,
                         effective_reduce_only,
                         stage_prefix=f'target_close_retry_{close_pass + 1}_',
                     )
