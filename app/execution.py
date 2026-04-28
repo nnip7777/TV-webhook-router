@@ -746,7 +746,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             latest_order = polled_row
                             attempt_entry.setdefault('polls', []).append(polled)
                         status = _bingx_order_status(latest_order)
-                        if status in ('FILLED', 'CANCELED', 'EXPIRED'):
+                        if status in ('FILLED', 'CANCELED', 'EXPIRED', 'PENDING'):
                             break
 
                     loop_final_order_row = latest_order or order_row
@@ -761,6 +761,26 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
                     if final_status == 'FILLED' or Decimal(remaining_qty) <= 0:
                         break
+
+                    if final_status == 'PENDING':
+                        if not order_id:
+                            break
+                        _set_stage(f"{stage_prefix}cancel_remainder" if attempt_index == 0 else f"{stage_prefix}cancel_remainder_repost")
+                        cancel_result = client.cancel_order(current_prepared['symbol'], order_id=order_id)
+                        attempt_entry['cancelResult'] = cancel_result
+                        _set_stage(f"{stage_prefix}confirm_cancel" if attempt_index == 0 else f"{stage_prefix}confirm_cancel_repost")
+                        confirmed_order = client.get_order(current_prepared['symbol'], order_id=order_id)
+                        confirmed_order_row = _bingx_extract_order_row(confirmed_order)
+                        if confirmed_order_row:
+                            loop_final_order_row = confirmed_order_row
+                            final_status = _bingx_order_status(confirmed_order_row)
+                            attempt_entry['confirmedStatus'] = final_status
+                        if final_status not in ('CANCELED', 'EXPIRED', 'FILLED'):
+                            loop_result = {
+                                'code': -1,
+                                'msg': f'order {order_id} remained {final_status or "PENDING"} after cancel attempt'
+                            }
+                            break
 
                     if final_status not in ('NEW', 'PARTIALLY_FILLED'):
                         break
