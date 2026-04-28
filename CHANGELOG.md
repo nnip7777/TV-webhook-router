@@ -1,3 +1,17 @@
+## 2026.04.28-127
+- Fixed BingX `target-direction` idempotency in hedge-mode (`positionSide=BOTH`): when the target-side leg already exists and no opposite leg is open, repeated same-direction signals now skip duplicate opens instead of increasing into a second leg.
+- Execution journaling now distinguishes `target_direction_already_on_target` from real open/increase flows, making repeated-webhook diagnosis much clearer.
+
+## 2026.04.28-126
+- Hardened BingX target-direction execution against fractional-contract drift by carrying close-leg remaining quantities as `Decimal` buckets and quantizing close retries upward to executable contract precision.
+- Added an explicit flat-before-open gate plus final post-open position reconcile, so directional execution now fails if the opposite leg still exists or if the target leg does not become the only live side.
+- Added depth-aware price planning metadata from BingX order book and surfaced it in execution logs; current placement still reposts limits, but now records whether visible depth covered the requested size for later tuning/splitting.
+
+## 2026.04.27-125
+- Fixed BingX target-direction execution so opposite-leg close is retried against the live remaining position until the actual opposite side reaches zero.
+- Kept BingX semantics explicit: opposite-leg closing is done in contracts, while target-direction open is executed in USDT.
+- Extended BingX journal details with target-direction close/open pass diagnostics (`targetClosePasses`, `targetOpenPasses`, `closeStillOpenQty`, `targetOpenQtyKind`).
+
 ## 2026.04.26-124
 - Fixed a real Python scoping bug in BingX execution: inner reassignment of `open_qty_kind` inside `_run()` made earlier references raise `UnboundLocalError` on step-side quick orders.
 - Renamed the target-direction open leg variable to keep routed quick-order `qty/qtyKind` behavior from 123 intact while eliminating the scope collision.

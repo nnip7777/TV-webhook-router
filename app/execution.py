@@ -206,12 +206,12 @@ def _bingx_position_qty(position: Dict[str, Any]) -> float:
     return 0.0
 
 
-def _bingx_position_buckets(positions_payload: Dict[str, Any], symbol: str) -> Dict[str, float]:
+def _bingx_position_buckets(positions_payload: Dict[str, Any], symbol: str) -> Dict[str, Decimal]:
     rows = (positions_payload or {}).get('data') or []
     if isinstance(rows, dict):
         rows = [rows]
     symbol_norm = str(symbol or '').replace('-', '').upper()
-    buckets = {'LONG': 0.0, 'SHORT': 0.0}
+    buckets = {'LONG': Decimal('0'), 'SHORT': Decimal('0')}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -221,7 +221,10 @@ def _bingx_position_buckets(positions_payload: Dict[str, Any], symbol: str) -> D
         row_side = str(row.get('positionSide') or row.get('side') or '').upper()
         if row_side not in ('LONG', 'SHORT'):
             continue
-        buckets[row_side] += _bingx_position_qty(row)
+        try:
+            buckets[row_side] += Decimal(str(_bingx_position_qty(row)))
+        except Exception:
+            pass
     return buckets
 
 
@@ -270,7 +273,24 @@ def _bingx_remaining_qty(total_qty: Any, executed_qty: Any, quantity_precision: 
         return '0'
     quantum = Decimal('1').scaleb(-max(0, int(quantity_precision)))
     remaining = remaining.quantize(quantum, rounding=ROUND_UP)
+    if remaining <= 0:
+        return '0'
     text = format(remaining, 'f').rstrip('0').rstrip('.')
+    return text or '0'
+
+
+def _bingx_quantize_contract_qty_up(value: Any, quantity_precision: int) -> str:
+    try:
+        dec = Decimal(str(value).strip())
+    except Exception:
+        return '0'
+    if dec <= 0:
+        return '0'
+    quantum = Decimal('1').scaleb(-max(0, int(quantity_precision)))
+    dec = dec.quantize(quantum, rounding=ROUND_UP)
+    if dec <= 0:
+        return '0'
+    text = format(dec, 'f').rstrip('0').rstrip('.')
     return text or '0'
 
 
@@ -371,6 +391,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             request_payload['openQtyKind'] = open_qty_kind
             request_payload['positionSide'] = position_side
             request_payload['bookTicker'] = prepared.get('bookTicker') or {}
+            request_payload['depthPlan'] = prepared.get('depthPlan') or {}
             request_payload['contract'] = {
                 'symbol': (prepared.get('contract') or {}).get('symbol'),
                 'pricePrecision': (prepared.get('contract') or {}).get('pricePrecision'),
@@ -455,21 +476,21 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 positions_before_for_netting = client.get_positions(prepared['symbol'])
                 buckets_before = _bingx_position_buckets(positions_before_for_netting, prepared['symbol'])
                 request_payload['positionBucketsBefore'] = buckets_before
-                long_qty = float(buckets_before.get('LONG', 0.0) or 0.0)
-                short_qty = float(buckets_before.get('SHORT', 0.0) or 0.0)
+                long_qty = buckets_before.get('LONG', Decimal('0')) or Decimal('0')
+                short_qty = buckets_before.get('SHORT', Decimal('0')) or Decimal('0')
                 net_qty = long_qty - short_qty
-                request_payload['positionNetBefore'] = net_qty
+                request_payload['positionNetBefore'] = float(net_qty)
                 opposite_qty = short_qty if side == 'buy' else long_qty
                 same_side_qty = long_qty if side == 'buy' else short_qty
-                request_payload['positionOppositeBefore'] = opposite_qty
-                request_payload['positionSameSideBefore'] = same_side_qty
+                request_payload['positionOppositeBefore'] = float(opposite_qty)
+                request_payload['positionSameSideBefore'] = float(same_side_qty)
                 if signal_mode == 'target-direction':
                     desired_side = 'LONG' if target_direction == 'long' else 'SHORT'
                     opposite_side = 'SHORT' if desired_side == 'LONG' else 'LONG'
-                    opposite_qty_target = float(buckets_before.get(opposite_side, 0.0) or 0.0)
-                    same_qty_target = float(buckets_before.get(desired_side, 0.0) or 0.0)
-                    request_payload['targetDirectionOppositeQty'] = opposite_qty_target
-                    request_payload['targetDirectionSameQty'] = same_qty_target
+                    opposite_qty_target = buckets_before.get(opposite_side, Decimal('0')) or Decimal('0')
+                    same_qty_target = buckets_before.get(desired_side, Decimal('0')) or Decimal('0')
+                    request_payload['targetDirectionOppositeQty'] = float(opposite_qty_target)
+                    request_payload['targetDirectionSameQty'] = float(same_qty_target)
                     if opposite_qty_target > 0:
                         close_position_side = opposite_side
                         api_position_side = opposite_side
@@ -478,12 +499,20 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
                         request_payload['hedgeCloseUsesReduceOnly'] = False
                         target_mode_close_then_open = True
+                    elif same_qty_target > 0:
+                        requested_position_side = desired_side
+                        api_position_side = desired_side
+                        effective_reduce_only = None
+                        request_payload['positionSideNetting'] = desired_side
+                        request_payload['nettingAction'] = 'target_direction_already_on_target'
+                        request_payload['hedgeOpenUsesReduceOnly'] = False
+                        request_payload['skipPrimaryOrder'] = True
                     else:
                         requested_position_side = desired_side
                         api_position_side = desired_side
                         effective_reduce_only = None
                         request_payload['positionSideNetting'] = desired_side
-                        request_payload['nettingAction'] = 'target_direction_open_or_increase_target'
+                        request_payload['nettingAction'] = 'target_direction_open_target'
                         request_payload['hedgeOpenUsesReduceOnly'] = False
                 elif opposite_qty > 0:
                     close_position_side = 'SHORT' if side == 'buy' else 'LONG'
@@ -647,18 +676,112 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
                 return loop_result, loop_final_order_row, remaining_qty, order_attempts, loop_effective_position_side
 
-            result, final_order_row, remaining_qty, order_attempts, effective_position_side = _run_limit_repost_loop(
-                prepared,
-                api_position_side,
-                effective_reduce_only,
-                stage_prefix='',
-            )
+            skip_primary_order = bool(request_payload.get('skipPrimaryOrder'))
+            if skip_primary_order:
+                _set_stage('target_direction_skip_existing_target')
+                result = {
+                    'code': 0,
+                    'msg': 'target-direction already on target side, skipped duplicate open',
+                    'data': {},
+                }
+                final_order_row = {}
+                remaining_qty = '0'
+                order_attempts = []
+                effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
+            else:
+                result, final_order_row, remaining_qty, order_attempts, effective_position_side = _run_limit_repost_loop(
+                    prepared,
+                    api_position_side,
+                    effective_reduce_only,
+                    stage_prefix='',
+                )
 
             if target_mode_close_then_open and isinstance(result, dict) and result.get('code') in (None, 0, '0'):
-                close_remaining = Decimal(str(remaining_qty or '0')) if remaining_qty not in (None, '') else Decimal('0')
-                if close_remaining > 0:
-                    request_payload['targetDirectionCloseRemainder'] = str(close_remaining)
-                else:
+                close_phase_attempts = []
+                close_side_key = str(close_position_side or '').upper()
+                quantity_precision = int((prepared.get('contract') or {}).get('quantityPrecision') or 0)
+                max_close_passes = 8
+                close_verify_error = ''
+                close_still_open_qty = Decimal('0')
+
+                for close_pass in range(max_close_passes):
+                    try:
+                        _set_stage('target_direction_verify_close_positions')
+                        positions_after_close = client.get_positions(prepared['symbol'])
+                        verified_buckets = _bingx_position_buckets(positions_after_close, prepared['symbol'])
+                        request_payload['positionBucketsAfterClose'] = {k: float(v) for k, v in verified_buckets.items()}
+                        if close_side_key in ('LONG', 'SHORT'):
+                            close_still_open_qty = verified_buckets.get(close_side_key, Decimal('0')) or Decimal('0')
+                        else:
+                            close_still_open_qty = Decimal('0')
+                        close_phase_attempts.append({
+                            'pass': close_pass + 1,
+                            'remainingPositionQty': str(close_still_open_qty),
+                            'buckets': {k: float(v) for k, v in verified_buckets.items()},
+                        })
+                        request_payload['targetDirectionCloseStillOpenQty'] = str(close_still_open_qty)
+                    except Exception as verify_error:
+                        close_verify_error = str(verify_error)
+                        request_payload['targetDirectionCloseVerifyError'] = close_verify_error
+                        break
+
+                    if close_still_open_qty <= 0:
+                        break
+
+                    if close_pass >= max_close_passes - 1:
+                        break
+
+                    _set_stage('target_direction_prepare_close_retry')
+                    close_retry_qty = _bingx_quantize_contract_qty_up(close_still_open_qty, quantity_precision)
+                    if close_retry_qty == '0':
+                        close_verify_error = f'remaining opposite leg {close_still_open_qty} is below executable precision'
+                        request_payload['targetDirectionCloseVerifyError'] = close_verify_error
+                        break
+                    close_retry_prepared = client.prepare_limit_order(
+                        symbol=symbol,
+                        side=side,
+                        qty=close_retry_qty,
+                        price=None,
+                        qty_kind='contracts',
+                    )
+                    close_result, close_final_order_row, close_remaining_qty, close_order_attempts, effective_position_side = _run_limit_repost_loop(
+                        close_retry_prepared,
+                        api_position_side,
+                        effective_reduce_only,
+                        stage_prefix=f'target_close_retry_{close_pass + 1}_',
+                    )
+                    close_phase_attempts[-1]['closeOrderRemainingQty'] = close_remaining_qty
+                    close_phase_attempts[-1]['closeOrderAttempts'] = [
+                        {
+                            'attempt': item.get('attempt'),
+                            'placedQty': item.get('placedQty'),
+                            'placedPrice': item.get('placedPrice'),
+                            'orderId': item.get('orderId'),
+                            'finalStatus': item.get('finalStatus'),
+                            'executedQty': item.get('executedQty'),
+                            'remainingQty': item.get('remainingQty'),
+                        }
+                        for item in close_order_attempts
+                    ]
+                    result = close_result
+                    final_order_row = close_final_order_row
+                    remaining_qty = close_remaining_qty
+                    order_attempts.extend([{**item, 'phase': f'target-close-retry-{close_pass + 1}'} for item in close_order_attempts])
+                    if not isinstance(result, dict) or result.get('code') not in (None, 0, '0'):
+                        break
+
+                request_payload['targetDirectionCloseAttempts'] = close_phase_attempts
+
+                if close_still_open_qty <= 0 and not close_verify_error and isinstance(result, dict) and result.get('code') in (None, 0, '0'):
+                    _set_stage('target_direction_verify_flat_before_open')
+                    positions_before_open = client.get_positions(prepared['symbol'])
+                    buckets_before_open = _bingx_position_buckets(positions_before_open, prepared['symbol'])
+                    request_payload['positionBucketsBeforeTargetOpen'] = {k: float(v) for k, v in buckets_before_open.items()}
+                    if (buckets_before_open.get(close_side_key, Decimal('0')) or Decimal('0')) > 0:
+                        close_verify_error = 'opposite leg still exists before target open'
+                        request_payload['targetDirectionCloseVerifyError'] = close_verify_error
+
+                if close_still_open_qty <= 0 and not close_verify_error and isinstance(result, dict) and result.get('code') in (None, 0, '0'):
                     open_side = 'buy' if target_direction == 'long' else 'sell'
                     open_position_side = 'LONG' if target_direction == 'long' else 'SHORT'
                     _set_stage('target_direction_prepare_open')
@@ -688,6 +811,21 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     final_order_row = open_final_order_row
                     remaining_qty = open_remaining_qty
                     order_attempts.extend([{**item, 'phase': 'target-open'} for item in open_attempts])
+
+                    if isinstance(result, dict) and result.get('code') in (None, 0, '0'):
+                        _set_stage('target_direction_verify_final_positions')
+                        final_positions = client.get_positions(prepared['symbol'])
+                        final_buckets = _bingx_position_buckets(final_positions, prepared['symbol'])
+                        request_payload['positionBucketsAfterTargetOpen'] = {k: float(v) for k, v in final_buckets.items()}
+                        expected_side = 'LONG' if target_direction == 'long' else 'SHORT'
+                        opposite_side = 'SHORT' if expected_side == 'LONG' else 'LONG'
+                        final_expected_qty = final_buckets.get(expected_side, Decimal('0')) or Decimal('0')
+                        final_opposite_qty = final_buckets.get(opposite_side, Decimal('0')) or Decimal('0')
+                        if final_expected_qty <= 0 or final_opposite_qty > 0:
+                            result = {
+                                'code': -1,
+                                'msg': f'target-direction final reconcile failed: expected {expected_side} > 0 and {opposite_side} == 0, got {final_buckets}'
+                            }
 
             request_payload['orderAttempts'] = [
                 {
