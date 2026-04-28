@@ -206,18 +206,26 @@ def _bingx_position_qty(position: Dict[str, Any]) -> float:
     return 0.0
 
 
-def _bingx_position_buckets(positions_payload: Dict[str, Any], symbol: str) -> Dict[str, Decimal]:
+def _bingx_position_rows(positions_payload: Dict[str, Any], symbol: str) -> List[Dict[str, Any]]:
     rows = (positions_payload or {}).get('data') or []
     if isinstance(rows, dict):
         rows = [rows]
     symbol_norm = str(symbol or '').replace('-', '').upper()
-    buckets = {'LONG': Decimal('0'), 'SHORT': Decimal('0')}
+    matched: List[Dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         row_symbol = str(row.get('symbol') or '').replace('-', '').upper()
         if row_symbol != symbol_norm:
             continue
+        matched.append(row)
+    return matched
+
+
+def _bingx_position_buckets(positions_payload: Dict[str, Any], symbol: str) -> Dict[str, Decimal]:
+    rows = _bingx_position_rows(positions_payload, symbol)
+    buckets = {'LONG': Decimal('0'), 'SHORT': Decimal('0')}
+    for row in rows:
         row_side = str(row.get('positionSide') or row.get('side') or '').upper()
         if row_side not in ('LONG', 'SHORT'):
             continue
@@ -474,8 +482,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             if current_position_mode is True:
                 _set_stage('get_positions_before')
                 positions_before_for_netting = client.get_positions(prepared['symbol'])
+                position_rows_before = _bingx_position_rows(positions_before_for_netting, prepared['symbol'])
                 buckets_before = _bingx_position_buckets(positions_before_for_netting, prepared['symbol'])
-                request_payload['positionBucketsBefore'] = buckets_before
+                request_payload['positionRowsBeforeRaw'] = position_rows_before
+                request_payload['positionBucketsBefore'] = {k: float(v) for k, v in buckets_before.items()}
                 long_qty = buckets_before.get('LONG', Decimal('0')) or Decimal('0')
                 short_qty = buckets_before.get('SHORT', Decimal('0')) or Decimal('0')
                 net_qty = long_qty - short_qty
@@ -687,7 +697,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     try:
                         _set_stage('target_direction_verify_close_positions')
                         positions_after_close = client.get_positions(prepared['symbol'])
+                        position_rows_after_close = _bingx_position_rows(positions_after_close, prepared['symbol'])
                         verified_buckets = _bingx_position_buckets(positions_after_close, prepared['symbol'])
+                        request_payload['positionRowsAfterCloseRaw'] = position_rows_after_close
                         request_payload['positionBucketsAfterClose'] = {k: float(v) for k, v in verified_buckets.items()}
                         if close_side_key in ('LONG', 'SHORT'):
                             close_still_open_qty = verified_buckets.get(close_side_key, Decimal('0')) or Decimal('0')
@@ -754,7 +766,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 if close_still_open_qty <= 0 and not close_verify_error and isinstance(result, dict) and result.get('code') in (None, 0, '0'):
                     _set_stage('target_direction_verify_flat_before_open')
                     positions_before_open = client.get_positions(prepared['symbol'])
+                    position_rows_before_open = _bingx_position_rows(positions_before_open, prepared['symbol'])
                     buckets_before_open = _bingx_position_buckets(positions_before_open, prepared['symbol'])
+                    request_payload['positionRowsBeforeTargetOpenRaw'] = position_rows_before_open
                     request_payload['positionBucketsBeforeTargetOpen'] = {k: float(v) for k, v in buckets_before_open.items()}
                     if (buckets_before_open.get(close_side_key, Decimal('0')) or Decimal('0')) > 0:
                         close_verify_error = 'opposite leg still exists before target open'
@@ -794,7 +808,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     if isinstance(result, dict) and result.get('code') in (None, 0, '0'):
                         _set_stage('target_direction_verify_final_positions')
                         final_positions = client.get_positions(prepared['symbol'])
+                        final_position_rows = _bingx_position_rows(final_positions, prepared['symbol'])
                         final_buckets = _bingx_position_buckets(final_positions, prepared['symbol'])
+                        request_payload['positionRowsAfterTargetOpenRaw'] = final_position_rows
                         request_payload['positionBucketsAfterTargetOpen'] = {k: float(v) for k, v in final_buckets.items()}
                         expected_side = 'LONG' if target_direction == 'long' else 'SHORT'
                         opposite_side = 'SHORT' if expected_side == 'LONG' else 'LONG'

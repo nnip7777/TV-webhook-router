@@ -1,6 +1,7 @@
 ## 2026.04.28-127
 - Reverted the incorrect BingX `target-direction` idempotency change: repeated same-direction signals must still increase the existing target-side leg.
 - Continued hardening of target-direction close/reconcile flow remains in place; repeated signals should only fail when an opposite leg cannot actually be flattened.
+- Added raw per-symbol BingX position row snapshots to execution journaling before close, after close, before target open, and after target open to catch partial or delayed `get_positions()` responses.
 
 ## 2026.04.28-126
 - Hardened BingX target-direction execution against fractional-contract drift by carrying close-leg remaining quantities as `Decimal` buckets and quantizing close retries upward to executable contract precision.
