@@ -1557,7 +1557,7 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
 </head>
 <body>
   <div class='panel'>
-    <div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/logout'>logout</a></div>
+    <div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/journal'>journal</a><a href='/effectiveness'>effectiveness</a><a href='/logout'>logout</a></div>
     <h2 style='margin-bottom:4px;'>Journal</h2>
     <div class='muted'>Журнал по неделям. Новая неделя → новый файл. Старые недели автоматически сжимаются в .gz и удаляются по лимиту недель хранения.</div>
     <form method='get' action='/journal' style='margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;'>
@@ -2466,6 +2466,250 @@ def _fmt_num(value: Any, decimals: int = 2) -> str:
     except Exception:
         return '—'
     return f"{num:,.{decimals}f}"
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ''):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _extract_trade_summary(entry: Dict[str, Any]) -> Dict[str, Any]:
+    details = str(entry.get('details') or '')
+    request_data: Dict[str, Any] = {}
+    result_data: Dict[str, Any] = {}
+    for marker, target in (('request=', request_data), ('result=', result_data)):
+        idx = details.find(marker)
+        if idx < 0:
+            continue
+        start = idx + len(marker)
+        tail = details[start:]
+        next_sep = tail.find(' | ')
+        payload_text = tail if next_sep < 0 else tail[:next_sep]
+        try:
+            parsed = json.loads(payload_text)
+            if isinstance(parsed, dict):
+                target.update(parsed)
+        except Exception:
+            pass
+
+    qty = _to_float(request_data.get('qty'), _to_float(entry.get('qty')))
+    side = str(request_data.get('side') or entry.get('side') or '').strip().lower()
+    order_price = _to_float(request_data.get('price'))
+    result_price = _to_float(result_data.get('price'))
+    entry_price = order_price or result_price
+    leverage = _to_float((request_data.get('riskControl') or {}).get('preTradeLeverage'), 1.0)
+    leverage = leverage if leverage > 0 else 1.0
+    notional = abs(_to_float((request_data.get('riskControl') or {}).get('expectedNotional')))
+    if notional <= 0 and entry_price > 0 and qty > 0:
+        qty_kind = str(request_data.get('qtyKind') or '').lower()
+        if qty_kind == 'usdt':
+            notional = qty * leverage
+        else:
+            notional = qty * entry_price
+    fee_rate = 0.0005
+    estimated_fee = notional * fee_rate if notional > 0 else 0.0
+    side_sign = 1 if side in ('buy', 'long', '2long') else -1 if side in ('sell', 'short', '2short') else 0
+    min_move_to_fee_pct = ((estimated_fee * 2.0) / notional * 100.0) if notional > 0 else 0.0
+    min_price_move_abs = entry_price * (min_move_to_fee_pct / 100.0) if entry_price > 0 else 0.0
+    return {
+        'ticker': str(entry.get('ticker') or ''),
+        'symbol': str(entry.get('symbol') or ''),
+        'broker': str((entry.get('brokers') or [''])[0] or ''),
+        'venue': str(entry.get('venue') or ''),
+        'side': side,
+        'sideSign': side_sign,
+        'qty': qty,
+        'entryPrice': entry_price,
+        'notional': notional,
+        'estimatedFeeOneSide': estimated_fee,
+        'estimatedFeeRoundTrip': estimated_fee * 2.0,
+        'feeRate': fee_rate,
+        'leverage': leverage,
+        'minMoveToFeePct': min_move_to_fee_pct,
+        'minPriceMoveAbs': min_price_move_abs,
+        'status': str(entry.get('status') or ''),
+        'time': str(entry.get('time') or ''),
+        'details': details,
+        'request': request_data,
+        'result': result_data,
+    }
+
+
+def _journal_effectiveness(limit: int = 4000, week: str = '', broker: str = '', ticker: str = '') -> Dict[str, Any]:
+    raw_items = load_journal(limit=limit, week=week, broker=broker, ticker=ticker, kind='', status='', sort='desc')
+    trade_items = [
+        item for item in raw_items
+        if str(item.get('kind') or '') in ('webhook-destination', 'quick-order-destination')
+        and str(item.get('status') or '') in ('placed', 'dry_run', 'execution_error')
+    ]
+    rows = [_extract_trade_summary(item) for item in trade_items]
+    rows = [row for row in rows if row.get('ticker')]
+    per_ticker: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        ticker_key = row['ticker']
+        bucket = per_ticker.setdefault(ticker_key, {
+            'ticker': ticker_key,
+            'broker': row.get('broker') or '',
+            'venue': row.get('venue') or '',
+            'placedCount': 0,
+            'dryRunCount': 0,
+            'errorCount': 0,
+            'sumNotional': 0.0,
+            'sumFeeOneSide': 0.0,
+            'sumFeeRoundTrip': 0.0,
+            'avgEntryPriceAccumulator': 0.0,
+            'avgEntryPriceCount': 0,
+            'maxFeeSharePct': 0.0,
+        })
+        status_value = row.get('status') or ''
+        if status_value == 'placed':
+            bucket['placedCount'] += 1
+        elif status_value == 'dry_run':
+            bucket['dryRunCount'] += 1
+        elif status_value == 'execution_error':
+            bucket['errorCount'] += 1
+        bucket['sumNotional'] += _to_float(row.get('notional'))
+        bucket['sumFeeOneSide'] += _to_float(row.get('estimatedFeeOneSide'))
+        bucket['sumFeeRoundTrip'] += _to_float(row.get('estimatedFeeRoundTrip'))
+        entry_price = _to_float(row.get('entryPrice'))
+        if entry_price > 0:
+            bucket['avgEntryPriceAccumulator'] += entry_price
+            bucket['avgEntryPriceCount'] += 1
+        bucket['maxFeeSharePct'] = max(bucket['maxFeeSharePct'], _to_float(row.get('minMoveToFeePct')))
+        if not bucket.get('broker') and row.get('broker'):
+            bucket['broker'] = row.get('broker') or ''
+        if not bucket.get('venue') and row.get('venue'):
+            bucket['venue'] = row.get('venue') or ''
+
+    items = []
+    for payload in per_ticker.values():
+        placed_count = int(payload.get('placedCount') or 0)
+        avg_notional = (payload['sumNotional'] / placed_count) if placed_count else 0.0
+        avg_fee_one_side = (payload['sumFeeOneSide'] / placed_count) if placed_count else 0.0
+        avg_fee_round_trip = (payload['sumFeeRoundTrip'] / placed_count) if placed_count else 0.0
+        avg_entry_price = (payload['avgEntryPriceAccumulator'] / payload['avgEntryPriceCount']) if payload['avgEntryPriceCount'] else 0.0
+        fee_bps = ((avg_fee_round_trip / avg_notional) * 10000.0) if avg_notional > 0 else 0.0
+        items.append({
+            'ticker': payload['ticker'],
+            'broker': payload.get('broker') or '',
+            'venue': payload.get('venue') or '',
+            'placedCount': placed_count,
+            'dryRunCount': int(payload.get('dryRunCount') or 0),
+            'errorCount': int(payload.get('errorCount') or 0),
+            'avgEntryPrice': avg_entry_price,
+            'avgNotional': avg_notional,
+            'avgFeeOneSide': avg_fee_one_side,
+            'avgFeeRoundTrip': avg_fee_round_trip,
+            'feeBpsRoundTrip': fee_bps,
+            'minMoveToFeePct': ((avg_fee_round_trip / avg_notional) * 100.0) if avg_notional > 0 else 0.0,
+            'minPriceMoveAbs': avg_entry_price * ((avg_fee_round_trip / avg_notional)) if avg_notional > 0 and avg_entry_price > 0 else 0.0,
+            'suggestedLotMultiplier2x': max(1.0, 2.0),
+            'sumNotional': payload['sumNotional'],
+            'sumFeeRoundTrip': payload['sumFeeRoundTrip'],
+            'maxFeeSharePct': payload['maxFeeSharePct'],
+        })
+    items.sort(key=lambda item: (-item.get('sumFeeRoundTrip', 0.0), item.get('ticker', '')))
+
+    totals = {
+        'tickers': len(items),
+        'placedCount': sum(int(item.get('placedCount') or 0) for item in items),
+        'dryRunCount': sum(int(item.get('dryRunCount') or 0) for item in items),
+        'errorCount': sum(int(item.get('errorCount') or 0) for item in items),
+        'sumNotional': sum(_to_float(item.get('sumNotional')) for item in items),
+        'sumFeeRoundTrip': sum(_to_float(item.get('sumFeeRoundTrip')) for item in items),
+    }
+    totals['avgFeeSharePct'] = ((totals['sumFeeRoundTrip'] / totals['sumNotional']) * 100.0) if totals['sumNotional'] > 0 else 0.0
+    return {
+        'generatedAt': _utcnow_iso(),
+        'week': week,
+        'broker': broker,
+        'ticker': ticker,
+        'totals': totals,
+        'items': items,
+        'rows': rows[:200],
+    }
+
+
+def _render_effectiveness_page(week: str = '', broker: str = '', ticker: str = '') -> str:
+    report = _journal_effectiveness(limit=4000, week=week, broker=broker, ticker=ticker)
+    items = report.get('items') or []
+    totals = report.get('totals') or {}
+    files = _journal_files()
+    week_values = []
+    for p in files:
+        value = p.name.replace('journal-','').replace('.jsonl.gz','').replace('.jsonl','')
+        if value not in week_values:
+            week_values.append(value)
+    week_options = ''.join(f"<option value='{html.escape(v)}' {'selected' if week == v else ''}>{html.escape(v)}</option>" for v in week_values)
+    broker_options = ''.join(f"<option value='{name}' {'selected' if broker == name else ''}>{name}</option>" for name in ['alor','bybit','bingx','finam','schwab'])
+    rows = []
+    for item in items:
+        rows.append(
+            f"<tr>"
+            f"<td>{html.escape(str(item.get('ticker') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('broker') or ''))}</td>"
+            f"<td>{int(item.get('placedCount') or 0)}</td>"
+            f"<td>{int(item.get('dryRunCount') or 0)}</td>"
+            f"<td>{int(item.get('errorCount') or 0)}</td>"
+            f"<td>{html.escape(_fmt_num(item.get('avgNotional'), 2))}</td>"
+            f"<td>{html.escape(_fmt_num(item.get('avgFeeRoundTrip'), 4))}</td>"
+            f"<td>{html.escape(_fmt_num(item.get('feeBpsRoundTrip'), 2))}</td>"
+            f"<td>{html.escape(_fmt_num(item.get('minMoveToFeePct'), 4))}%</td>"
+            f"<td>{html.escape(_fmt_num(item.get('minPriceMoveAbs'), 6))}</td>"
+            f"<td>{html.escape(_fmt_num(item.get('suggestedLotMultiplier2x'), 2))}x</td>"
+            f"</tr>"
+        )
+    body_rows = ''.join(rows) or "<tr><td colspan='11'>Пока недостаточно данных по ордерам</td></tr>"
+    return f"""
+<!doctype html>
+<html lang='ru'>
+<head>
+  <meta charset='utf-8'>
+  <title>Webhook Router Effectiveness</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 16px; background: #111827; color: #f3f4f6; }}
+    .panel {{ background: #1f2937; padding: 14px; border-radius: 12px; max-width: 1280px; margin: 0 auto; }}
+    .nav a {{ color:#93c5fd; text-decoration:none; margin-right:12px; }}
+    table {{ width:100%; border-collapse:collapse; margin-top:12px; }}
+    th, td {{ border-bottom:1px solid #374151; padding:8px; text-align:left; font-size:12px; vertical-align:top; }}
+    th {{ color:#cbd5e1; }}
+    .muted {{ color:#9ca3af; font-size:11px; }}
+    .cards {{ display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:10px; margin-top:12px; }}
+    .card {{ background:#111827; border:1px solid #374151; border-radius:10px; padding:12px; }}
+    .card .label {{ font-size:11px; color:#9ca3af; margin-bottom:6px; }}
+    .card .value {{ font-size:18px; color:#f3f4f6; }}
+  </style>
+</head>
+<body>
+  <div class='panel'>
+    <div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/journal'>journal</a><a href='/logout'>logout</a></div>
+    <h2 style='margin-bottom:4px;'>Эффективность сделок</h2>
+    <div class='muted'>Это оценка по журналу размещенных ордеров. Сейчас считаем порог, при котором комиссия начинает съедать сделку: round-trip fee, required move %, и ориентир по лотности. Для точного realized PnL нужен лог фактических fill на входе и на встречном выходе.</div>
+    <form method='get' action='/effectiveness' style='margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;'>
+      <select name='week'><option value=''>all weeks</option>{week_options}</select>
+      <select name='broker'><option value=''>all brokers</option>{broker_options}</select>
+      <input type='text' name='ticker' value='{html.escape(ticker)}' placeholder='ticker'>
+      <button type='submit'>Filter</button>
+      <a href='/effectiveness' style='color:#93c5fd;text-decoration:none;'>reset</a>
+    </form>
+    <div class='cards'>
+      <div class='card'><div class='label'>тикеров</div><div class='value'>{int(totals.get('tickers') or 0)}</div></div>
+      <div class='card'><div class='label'>placed orders</div><div class='value'>{int(totals.get('placedCount') or 0)}</div></div>
+      <div class='card'><div class='label'>оценка round-trip fee</div><div class='value'>{html.escape(_fmt_num(totals.get('sumFeeRoundTrip'), 4))}</div></div>
+      <div class='card'><div class='label'>средняя fee-нагрузка</div><div class='value'>{html.escape(_fmt_num(totals.get('avgFeeSharePct'), 4))}%</div></div>
+    </div>
+    <table>
+      <thead><tr><th>ticker</th><th>broker</th><th>placed</th><th>dry-run</th><th>errors</th><th>avg notional</th><th>avg round-trip fee</th><th>fee bps</th><th>move to fee</th><th>price move</th><th>lot hint</th></tr></thead>
+      <tbody>{body_rows}</tbody>
+    </table>
+  </div>
+</body>
+</html>
+"""
 
 
 def _cleanup_broker_order_state(now_ts: float = None) -> None:
@@ -3717,6 +3961,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
         <div style='display:flex; gap:10px; align-items:center;'>
           <a href='/settings' style='color:#93c5fd;text-decoration:none;'>Settings</a>
           <a href='/journal' style='color:#93c5fd;text-decoration:none;'>Journal</a>
+          <a href='/effectiveness' style='color:#93c5fd;text-decoration:none;'>Effectiveness</a>
           {"<a href='/users' style='color:#93c5fd;text-decoration:none;'>Users</a>" if can_manage_users else ""}
           <button type='button' disabled>Save all позже</button>
           <a href='/logout' style='color:#fca5a5;text-decoration:none;'>Logout</a>
@@ -4004,6 +4249,15 @@ class Handler(BaseHTTPRequestHandler):
                 kind=query.get('kind', [''])[0],
                 page=int(query.get('page', ['1'])[0] or '1'),
                 sort=query.get('sort', ['desc'])[0],
+            ))
+        if route_path == '/effectiveness':
+            query = parse_qs(self.path.split('?', 1)[1] if '?' in self.path else '', keep_blank_values=True)
+            if not _has_permission(current_user, 'canViewJournal'):
+                return self._json(403, {'error': 'forbidden'})
+            return self._html(200, _render_effectiveness_page(
+                week=query.get('week', [''])[0],
+                broker=query.get('broker', [''])[0],
+                ticker=query.get('ticker', [''])[0],
             ))
         if route_path == '/journal/download':
             if not _has_permission(current_user, 'canViewJournal'):
