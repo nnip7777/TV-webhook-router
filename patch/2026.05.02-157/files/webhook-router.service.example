@@ -1,0 +1,16 @@
+[Unit]
+Description=webhook-router
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/webhook-router
+EnvironmentFile=/opt/webhook-router/.env
+ExecStart=/usr/bin/python3 /opt/webhook-router/app/server.py
+Restart=always
+RestartSec=3
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

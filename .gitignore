@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+logs/
+secrets/
+*.log
+.DS_Store
+patch/_applied_backups/
+
+# Broker configs and secrets
+broker/
+
+# Data (analytics DB, etc.)
+data/
+
+# Backups
+backups/

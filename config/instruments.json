@@ -1,0 +1,477 @@
+{
+  "version": 3,
+  "notes": {
+    "purpose": "Canonical instrument catalog for webhook-router symbol normalization.",
+    "monthCodes": {
+      "F": "January",
+      "G": "February",
+      "H": "March",
+      "J": "April",
+      "K": "May",
+      "M": "June",
+      "N": "July",
+      "Q": "August",
+      "U": "September",
+      "V": "October",
+      "X": "November",
+      "Z": "December"
+    },
+    "rules": {
+      "cme": "root + month code + year digit, e.g. ESM6, NQM6, CLM6, GCM6, NGJ6, ZWM6, ZSM6, CCM6, HGM6",
+      "alor": "human-readable derivatives symbols, often BASE-M.YY or full option naming, e.g. DAX-6.26, NG-4.26",
+      "finam": "exchange-qualified symbol, typically SYMBOL@VENUE, e.g. DXM6@RTSX, NG2.35BP6@RTSX",
+      "bybit": "raw symbol + category, e.g. BTCUSDT + linear, ETHUSDT + linear, XAUTUSDT + linear",
+      "schwab": "US ticker symbology for equities/ETFs/options/futures proxy instruments; common proxies include SPY, QQQ, DIA, IWM, GLD, USO, UNG, FXE, UUP, DBA, WEAT, SOYB, CPER, JJC, NIB, KWEB, BABA"
+    },
+    "disclaimer": "Some MOEX/Alor/Finam analogs and Schwab/Bybit mappings below are proxy or manual-review candidates, not guaranteed one-to-one contract equivalents.",
+    "preference": "User focus is on futures and global index futures first; proxy ETFs/equities are secondary fallback instruments when direct futures are unavailable at a given broker."
+  },
+  "instruments": [
+    {
+      "canonical": "S&P 500 JUN 2026 FUT",
+      "group": "index-future",
+      "underlying": "S&P 500",
+      "exchangeFamily": "CME",
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["ESM6", "ESM26", "MESM6", "SP500", "SPX FUT"],
+      "brokers": {
+        "schwab": {"symbol": "SPY", "venue": "NYSE", "proxy": true},
+        "bybit": {"symbol": "BTCUSDT", "venue": "linear", "proxy": true}
+      }
+    },
+    {
+      "canonical": "NASDAQ 100 JUN 2026 FUT",
+      "group": "index-future",
+      "underlying": "NASDAQ 100",
+      "exchangeFamily": "CME",
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["NQM6", "NQM26", "MNQM6", "NASDAQ", "NQ FUT"],
+      "brokers": {
+        "schwab": {"symbol": "QQQ", "venue": "NASDAQ", "proxy": true},
+        "bybit": {"symbol": "ETHUSDT", "venue": "linear", "proxy": true}
+      }
+    },
+    {
+      "canonical": "DOW JUN 2026 FUT",
+      "group": "index-future",
+      "underlying": "DOW",
+      "exchangeFamily": "CME",
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["YMM6", "MYMM6", "DOW FUT"],
+      "brokers": {
+        "schwab": {"symbol": "DIA", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "RUSSELL 2000 JUN 2026 FUT",
+      "group": "index-future",
+      "underlying": "RUSSELL 2000",
+      "exchangeFamily": "CME",
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["RTYM6", "M2KM6", "RUT FUT"],
+      "brokers": {
+        "schwab": {"symbol": "IWM", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "DAX JUN 2026 FUT",
+      "group": "index-future",
+      "underlying": "DAX / GER40",
+      "exchangeFamily": "EUREX / MOEX proxy",
+      "preferred": true,
+      "signalAliases": ["GER40", "DE40"],
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["DAX-6.26", "DXM6", "DXM6@RTSX", "GER40", "DE40", "DAX FUT"],
+      "brokers": {
+        "alor": {"symbol": "DAX-6.26", "venue": "FORTS"},
+        "finam": {"symbol": "DXM6@RTSX", "venue": "RTSX"},
+        "schwab": {"symbol": "FEZ", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "MOEX INDEX FUT",
+      "group": "index-future",
+      "underlying": "MOEX INDEX",
+      "exchangeFamily": "MOEX",
+      "aliases": ["IMOEX FUT", "MOEX FUT", "MXI", "MIX"],
+      "brokers": {
+        "alor": {"symbol": "MXI", "venue": "FORTS", "manualReview": true},
+        "finam": {"symbol": "MXI@RTSX", "venue": "RTSX", "manualReview": true}
+      }
+    },
+    {
+      "canonical": "RTS INDEX FUT",
+      "group": "index-future",
+      "underlying": "RTS INDEX",
+      "exchangeFamily": "MOEX",
+      "aliases": ["RTS FUT", "RI", "RIM6", "RIM6@RTSX"],
+      "brokers": {
+        "alor": {"symbol": "RI", "venue": "FORTS", "manualReview": true},
+        "finam": {"symbol": "RIM6@RTSX", "venue": "RTSX", "manualReview": true}
+      }
+    },
+    {
+      "canonical": "NASDAQ INDEX FUT (MOEX PROXY)",
+      "group": "index-future",
+      "underlying": "NASDAQ",
+      "exchangeFamily": "MOEX proxy",
+      "aliases": ["NA", "NA@RTSX", "NASDAQ MOEX FUT"],
+      "brokers": {
+        "alor": {"symbol": "NA", "venue": "FORTS", "manualReview": true},
+        "finam": {"symbol": "NA@RTSX", "venue": "RTSX", "manualReview": true},
+        "schwab": {"symbol": "QQQ", "venue": "NASDAQ", "proxy": true}
+      }
+    },
+    {
+      "canonical": "S&P 500 INDEX FUT (MOEX PROXY)",
+      "group": "index-future",
+      "underlying": "S&P 500",
+      "exchangeFamily": "MOEX proxy",
+      "aliases": ["SP500 MOEX FUT", "SF", "SF@RTSX"],
+      "brokers": {
+        "alor": {"symbol": "SF", "venue": "FORTS", "manualReview": true},
+        "finam": {"symbol": "SF@RTSX", "venue": "RTSX", "manualReview": true},
+        "schwab": {"symbol": "SPY", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "WTI CRUDE OIL JUN 2026 FUT",
+      "group": "commodity-future",
+      "underlying": "WTI",
+      "exchangeFamily": "NYMEX",
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["CLM6", "CLM26", "MCLM6", "OIL FUT", "WTI FUT"],
+      "brokers": {
+        "schwab": {"symbol": "USO", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "NATURAL GAS APR 2026 FUT",
+      "group": "commodity-future",
+      "underlying": "NG",
+      "exchangeFamily": "NYMEX / MOEX proxy",
+      "expiry": {"month": 4, "year": 2026},
+      "aliases": ["NGJ6", "NGJ26", "NG-4.26", "NG1!", "NGQ26"],
+      "brokers": {
+        "alor": {"symbol": "NG-4.26", "venue": "FORTS"},
+        "schwab": {"symbol": "UNG", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "NG PUT 2.35 APR 2026",
+      "group": "commodity-option",
+      "underlying": "NG",
+      "exchangeFamily": "NYMEX / MOEX proxy",
+      "expiry": {"month": 4, "year": 2026},
+      "strike": 2.35,
+      "optionType": "PUT",
+      "aliases": ["NG-4.26M270426PA2.35", "NG2.35BP6@RTSX"],
+      "brokers": {
+        "alor": {"symbol": "NG-4.26M270426PA2.35", "venue": "FORTS"},
+        "finam": {"symbol": "NG2.35BP6@RTSX", "venue": "RTSX"}
+      }
+    },
+    {
+      "canonical": "GOLD JUN 2026 FUT",
+      "group": "commodity-future",
+      "underlying": "GOLD",
+      "exchangeFamily": "COMEX",
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["GCM6", "GCM26", "MGCM6", "GOLD FUT", "GC FUT"],
+      "brokers": {
+        "bybit": {"symbol": "XAUTUSDT", "venue": "linear", "proxy": true},
+        "schwab": {"symbol": "GLD", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "COCOA JUL 2026 FUT",
+      "group": "commodity-future",
+      "underlying": "COCOA",
+      "exchangeFamily": "ICE US",
+      "preferred": true,
+      "expiry": {"month": 7, "year": 2026},
+      "aliases": ["CCN6", "CCN26", "COCOA FUT"],
+      "brokers": {
+        "schwab": {"symbol": "NIB", "venue": "NYSE", "proxy": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "WHEAT JUL 2026 FUT",
+      "group": "agri-future",
+      "underlying": "WHEAT",
+      "exchangeFamily": "CBOT",
+      "preferred": true,
+      "expiry": {"month": 7, "year": 2026},
+      "aliases": ["ZWN6", "ZWN26", "ZW", "WHEAT FUT"],
+      "brokers": {
+        "schwab": {"symbol": "WEAT", "venue": "NYSE", "proxy": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "SOYBEANS JUL 2026 FUT",
+      "group": "agri-future",
+      "underlying": "SOYBEANS",
+      "exchangeFamily": "CBOT",
+      "preferred": true,
+      "expiry": {"month": 7, "year": 2026},
+      "aliases": ["ZSN6", "ZSN26", "ZS", "SOY FUT"],
+      "brokers": {
+        "schwab": {"symbol": "SOYB", "venue": "NYSE", "proxy": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "ORANGE JUICE JUL 2026 FUT",
+      "group": "agri-future",
+      "underlying": "ORANGE JUICE",
+      "exchangeFamily": "ICE US",
+      "preferred": true,
+      "expiry": {"month": 7, "year": 2026},
+      "aliases": ["OJN6", "OJN26", "OJ", "ORANGE JUICE FUT"],
+      "brokers": {
+        "schwab": {"symbol": "DBA", "venue": "NYSE", "proxy": true, "manualReview": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "COPPER JUN 2026 FUT",
+      "group": "metal-future",
+      "underlying": "COPPER",
+      "exchangeFamily": "COMEX",
+      "preferred": true,
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["HGM6", "HGM26", "COPPER FUT", "HG FUT"],
+      "brokers": {
+        "schwab": {"symbol": "CPER", "venue": "NYSE", "proxy": true, "fallbackOnly": true},
+        "schwab_alt": {"symbol": "JJC", "venue": "NYSE", "proxy": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "ALUMINUM FUT",
+      "group": "metal-future",
+      "underlying": "ALUMINUM",
+      "exchangeFamily": "LME / proxy",
+      "preferred": true,
+      "aliases": ["ALI FUT", "ALUMINUM FUT", "AH"],
+      "brokers": {
+        "schwab": {"symbol": "JJU", "venue": "NYSE", "proxy": true, "manualReview": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "TTF NATURAL GAS FUT",
+      "group": "energy-future",
+      "underlying": "TTF",
+      "exchangeFamily": "ICE Endex",
+      "preferred": true,
+      "aliases": ["TTF FUT", "TTF GAS", "DUTCH GAS"],
+      "brokers": {
+        "schwab": {"symbol": "TTF=F", "venue": "MANUAL", "proxy": true, "manualReview": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "EURUSD JUN 2026 FUT",
+      "group": "fx-future",
+      "underlying": "EURUSD",
+      "exchangeFamily": "CME",
+      "expiry": {"month": 6, "year": 2026},
+      "aliases": ["6EM6", "EUM6", "EUR FUT"],
+      "brokers": {
+        "schwab": {"symbol": "FXE", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "USD INDEX FUT",
+      "group": "fx-future",
+      "underlying": "DXY",
+      "exchangeFamily": "ICE / proxy",
+      "aliases": ["DX FUT", "DXY FUT"],
+      "brokers": {
+        "schwab": {"symbol": "UUP", "venue": "NYSE", "proxy": true}
+      }
+    },
+    {
+      "canonical": "BTCUSDT PERP",
+      "group": "crypto-future",
+      "preferred": true,
+      "underlying": "BTCUSDT",
+      "aliases": ["BTCUSDT", "BTCUSDT.P"],
+      "brokers": {
+        "bybit": {"symbol": "BTCUSDT", "venue": "linear"}
+      }
+    },
+    {
+      "canonical": "ETHUSDT PERP",
+      "group": "crypto-future",
+      "preferred": true,
+      "underlying": "ETHUSDT",
+      "aliases": ["ETHUSDT", "ETHUSDT.P"],
+      "brokers": {
+        "bybit": {"symbol": "ETHUSDT", "venue": "linear"}
+      }
+    },
+    {
+      "canonical": "SOLUSDT PERP",
+      "group": "crypto-future",
+      "preferred": true,
+      "underlying": "SOLUSDT",
+      "aliases": ["SOLUSDT", "SOLUSDT.P"],
+      "brokers": {
+        "bybit": {"symbol": "SOLUSDT", "venue": "linear"}
+      }
+    },
+    {
+      "canonical": "XAUTUSDT PERP",
+      "group": "crypto-future",
+      "preferred": true,
+      "underlying": "XAUTUSDT",
+      "aliases": ["XAUTUSDT", "GOLDUSDT"],
+      "brokers": {
+        "bybit": {"symbol": "XAUTUSDT", "venue": "linear"}
+      }
+    },
+    {
+      "canonical": "AAPL EQUITY",
+      "group": "equity",
+      "underlying": "AAPL",
+      "aliases": ["AAPL"],
+      "brokers": {
+        "schwab": {"symbol": "AAPL", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "ALIBABA EQUITY",
+      "group": "equity",
+      "underlying": "ALIBABA",
+      "aliases": ["BABA", "Alibaba"],
+      "notes": "No direct CME future mapped here; Schwab side is equity/proxy only.",
+      "brokers": {
+        "schwab": {"symbol": "BABA", "venue": "NYSE", "fallbackOnly": true},
+        "schwab_alt": {"symbol": "KWEB", "venue": "NYSE", "proxy": true, "fallbackOnly": true}
+      }
+    },
+    {
+      "canonical": "SPY ETF",
+      "group": "equity-proxy",
+      "underlying": "S&P 500",
+      "aliases": ["SPY"],
+      "brokers": {
+        "schwab": {"symbol": "SPY", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "QQQ ETF",
+      "group": "equity-proxy",
+      "underlying": "NASDAQ 100",
+      "aliases": ["QQQ"],
+      "brokers": {
+        "schwab": {"symbol": "QQQ", "venue": "NASDAQ"}
+      }
+    },
+    {
+      "canonical": "DIA ETF",
+      "group": "equity-proxy",
+      "underlying": "DOW",
+      "aliases": ["DIA"],
+      "brokers": {
+        "schwab": {"symbol": "DIA", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "IWM ETF",
+      "group": "equity-proxy",
+      "underlying": "RUSSELL 2000",
+      "aliases": ["IWM"],
+      "brokers": {
+        "schwab": {"symbol": "IWM", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "GLD ETF",
+      "group": "equity-proxy",
+      "underlying": "GOLD",
+      "aliases": ["GLD"],
+      "brokers": {
+        "schwab": {"symbol": "GLD", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "USO ETF",
+      "group": "equity-proxy",
+      "underlying": "WTI",
+      "aliases": ["USO"],
+      "brokers": {
+        "schwab": {"symbol": "USO", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "UNG ETF",
+      "group": "equity-proxy",
+      "underlying": "NG",
+      "aliases": ["UNG"],
+      "brokers": {
+        "schwab": {"symbol": "UNG", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "FXE ETF",
+      "group": "equity-proxy",
+      "underlying": "EURUSD",
+      "aliases": ["FXE"],
+      "brokers": {
+        "schwab": {"symbol": "FXE", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "UUP ETF",
+      "group": "equity-proxy",
+      "underlying": "USD INDEX",
+      "aliases": ["UUP"],
+      "brokers": {
+        "schwab": {"symbol": "UUP", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "DBA ETF",
+      "group": "equity-proxy",
+      "underlying": "AGRICULTURE BASKET",
+      "aliases": ["DBA"],
+      "brokers": {
+        "schwab": {"symbol": "DBA", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "WEAT ETF",
+      "group": "equity-proxy",
+      "underlying": "WHEAT",
+      "aliases": ["WEAT"],
+      "brokers": {
+        "schwab": {"symbol": "WEAT", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "SOYB ETF",
+      "group": "equity-proxy",
+      "underlying": "SOYBEANS",
+      "aliases": ["SOYB"],
+      "brokers": {
+        "schwab": {"symbol": "SOYB", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "CPER ETF",
+      "group": "equity-proxy",
+      "underlying": "COPPER",
+      "aliases": ["CPER"],
+      "brokers": {
+        "schwab": {"symbol": "CPER", "venue": "NYSE"}
+      }
+    },
+    {
+      "canonical": "KWEB ETF",
+      "group": "equity-proxy",
+      "underlying": "CHINA INTERNET / ALIBABA PROXY",
+      "aliases": ["KWEB"],
+      "brokers": {
+        "schwab": {"symbol": "KWEB", "venue": "NYSE"}
+      }
+    }
+  ]
+}

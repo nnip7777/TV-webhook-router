@@ -1,0 +1,117 @@
+{
+  "tickers": {
+    "NG-4.26": {
+      "sourceTicker": "NG-4.26",
+      "firstSeen": "2026-04-13T05:13:00Z",
+      "lastSeen": "2026-04-14T18:01:00.055715Z",
+      "count": 1,
+      "sides": [
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG-4.26",
+        "side": "buy",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "NG-4.26M270426PA2.35": {
+      "sourceTicker": "NG-4.26M270426PA2.35",
+      "firstSeen": "2026-04-13T05:13:00Z",
+      "lastSeen": "2026-04-14T18:01:00.055706Z",
+      "count": 1,
+      "sides": [
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG-4.26M270426PA2.35",
+        "side": "buy",
+        "qty": 3.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "DAX-6.26": {
+      "sourceTicker": "DAX-6.26",
+      "firstSeen": "2026-04-13T05:13:00Z",
+      "lastSeen": "2026-04-14T18:01:00.055698Z",
+      "count": 1,
+      "sides": [
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "DAX-6.26",
+        "side": "sell",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "NG2.35BP6@RTSX": {
+      "sourceTicker": "NG2.35BP6@RTSX",
+      "firstSeen": "2026-04-13T05:13:00Z",
+      "lastSeen": "2026-04-14T18:01:00.055735Z",
+      "count": 1,
+      "sides": [
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG2.35BP6@RTSX",
+        "side": "buy",
+        "qty": 1.0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "DXM6@RTSX": {
+      "sourceTicker": "DXM6@RTSX",
+      "firstSeen": "2026-04-13T05:13:00Z",
+      "lastSeen": "2026-04-14T18:01:00.055743Z",
+      "count": 1,
+      "sides": [
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "DXM6@RTSX",
+        "side": "sell",
+        "qty": 5.0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "XAUTUSDT": {
+      "sourceTicker": "XAUTUSDT",
+      "firstSeen": "2026-04-13T05:13:00Z",
+      "lastSeen": "2026-04-14T18:01:00.055726Z",
+      "count": 2,
+      "sides": [
+        "sell",
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "XAUTUSDT",
+        "side": "sell",
+        "qty": 0.04,
+        "source": "broker-sync",
+        "broker": "bybit"
+      }
+    },
+    "ED-6.26": {
+      "sourceTicker": "ED-6.26",
+      "firstSeen": "2026-04-14T16:24:49.322604Z",
+      "lastSeen": "2026-04-14T18:01:00.055686Z",
+      "count": 0,
+      "sides": [
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "ED-6.26",
+        "side": "sell",
+        "qty": 1.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    }
+  }
+}
