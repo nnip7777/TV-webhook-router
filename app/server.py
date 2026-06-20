@@ -490,7 +490,7 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
             api_open = str(item.get('apiStateOpen', 'true')).lower() != 'false'
             broker_open_raw = item.get('brokerState', 'true')
             broker_open = str(broker_open_raw).lower() != 'false'
-            effective_open = api_open if broker_name == 'bingx' else (api_open and broker_open)
+            effective_open = api_open if broker == 'bingx' else (api_open and broker_open)
             if not effective_open:
                 filtered_out_closed += 1
             symbols.append(symbol)

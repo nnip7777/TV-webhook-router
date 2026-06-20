@@ -1,5 +1,5 @@
 {
-  "version": "2026.06.20-161",
+  "version": "2026.06.20-162",
   "builtAt": "2026-06-10T11:00:40.623100+00:00",
   "fileCount": 17,
   "files": {
@@ -28,7 +28,7 @@
       "bytes": 312
     },
     "app/server.py": {
-      "sha256": "94f600224d7bdd22ee5585aa486d4dcbaa120be46f5bab33721eda2d1d910234",
+      "sha256": "ddf67232a4c107e92181e2dd559588acebb1dc4120ebabbb1129ebad550e7280",
       "bytes": 245171
     },
     "app/settings.py": {
