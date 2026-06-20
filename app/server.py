@@ -543,7 +543,11 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
         }
     elif broker == 'finam':
         import httpx
-        data = httpx.get('https://tradeapi.finam.ru/api/v1/securities/', params={'board': 'RTSX'}, timeout=30).json()
+        try:
+            resp = httpx.get('https://tradeapi.finam.ru/api/v1/securities/', params={'board': 'RTSX'}, timeout=30)
+            data = resp.json() if resp.status_code == 200 and resp.text.strip() else {}
+        except Exception:
+            data = {}
         for item in (data.get('data') or data.get('securities') or data or []):
             if not isinstance(item, dict):
                 continue
@@ -555,7 +559,11 @@ def _sync_broker_lookup_lists(config: Dict[str, Any], broker: str) -> Dict[str, 
                 venues.append(board)
     elif broker == 'alor':
         import httpx
-        data = httpx.get(f"{ALOR_API_BASE_URL.rstrip('/')}/md/v2/Securities", params={'limit': 1000}, timeout=30).json()
+        try:
+            resp = httpx.get(f"{ALOR_API_BASE_URL.rstrip('/')}/md/v2/Securities", params={'limit': 1000}, timeout=30)
+            data = resp.json() if resp.status_code == 200 and resp.text.strip() else []
+        except Exception:
+            data = []
         for item in (data or []):
             if not isinstance(item, dict):
                 continue
