@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_UP
 from typing import Any, Dict, List
+from dataclasses import dataclass, field
 
 from bingx_adapter import BingXBroker
 from bybit_adapter import BybitBroker
@@ -16,14 +17,79 @@ from schwab_adapter import SchwabBroker
 from settings import SMART_EXECUTOR_PATH
 
 
+@dataclass
+class ExecutionResult:
+    broker: str
+    symbol: str
+    status: str
+    request: dict
+    results: dict
+    error: str | None = None
+    fills: list = field(default_factory=list)
+    category: str | None = None
+    exchange: str | None = None
+    qty: Any = None
+    dry_run: bool = False
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            'broker': self.broker,
+            'symbol': self.symbol,
+            'request': self.request,
+            'results': self.results,
+        }
+        if self.error:
+            d['error'] = self.error
+        if self.dry_run:
+            d['dryRun'] = True
+        if self.category:
+            d['category'] = self.category
+        if self.exchange:
+            d['exchange'] = self.exchange
+        if self.qty is not None:
+            d['qty'] = self.qty
+        return d
+
+
 DESTINATION_TIMEOUT_SECONDS = 25
+
+_smart_executor_cache = None
+_smart_executor_mtime = 0.0
+
+
+def _resolve_side(side_raw: str, signal_mode: str) -> tuple[str, str, str]:
+    if side_raw in ('2long', 'long'):
+        return 'buy', 'target-direction', 'long'
+    elif side_raw in ('2short', 'short'):
+        return 'sell', 'target-direction', 'short'
+    return side_raw, signal_mode, ''
+
+
+def _with_retry(fn, delays=(0.0, 0.7, 1.5, 3.0), predicate=None):
+    last_error = None
+    for delay in delays:
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            result = fn()
+            if predicate is None or predicate(result):
+                return result
+        except Exception as e:
+            last_error = e
+    return None
 
 
 def load_smart_executor_module():
+    global _smart_executor_cache, _smart_executor_mtime
+    current_mtime = SMART_EXECUTOR_PATH.stat().st_mtime
+    if _smart_executor_cache is not None and current_mtime == _smart_executor_mtime:
+        return _smart_executor_cache
     spec = importlib.util.spec_from_file_location('smart_order_executor', SMART_EXECUTOR_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    _smart_executor_cache = module
+    _smart_executor_mtime = current_mtime
     return module
 
 
@@ -36,13 +102,9 @@ async def _execute_via_workspace_executor(payload: Dict[str, Any], destination: 
     side_raw = str(destination.get('side', payload['side'])).strip().lower()
     signal_mode = str(destination.get('signalMode') or payload.get('signalMode') or '').strip().lower()
     target_direction = str(destination.get('targetDirection') or payload.get('targetDirection') or '').strip().lower()
-    side = side_raw
-    if side_raw in ('2long', 'long'):
-        signal_mode = 'target-direction'
-        target_direction = 'long'
-    elif side_raw in ('2short', 'short'):
-        signal_mode = 'target-direction'
-        target_direction = 'short'
+    side, signal_mode, resolved_dir = _resolve_side(side_raw, signal_mode)
+    if resolved_dir:
+        target_direction = resolved_dir
     quantity = int(float(destination.get('qty', payload['qty'])))
     use_limit = str(destination.get('executionMode', 'maker')).lower() != 'market'
     request_payload = {
@@ -83,15 +145,9 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
     side_raw = str(destination.get('side', payload['side'])).strip().lower()
     signal_mode = str(destination.get('signalMode') or payload.get('signalMode') or 'step-side').strip().lower()
     target_direction = ''
-    side = side_raw
-    if side_raw in ('2long', 'long'):
-        signal_mode = 'target-direction'
-        target_direction = 'long'
-        side = 'buy'
-    elif side_raw in ('2short', 'short'):
-        signal_mode = 'target-direction'
-        target_direction = 'short'
-        side = 'sell'
+    side, signal_mode, resolved_dir = _resolve_side(side_raw, signal_mode)
+    if resolved_dir:
+        target_direction = resolved_dir
     elif signal_mode == 'target-direction' and side_raw in ('long', 'short'):
         target_direction = side_raw
         side = 'buy' if target_direction == 'long' else 'sell'
@@ -690,7 +746,7 @@ def _bingx_fetch_actual_fills(
     if completed_ms <= 0:
         completed_ms = int(time.time() * 1000)
     if started_ms <= 0:
-        started_ms = max(0, completed_ms - 6 * 60 * 60 * 1000)
+        started_ms = max(0, completed_ms - 30 * 60 * 1000)
 
     fill_error = None
     last_payload = None
@@ -836,15 +892,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
     side_raw = str(destination.get('side', payload['side'])).strip().lower()
     signal_mode = str(destination.get('signalMode') or payload.get('signalMode') or 'step-side').strip().lower()
     target_direction = ''
-    side = side_raw
-    if side_raw in ('2long', 'long'):
-        signal_mode = 'target-direction'
-        target_direction = 'long'
-        side = 'buy'
-    elif side_raw in ('2short', 'short'):
-        signal_mode = 'target-direction'
-        target_direction = 'short'
-        side = 'sell'
+    side, signal_mode, resolved_dir = _resolve_side(side_raw, signal_mode)
+    if resolved_dir:
+        target_direction = resolved_dir
     elif signal_mode == 'target-direction' and side_raw in ('long', 'short'):
         target_direction = side_raw
         side = 'buy' if target_direction == 'long' else 'sell'
@@ -1163,7 +1213,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     }
                     order_attempts.append(attempt_entry)
 
-                    if not isinstance(attempt_result, dict) or attempt_result.get('code') not in (None, 0, '0'):
+                    if not isinstance(attempt_result, dict) or str(attempt_result.get('code')) not in ('None', '0', ''):
                         break
 
                     latest_order = order_row
