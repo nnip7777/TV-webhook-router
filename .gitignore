@@ -15,3 +15,10 @@ data/
 
 # Backups
 backups/
+
+# Virtual environment
+.venv/
+
+# Runtime user config
+config/users.json
+config/observed_signals.json
