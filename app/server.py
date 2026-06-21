@@ -3610,7 +3610,13 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             const active = Array.isArray(sync.activeSymbols) ? sync.activeSymbols.length : (Array.isArray(payload && payload.activeSymbols) ? payload.activeSymbols.length : 0);
             const withLimits = Array.isArray(sync.activeWithLimits) ? sync.activeWithLimits.length : (Array.isArray(payload && payload.activeWithLimits) ? payload.activeWithLimits.length : 0);
             const updatedRoutes = Number(sync.updatedRoutes || (payload && payload.updatedRoutes) || 0);
-            setFlashStatus(`sync: ${{broker}} active ${{active}}, limits ${{withLimits}}, updated ${{updatedRoutes}}`, 'ok');
+            const syncOk = payload && payload.ok;
+            if (syncOk) {{
+              setFlashStatus(`sync: ${{broker}} active ${{active}}, limits ${{withLimits}}, updated ${{updatedRoutes}}`, 'ok');
+            }} else {{
+              const details = (sync && sync.details) || (payload && payload.test && payload.test.details) || '';
+              setFlashStatus(`sync: ${{broker}} — ${{details || 'ошибка'}}`, 'error');
+            }}
           }}
           setTimeout(function() {{ refreshBrokerMetrics(); }}, 300);
         }} catch (err) {{
