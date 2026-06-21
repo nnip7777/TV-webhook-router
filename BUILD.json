@@ -1,11 +1,11 @@
 {
-  "version": "2026.06.20-163",
-  "builtAt": "2026-06-10T11:00:40.623100+00:00",
+  "version": "2026.06.21-164",
+  "builtAt": "2026-06-21T11:14:40.309013+00:00",
   "fileCount": 17,
   "files": {
     "VERSION": {
-      "sha256": "7541abeca6fa731b93c725032829d5d2b22f05a825742fc6720403396338d466",
-      "bytes": 15
+      "sha256": "6dadb71692b7ba4b18284ce9f11b7ffbc62690c5e717d6129e07dcb072e6c824",
+      "bytes": 14
     },
     "CHANGELOG.md": {
       "sha256": "c7e744c08218790644c35e97546e2b3374df0b60ef69a5359d12317b7456494e",
@@ -28,8 +28,8 @@
       "bytes": 312
     },
     "app/server.py": {
-      "sha256": "da37aab2fe36d787215a5639be4ee3f89a9d680aa4286e6de4312875665c330f",
-      "bytes": 245171
+      "sha256": "a66921772d5d1bb94f7f87a4b13c9b49504ff568f34fe33ce7719a28351fcee5",
+      "bytes": 245674
     },
     "app/settings.py": {
       "sha256": "1460c94fef14917498774b843ffc9120333784a17a0a6d42c106cbb0c87acc96",
@@ -44,8 +44,8 @@
       "bytes": 81309
     },
     "app/bybit_adapter.py": {
-      "sha256": "26c8992d6938b46bf6a8e28329175ba6014d232d8f85f0105a9af2f11000a587",
-      "bytes": 8138
+      "sha256": "8edf97302038fdaa4d3abce93f3ccad49f594385862bb736e3511c03840a2c4a",
+      "bytes": 8286
     },
     "app/bingx_adapter.py": {
       "sha256": "6fcf8ab4ac2ebcd46db8348de09803645fdf0efa70f8e74baf83c90f0631107b",

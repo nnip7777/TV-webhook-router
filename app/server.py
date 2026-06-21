@@ -4466,7 +4466,11 @@ class Handler(BaseHTTPRequestHandler):
             tests = {broker: _broker_connection_test(broker)} if broker else {}
             if broker and broker in tests:
                 config = load_config()
-                lookup_sync = _sync_broker_lookup_lists(config, broker)
+                lookup_sync = {}
+                try:
+                    lookup_sync = _sync_broker_lookup_lists(config, broker)
+                except Exception as e:
+                    lookup_sync = {'ok': False, 'details': str(e)}
                 BROKER_TEST_CACHE[broker] = tests[broker]
                 info = tests[broker] or {}
                 sync_details = info.get('details') or info.get('text') or ''
@@ -4479,11 +4483,11 @@ class Handler(BaseHTTPRequestHandler):
                     'side': '',
                     'qty': '',
                     'brokers': [broker],
-                    'status': 'ok' if info.get('ok') else 'error',
+                    'status': 'ok' if info.get('ok') and lookup_sync.get('ok') else 'error',
                     'details': sync_details,
                 })
                 return self._json(200, {
-                    'ok': bool(info.get('ok')),
+                    'ok': bool(info.get('ok') and lookup_sync.get('ok')),
                     'broker': broker,
                     'test': info,
                     'sync': lookup_sync,
