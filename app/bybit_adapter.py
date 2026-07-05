@@ -153,7 +153,10 @@ class BybitBroker:
 
         content_type = response.headers.get('Content-Type', '')
         if 'application/json' in content_type:
-            data = response.json()
+            try:
+                data = response.json()
+            except (json.JSONDecodeError, ValueError):
+                data = {'raw': response.text, 'json_parse_error': True}
         else:
             data = {'raw': response.text}
 

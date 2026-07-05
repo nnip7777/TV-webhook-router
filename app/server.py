@@ -2616,10 +2616,19 @@ def _live_symbol_qty_text(broker_name: str, *symbols: str) -> str:
     for symbol in symbols:
         if not symbol:
             continue
+        # Exact match
         symbol_payload = (symbol_map.get(symbol) or {})
         qty = symbol_payload.get('qty')
         if qty not in (None, ''):
             return _fmt_qty_text(qty)
+        # Partial match: try symbol without board suffix (e.g. FFN6@RTSX -> FFN6)
+        base = symbol.split('@')[0]
+        for cached_key, cached_val in symbol_map.items():
+            cached_base = cached_key.split('@')[0]
+            if cached_base == base and cached_base != cached_key:
+                qty = cached_val.get('qty')
+                if qty not in (None, ''):
+                    return _fmt_qty_text(qty)
     return ''
 
 
@@ -3610,7 +3619,13 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             const active = Array.isArray(sync.activeSymbols) ? sync.activeSymbols.length : (Array.isArray(payload && payload.activeSymbols) ? payload.activeSymbols.length : 0);
             const withLimits = Array.isArray(sync.activeWithLimits) ? sync.activeWithLimits.length : (Array.isArray(payload && payload.activeWithLimits) ? payload.activeWithLimits.length : 0);
             const updatedRoutes = Number(sync.updatedRoutes || (payload && payload.updatedRoutes) || 0);
-            setFlashStatus(`sync: ${{broker}} active ${{active}}, limits ${{withLimits}}, updated ${{updatedRoutes}}`, 'ok');
+            const syncOk = payload && payload.ok;
+            if (syncOk) {{
+              setFlashStatus(`sync: ${{broker}} active ${{active}}, limits ${{withLimits}}, updated ${{updatedRoutes}}`, 'ok');
+            }} else {{
+              const details = (sync && sync.details) || (payload && payload.test && payload.test.details) || '';
+              setFlashStatus(`sync: ${{broker}} — ${{details || 'ошибка'}}`, 'error');
+            }}
           }}
           setTimeout(function() {{ refreshBrokerMetrics(); }}, 300);
         }} catch (err) {{
@@ -4466,7 +4481,11 @@ class Handler(BaseHTTPRequestHandler):
             tests = {broker: _broker_connection_test(broker)} if broker else {}
             if broker and broker in tests:
                 config = load_config()
-                lookup_sync = _sync_broker_lookup_lists(config, broker)
+                lookup_sync = {}
+                try:
+                    lookup_sync = _sync_broker_lookup_lists(config, broker)
+                except Exception as e:
+                    lookup_sync = {'ok': False, 'details': str(e)}
                 BROKER_TEST_CACHE[broker] = tests[broker]
                 info = tests[broker] or {}
                 sync_details = info.get('details') or info.get('text') or ''
@@ -4479,11 +4498,11 @@ class Handler(BaseHTTPRequestHandler):
                     'side': '',
                     'qty': '',
                     'brokers': [broker],
-                    'status': 'ok' if info.get('ok') else 'error',
+                    'status': 'ok' if info.get('ok') and lookup_sync.get('ok') else 'error',
                     'details': sync_details,
                 })
                 return self._json(200, {
-                    'ok': bool(info.get('ok')),
+                    'ok': bool(info.get('ok') and lookup_sync.get('ok')),
                     'broker': broker,
                     'test': info,
                     'sync': lookup_sync,

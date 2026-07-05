@@ -1,3 +1,9 @@
+## 2026.07.05-001
+- Fixed Finam/Alor position display ("pos" column) not showing actual positions.
+- Root cause: `_live_symbol_qty_text()` only did exact symbol match. When broker symbol is `FFN6` but metrics cache has `FFN6@RTSX` (with board suffix), position was not found.
+- Added partial match logic: strips board suffix (e.g., `@RTSX`) and matches by base symbol.
+- Now `FFN6` correctly maps to `FFN6@RTSX` and shows qty=2.
+
 ## 2026.06.10-160
 - Added Finam and Alor target-direction execution via the shared smart executor path for signals like `2long` / `2short`.
 - For Finam/Alor, execution now follows the requested sequential loop: read order book, place one limit order, re-check position, then decide whether another order is still needed.

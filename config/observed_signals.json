@@ -112,6 +112,257 @@
         "source": "broker-sync",
         "broker": "alor"
       }
+    },
+    "NG-6.26": {
+      "sourceTicker": "NG-6.26",
+      "firstSeen": "2026-06-20T16:21:51.382694Z",
+      "lastSeen": "2026-06-23T16:34:55.535709Z",
+      "count": 0,
+      "sides": [
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG-6.26",
+        "side": "sell",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "NGM6@RTSX": {
+      "sourceTicker": "NGM6@RTSX",
+      "firstSeen": "2026-06-20T16:21:51.382722Z",
+      "lastSeen": "2026-06-23T21:09:58.984229Z",
+      "count": 0,
+      "sides": [
+        "sell",
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NGM6@RTSX",
+        "side": "buy",
+        "qty": 0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "NG2.6BS6@RTSX": {
+      "sourceTicker": "NG2.6BS6@RTSX",
+      "firstSeen": "2026-06-20T16:21:51.382730Z",
+      "lastSeen": "2026-07-05T08:44:38.912383Z",
+      "count": 0,
+      "sides": [
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG2.6BS6@RTSX",
+        "side": "buy",
+        "qty": 4.0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "GOLDXAUUSDT.P": {
+      "sourceTicker": "GOLDXAUUSDT.P",
+      "firstSeen": "2026-06-20T19:00:01.164444Z",
+      "lastSeen": "2026-06-23T06:00:12.533331Z",
+      "count": 4,
+      "sides": [
+        "2long"
+      ],
+      "lastPayload": {
+        "sourceTicker": "GOLDXAUUSDT.P",
+        "side": "2long",
+        "qty": 1
+      }
+    },
+    "SPYUSDT.P": {
+      "sourceTicker": "SPYUSDT.P",
+      "firstSeen": "2026-06-20T22:00:03.174710Z",
+      "lastSeen": "2026-06-28T16:00:06.864197Z",
+      "count": 17,
+      "sides": [
+        "2short",
+        "2long"
+      ],
+      "lastPayload": {
+        "sourceTicker": "SPYUSDT.P",
+        "side": "2long",
+        "qty": 1
+      }
+    },
+    "NATURALGASNGUSDT.P": {
+      "sourceTicker": "NATURALGASNGUSDT.P",
+      "firstSeen": "2026-06-22T00:00:23.058863Z",
+      "lastSeen": "2026-07-03T09:00:11.831719Z",
+      "count": 15,
+      "sides": [
+        "2short",
+        "2long"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NATURALGASNGUSDT.P",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "NG1!": {
+      "sourceTicker": "NG1!",
+      "firstSeen": "2026-06-22T01:20:06.143702Z",
+      "lastSeen": "2026-07-03T07:40:09.363327Z",
+      "count": 51,
+      "sides": [
+        "2short",
+        "2long"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG1!",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "NG-7.26M280726PA2.6": {
+      "sourceTicker": "NG-7.26M280726PA2.6",
+      "firstSeen": "2026-06-22T06:59:46.656000Z",
+      "lastSeen": "2026-07-05T08:44:38.912373Z",
+      "count": 0,
+      "sides": [
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG-7.26M280726PA2.6",
+        "side": "buy",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "ES1!": {
+      "sourceTicker": "ES1!",
+      "firstSeen": "2026-06-23T11:00:05.771564Z",
+      "lastSeen": "2026-07-03T07:00:02.802524Z",
+      "count": 8,
+      "sides": [
+        "2long",
+        "2short"
+      ],
+      "lastPayload": {
+        "sourceTicker": "ES1!",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "NGN6@RTSX": {
+      "sourceTicker": "NGN6@RTSX",
+      "firstSeen": "2026-06-23T16:44:20.202686Z",
+      "lastSeen": "2026-07-05T08:44:38.912393Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NGN6@RTSX",
+        "side": "buy",
+        "qty": 0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "NG-7.26": {
+      "sourceTicker": "NG-7.26",
+      "firstSeen": "2026-06-23T16:45:44.743641Z",
+      "lastSeen": "2026-07-03T15:29:54.023739Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG-7.26",
+        "side": "sell",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "GC1!": {
+      "sourceTicker": "GC1!",
+      "firstSeen": "2026-06-23T22:00:09.405652Z",
+      "lastSeen": "2026-07-03T04:00:22.673187Z",
+      "count": 9,
+      "sides": [
+        "2long",
+        "2short"
+      ],
+      "lastPayload": {
+        "sourceTicker": "GC1!",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "FFN6@RTSX": {
+      "sourceTicker": "FFN6@RTSX",
+      "firstSeen": "2026-06-29T08:05:21.630920Z",
+      "lastSeen": "2026-07-05T08:44:38.912388Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "FFN6@RTSX",
+        "side": "buy",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "FF1!": {
+      "sourceTicker": "FF1!",
+      "firstSeen": "2026-06-30T09:00:51.270275Z",
+      "lastSeen": "2026-07-05T08:04:01.631085Z",
+      "count": 7,
+      "sides": [
+        "2short",
+        "2long"
+      ],
+      "lastPayload": {
+        "sourceTicker": "FF1!",
+        "side": "2long",
+        "qty": 1
+      }
+    },
+    "GER40": {
+      "sourceTicker": "GER40",
+      "firstSeen": "2026-07-03T06:00:07.314493Z",
+      "lastSeen": "2026-07-03T15:00:09.568646Z",
+      "count": 2,
+      "sides": [
+        "2short"
+      ],
+      "lastPayload": {
+        "sourceTicker": "GER40",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "DXU6@RTSX": {
+      "sourceTicker": "DXU6@RTSX",
+      "firstSeen": "2026-07-03T08:23:00.861808Z",
+      "lastSeen": "2026-07-05T08:44:38.912397Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "DXU6@RTSX",
+        "side": "sell",
+        "qty": 5.0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
     }
   }
 }
