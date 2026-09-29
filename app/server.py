@@ -4036,6 +4036,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
                 symbol = str(dest.get('symbol') or '').strip()
                 if broker and symbol:
                     sync_exchange_fills(broker, symbol, lookback_hours=48)
+                    sync_exchange_income(broker, symbol, lookback_hours=48)
         except Exception:
             pass
 
@@ -5078,3 +5079,4 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
 def _process_webhook_job(job: Dict[str, Any]) -> None:
     _notify_execution_error(payload, decision)
 from analytics import sync_exchange_fills
+from analytics import sync_exchange_income

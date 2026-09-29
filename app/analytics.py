@@ -183,6 +183,20 @@ CREATE TABLE IF NOT EXISTS analytics_counters (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS exchange_income (
+    income_id TEXT PRIMARY KEY,
+    broker TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    income_type TEXT NOT NULL,
+    income REAL NOT NULL DEFAULT 0,
+    asset TEXT,
+    trade_id TEXT,
+    order_id TEXT,
+    observed_at TEXT,
+    raw_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_executions_signal_id ON executions(signal_id);
 CREATE INDEX IF NOT EXISTS idx_orders_execution_id ON orders(execution_id);
 CREATE INDEX IF NOT EXISTS idx_orders_broker_order_id ON orders(broker_order_id);
@@ -192,6 +206,8 @@ CREATE INDEX IF NOT EXISTS idx_fills_symbol_time ON fills(broker, symbol, venue,
 CREATE INDEX IF NOT EXISTS idx_open_lots_lookup ON open_lots(broker, symbol, venue, opened_at);
 CREATE INDEX IF NOT EXISTS idx_round_trips_symbol_time ON round_trips(broker, symbol, venue, closed_at);
 CREATE INDEX IF NOT EXISTS idx_round_trip_fills_round_trip_id ON round_trip_fills(round_trip_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_income_symbol ON exchange_income(broker, symbol, observed_at);
+CREATE INDEX IF NOT EXISTS idx_exchange_income_type ON exchange_income(broker, symbol, income_type);
 """
 
 
@@ -383,12 +399,43 @@ def analytics_overview(limit: int = 20) -> Dict[str, Any]:
             ).fetchall()]
             latest_signal = conn.execute('SELECT signal_id, received_at, origin, source_ticker, side, qty_text FROM signals ORDER BY received_at DESC, signal_id DESC LIMIT 1').fetchone()
             latest_execution = conn.execute('SELECT execution_id, received_at, broker, symbol, venue, status, error_text FROM executions ORDER BY received_at DESC, execution_id DESC LIMIT 1').fetchone()
+
+            income_summary = conn.execute('''
+                SELECT symbol,
+                       SUM(CASE WHEN income_type='REALIZED_PNL' THEN income ELSE 0 END) AS realized_pnl,
+                       SUM(CASE WHEN income_type='TRADING_FEE' THEN income ELSE 0 END) AS total_fees,
+                       SUM(income) AS net_pnl,
+                       COUNT(CASE WHEN income_type='REALIZED_PNL' AND income > 0 THEN 1 END) AS wins,
+                       COUNT(CASE WHEN income_type='REALIZED_PNL' AND income < 0 THEN 1 END) AS losses
+                FROM exchange_income
+                GROUP BY symbol
+                ORDER BY net_pnl DESC
+            ''').fetchall()
+            income_rows = [dict(r) for r in income_summary]
+
+            income_totals = conn.execute('''
+                SELECT SUM(CASE WHEN income_type='REALIZED_PNL' THEN income ELSE 0 END) AS total_realized,
+                       SUM(CASE WHEN income_type='TRADING_FEE' THEN income ELSE 0 END) AS total_fees,
+                       SUM(income) AS total_net,
+                       COUNT(DISTINCT CASE WHEN income_type='REALIZED_PNL' THEN symbol END) AS symbols_traded
+                FROM exchange_income
+            ''').fetchone()
+
+            recent_income = [dict(r) for r in conn.execute('''
+                SELECT income_id, broker, symbol, income_type, income, asset, observed_at
+                FROM exchange_income
+                ORDER BY observed_at DESC
+                LIMIT ?
+            ''', (max(1, min(int(limit), 50)),)).fetchall()]
     db_size_bytes = path.stat().st_size if path.exists() else 0
     return {
         'dbPath': str(path),
         'dbExists': path.exists(),
         'dbSizeBytes': db_size_bytes,
         'counters': counters,
+        'incomeBySymbol': income_rows,
+        'incomeTotals': dict(income_totals) if income_totals else {},
+        'recentIncome': recent_income,
         'latestSignal': dict(latest_signal) if latest_signal else {},
         'latestExecution': dict(latest_execution) if latest_execution else {},
         'latestFills': latest_fills,
@@ -523,6 +570,71 @@ def sync_exchange_fills(broker: str, symbol: str, lookback_hours: int = 24) -> D
     except Exception as e:
         return {'ok': False, 'imported': 0, 'skipped': 0, 'error': str(e)}
 
+
+def sync_exchange_income(broker: str, symbol: str, lookback_hours: int = 72) -> Dict[str, Any]:
+    """Fetch income (REALIZED_PNL, TRADING_FEE) from exchange and store as fact."""
+    broker = str(broker or '').strip().lower()
+    symbol = str(symbol or '').strip()
+    if not broker or not symbol:
+        return {'ok': False, 'imported': 0, 'error': 'missing broker or symbol'}
+
+    try:
+        if broker == 'bingx':
+            from bingx_adapter import BingXBroker
+            client = BingXBroker(testnet=False)
+        else:
+            return {'ok': False, 'imported': 0, 'error': f'unsupported broker: {broker}'}
+
+        import time as _time
+        end_ts = int(_time.time() * 1000)
+        start_ts = end_ts - lookback_hours * 60 * 60 * 1000
+
+        imported = 0
+        for income_type in ('REALIZED_PNL', 'TRADING_FEE'):
+            payload = client.get_income(symbol=symbol, income_type=income_type, start_time=start_ts, end_time=end_ts, limit=1000)
+            data = (payload or {}).get('data') or []
+            if isinstance(data, dict):
+                data = [data]
+            rows = [r for r in data if isinstance(r, dict)]
+
+            with _DB_LOCK:
+                with _connect() as conn:
+                    _ensure_counter_keys(conn)
+                    for row in rows:
+                        trade_id = str(row.get('tradeId') or '')
+                        order_id = str(row.get('orderId') or '')
+                        ts_val = row.get('time')
+                        income_id = f'income:{broker}:{symbol}:{income_type}:{trade_id or order_id or ts_val or "0"}'
+
+                        exists = conn.execute('SELECT 1 FROM exchange_income WHERE income_id = ?', (income_id,)).fetchone()
+                        if exists:
+                            continue
+
+                        observed_at = ''
+                        if ts_val:
+                            try:
+                                ts_int = int(ts_val)
+                                observed_at = datetime.fromtimestamp(ts_int / 1000, tz=LOCAL_TZ).isoformat()
+                            except Exception:
+                                observed_at = str(ts_val)
+
+                        conn.execute(
+                            '''INSERT OR IGNORE INTO exchange_income(income_id, broker, symbol, income_type, income, asset, trade_id, order_id, observed_at, raw_json)
+                            VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                            (
+                                income_id, broker, symbol, income_type,
+                                _to_float(row.get('income')),
+                                str(row.get('asset') or ''),
+                                trade_id, order_id, observed_at, _json_text(row),
+                            ),
+                        )
+                        imported += 1
+                    _refresh_counters(conn)
+
+        return {'ok': True, 'imported': imported}
+    except Exception as e:
+        return {'ok': False, 'imported': 0, 'error': str(e)}
+
 def _sync_all_tracked_symbols() -> Dict[str, Any]:
     """Sync fills from exchange for all broker+symbol pairs seen in analytics."""
     try:
@@ -545,6 +657,7 @@ def _sync_all_tracked_symbols() -> Dict[str, Any]:
         result = sync_exchange_fills(broker, symbol, lookback_hours=72)
         total_imported += int(result.get('imported') or 0)
         total_skipped += int(result.get('skipped') or 0)
+        sync_exchange_income(broker, symbol, lookback_hours=72)
     return {'syncedSymbols': len(rows), 'imported': total_imported, 'skipped': total_skipped}
 
 
