@@ -589,6 +589,7 @@ def _load_fill_rows_with_requests(conn: sqlite3.Connection) -> List[sqlite3.Row]
             f.raw_json, e.request_json
         FROM fills f
         LEFT JOIN executions e ON e.execution_id = f.execution_id
+        WHERE f.observed_at >= datetime('now', '-30 days')
         ORDER BY f.observed_at, f.fill_id
         '''
     ).fetchall()
@@ -1063,99 +1064,78 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
             (broker, symbol, venue, opposite_side),
         ).fetchall()
 
-    for row in rows:
-        if qty_remaining <= 0:
-            break
-        lot_qty_before = Decimal(str(row['remaining_qty'] or 0))
-        if lot_qty_before <= 0:
-            continue
-        matched_qty = min(qty_remaining, lot_qty_before)
-        lot_commission_before = Decimal(str(row['remaining_commission'] or 0))
-        entry_commission_alloc = Decimal('0')
-        if lot_qty_before > 0 and lot_commission_before > 0:
-            entry_commission_alloc = (lot_commission_before * matched_qty / lot_qty_before)
-        exit_commission_alloc = Decimal('0')
-        if qty_remaining > 0 and fill_commission_remaining > 0:
-            exit_commission_alloc = (fill_commission_remaining * matched_qty / qty_remaining)
+    if rows:
+        total_open_qty = sum(Decimal(str(r['remaining_qty'] or 0)) for r in rows)
+        total_open_commission = sum(Decimal(str(r['remaining_commission'] or 0)) for r in rows)
+        avg_entry_price = Decimal('0')
+        if total_open_qty > 0:
+            weighted_sum = sum(Decimal(str(r['open_price'] or 0)) * Decimal(str(r['remaining_qty'] or 0)) for r in rows)
+            avg_entry_price = weighted_sum / total_open_qty
 
-        open_price = Decimal(str(row['open_price'] or 0))
-        if row['side'] == 'buy':
-            gross_pnl = (price - open_price) * matched_qty
-            direction = 'long'
-        else:
-            gross_pnl = (open_price - price) * matched_qty
-            direction = 'short'
-        commission_total = entry_commission_alloc + exit_commission_alloc
-        net_pnl = gross_pnl - commission_total
-        round_trip_id = _round_trip_id(row['lot_id'], fill['fill_id'], matched_qty)
-        holding_time_sec = _holding_seconds(str(row['opened_at'] or ''), str(fill.get('observed_at') or ''))
+        matched_qty = min(qty_remaining, total_open_qty)
+        if matched_qty > 0:
+            entry_commission_alloc = (total_open_commission * matched_qty / total_open_qty) if total_open_qty > 0 else Decimal('0')
+            exit_commission_alloc = (fill_commission_remaining * matched_qty / qty_remaining) if qty_remaining > 0 else Decimal('0')
 
-        round_trip_cursor = conn.execute(
-            '''
-            INSERT OR IGNORE INTO round_trips(
-                round_trip_id, broker, symbol, venue, direction, opened_at, closed_at, holding_time_sec,
-                entry_qty, exit_qty, entry_avg_price, exit_avg_price, gross_pnl, entry_commission, exit_commission,
-                commission_total, net_pnl, entry_fill_count, exit_fill_count, entry_order_count, exit_order_count,
-                opening_fill_id, closing_fill_id, opening_order_local_id, closing_order_local_id,
-                opening_signal_id, closing_signal_id, opening_execution_id, closing_execution_id
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''',
-            (
-                round_trip_id,
-                broker,
-                symbol,
-                venue,
-                direction,
-                str(row['opened_at'] or ''),
-                str(fill.get('observed_at') or ''),
-                holding_time_sec,
-                float(matched_qty),
-                float(matched_qty),
-                float(open_price),
-                float(price),
-                float(gross_pnl),
-                float(entry_commission_alloc),
-                float(exit_commission_alloc),
-                float(commission_total),
-                float(net_pnl),
-                str(row['open_fill_id']) if row['open_fill_id'] else None,
-                str(fill.get('fill_id')) if fill.get('fill_id') else None,
-                str(row['open_order_local_id']) if row['open_order_local_id'] else None,
-                str(fill.get('order_local_id')) if fill.get('order_local_id') else None,
-                str(row['open_signal_id']) if row['open_signal_id'] else None,
-                str(fill.get('signal_id')) if fill.get('signal_id') else None,
-                str(row['open_execution_id']) if row['open_execution_id'] else None,
-                str(fill.get('execution_id')) if fill.get('execution_id') else None,
-            ),
-        )
-        if round_trip_cursor.rowcount:
-            _counter_increment(conn, 'round_trips', 1)
-        conn.execute(
-            'INSERT OR IGNORE INTO round_trip_fills(link_id, round_trip_id, fill_id, leg, matched_qty, price, commission_alloc) VALUES(?, ?, ?, ?, ?, ?, ?)',
-            (
-                f'{round_trip_id}:entry', round_trip_id, str(row['open_fill_id']) if row['open_fill_id'] else None, 'entry', float(matched_qty), float(open_price), float(entry_commission_alloc),
-            ),
-        )
-        conn.execute(
-            'INSERT OR IGNORE INTO round_trip_fills(link_id, round_trip_id, fill_id, leg, matched_qty, price, commission_alloc) VALUES(?, ?, ?, ?, ?, ?, ?)',
-            (
-                f'{round_trip_id}:exit', round_trip_id, str(fill.get('fill_id')) if fill.get('fill_id') else None, 'exit', float(matched_qty), float(price), float(exit_commission_alloc),
-            ),
-        )
-        _update_daily_trade_stats(conn, str(fill.get('observed_at') or ''), broker, symbol, venue, matched_qty, gross_pnl, commission_total, net_pnl)
+            if rows[0]['side'] == 'buy':
+                gross_pnl = (price - avg_entry_price) * matched_qty
+                direction = 'long'
+            else:
+                gross_pnl = (avg_entry_price - price) * matched_qty
+                direction = 'short'
+            commission_total = entry_commission_alloc + exit_commission_alloc
+            net_pnl = gross_pnl - commission_total
+            earliest_open = min(str(r['opened_at'] or '') for r in rows)
+            round_trip_id = _round_trip_id(f"avg:{broker}:{symbol}", fill['fill_id'], matched_qty)
+            holding_time_sec = _holding_seconds(earliest_open, str(fill.get('observed_at') or ''))
 
-        new_lot_qty = lot_qty_before - matched_qty
-        new_lot_commission = lot_commission_before - entry_commission_alloc
-        if new_lot_qty <= 0:
-            conn.execute('DELETE FROM open_lots WHERE lot_id=?', (str(row['lot_id']),))
-        else:
             conn.execute(
-                'UPDATE open_lots SET remaining_qty=?, remaining_commission=? WHERE lot_id=?',
-                (float(new_lot_qty), float(new_lot_commission), str(row['lot_id'])),
+                '''
+                INSERT OR IGNORE INTO round_trips(
+                    round_trip_id, broker, symbol, venue, direction, opened_at, closed_at, holding_time_sec,
+                    entry_qty, exit_qty, entry_avg_price, exit_avg_price, gross_pnl, entry_commission, exit_commission,
+                    commission_total, net_pnl, entry_fill_count, exit_fill_count, entry_order_count, exit_order_count,
+                    opening_fill_id, closing_fill_id, opening_order_local_id, closing_order_local_id,
+                    opening_signal_id, closing_signal_id, opening_execution_id, closing_execution_id
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    round_trip_id, broker, symbol, venue, direction,
+                    earliest_open, str(fill.get('observed_at') or ''), holding_time_sec,
+                    float(matched_qty), float(matched_qty), float(avg_entry_price), float(price),
+                    float(gross_pnl), float(entry_commission_alloc), float(exit_commission_alloc),
+                    float(commission_total), float(net_pnl),
+                    len(rows), 1,
+                    None,
+                    str(fill.get('fill_id')) if fill.get('fill_id') else None,
+                    None,
+                    str(fill.get('order_local_id')) if fill.get('order_local_id') else None,
+                    None,
+                    str(fill.get('signal_id')) if fill.get('signal_id') else None,
+                    None,
+                    str(fill.get('execution_id')) if fill.get('execution_id') else None,
+                ),
             )
+            _update_daily_trade_stats(conn, str(fill.get('observed_at') or ''), broker, symbol, venue, matched_qty, gross_pnl, commission_total, net_pnl)
 
-        qty_remaining -= matched_qty
-        fill_commission_remaining -= exit_commission_alloc
+            ratio = matched_qty / total_open_qty if total_open_qty > 0 else Decimal('0')
+            for r in rows:
+                lot_qty = Decimal(str(r['remaining_qty'] or 0))
+                lot_comm = Decimal(str(r['remaining_commission'] or 0))
+                reduce_qty = lot_qty * ratio
+                reduce_comm = lot_comm * ratio
+                new_qty = lot_qty - reduce_qty
+                new_comm = lot_comm - reduce_comm
+                if new_qty <= Decimal('0.00000001'):
+                    conn.execute('DELETE FROM open_lots WHERE lot_id=?', (str(r['lot_id']),))
+                else:
+                    conn.execute(
+                        'UPDATE open_lots SET remaining_qty=?, remaining_commission=? WHERE lot_id=?',
+                        (float(new_qty), float(new_comm), str(r['lot_id'])),
+                    )
+
+            qty_remaining -= matched_qty
+            fill_commission_remaining -= exit_commission_alloc
 
     if qty_remaining > 0 and position_effect in open_like_effects:
         lot_id = f"lot:{fill['fill_id']}"
