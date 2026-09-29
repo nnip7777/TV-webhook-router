@@ -45,6 +45,8 @@ from settings import (
     ROOT,
     SERVER_HOST,
     SERVER_PORT,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     parse_env_file,
     reload_env,
     save_env_file,
@@ -195,6 +197,8 @@ SETTINGS_FIELDS = [
     {'key': 'FINAM_ACCOUNT_ID', 'label': 'Finam account id', 'section': 'finam', 'type': 'text'},
     {'key': 'FINAM_SECRET_PATH', 'label': 'Finam token file path', 'section': 'finam', 'type': 'path'},
     {'key': 'SCHWAB_CONFIG_PATH', 'label': 'Schwab config JSON path', 'section': 'schwab', 'type': 'path'},
+    {'key': 'TELEGRAM_BOT_TOKEN', 'label': 'Telegram bot token', 'section': 'telegram', 'type': 'password'},
+    {'key': 'TELEGRAM_CHAT_ID', 'label': 'Telegram chat ID', 'section': 'telegram', 'type': 'text'},
 ]
 SETTINGS_FIELD_MAP = {field['key']: field for field in SETTINGS_FIELDS}
 ENV_KEYS_ORDER = [field['key'] for field in SETTINGS_FIELDS]
@@ -5001,3 +5005,50 @@ def main():
 
 if __name__ == '__main__':
     main()
+def _notify_telegram(text: str) -> None:
+    """Send a notification to Telegram. Non-blocking; failures are silent."""
+    token = _env_values().get('TELEGRAM_BOT_TOKEN', '') or TELEGRAM_BOT_TOKEN
+    chat_id = _env_values().get('TELEGRAM_CHAT_ID', '') or TELEGRAM_CHAT_ID
+    if not token or not chat_id:
+        return
+    try:
+        import urllib.request
+        url = f'https://api.telegram.org/bot{token}/sendMessage'
+        body = json.dumps({'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}).encode()
+        req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+
+def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -> None:
+    status = str(decision.get('status') or '')
+    if status not in ('execution_error', 'partial_error'):
+        return
+    ticker = str(payload.get('sourceTicker') or '?')
+    side = str(payload.get('side') or '?')
+    qty = payload.get('qty', '')
+    error = str(decision.get('error') or '')
+    destinations = (decision.get('executionResult') or {}).get('destinations') or []
+    details = []
+    for dest in destinations:
+        err = str(dest.get('error') or _result_error_text(dest.get('results') or {}) or '')
+        broker = str(dest.get('broker') or '?')
+        symbol = str(dest.get('symbol') or '')
+        if err:
+            details.append(f'{broker}:{symbol} — {err[:120]}')
+    if not error and not details:
+        return
+    lines = [
+        f'⚠️ <b>Execution error</b>',
+        f'{ticker} {side} qty={qty}',
+    ]
+    if error:
+        lines.append(f'Error: {error[:200]}')
+    if details:
+        lines.extend(details[:5])
+    _notify_telegram('\n'.join(lines))
+
+
+def _process_webhook_job(job: Dict[str, Any]) -> None:
+    _notify_execution_error(payload, decision)
