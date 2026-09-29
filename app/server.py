@@ -2183,7 +2183,12 @@ def _current_destination(config: Dict[str, Any], ticker: str, broker_name: str) 
 
 
 def _all_known_tickers(config: Dict[str, Any], observed: Dict[str, Any]) -> List[str]:
-    tickers = set(observed.get('tickers', {}).keys())
+    tickers = set()
+    for ticker, data in observed.get('tickers', {}).items():
+        source = str((data or {}).get('lastPayload', {}).get('source') or 'webhook')
+        if source in ('broker-sync',):
+            continue
+        tickers.add(ticker)
     for route in config.get('routes', []):
         tickers.update(_extract_tickers_from_route(route))
     return sorted(tickers, key=lambda ticker: _ticker_sort_key(ticker, config, observed))
