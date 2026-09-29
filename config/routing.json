@@ -322836,9 +322836,7 @@
       "uiManaged": true,
       "match": {
         "sourceTicker": [
-          "NATGASUSDT.P",
-          "NATURALGASNGUSDT.P",
-          "NATURALGASNGUSDT"
+          "NATGASUSDT.P"
         ],
         "side": "*"
       },
@@ -323194,6 +323192,95 @@
       ],
       "uiCreatedAt": "2026-09-28T07:12:33.721158Z",
       "uiUpdatedAt": "2026-09-28T07:24:44.572778Z"
+    },
+    {
+      "id": "ui-naturalgasngusdt-p",
+      "name": "UI mapping for NATURALGASNGUSDT.P",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "NATURALGASNGUSDT.P"
+        ],
+        "side": "*"
+      },
+      "destinations": [
+        {
+          "account": "swap",
+          "category": "swap",
+          "executionMode": "maker",
+          "qtyMode": "fixed",
+          "positionSide": "BOTH",
+          "testnet": false,
+          "broker": "bingx",
+          "symbol": "NCCO7241NATGAS2USD-USDT",
+          "riskPct": 5.0,
+          "marginType": "ISOLATED",
+          "qty": 100,
+          "qtyKind": "contracts",
+          "sideMode": "sign",
+          "limits": {
+            "minQty": 0.642,
+            "minUsdt": 2,
+            "qtyStep": "0.001",
+            "priceStep": 0.001,
+            "quantityPrecision": 3,
+            "pricePrecision": 3,
+            "raw": {
+              "symbol": {
+                "contractId": "102476",
+                "symbol": "NCCO7241NATGAS2USD-USDT",
+                "size": "0.001",
+                "quantityPrecision": 3,
+                "pricePrecision": 3,
+                "feeRate": 0.0005,
+                "makerFeeRate": 0.0002,
+                "takerFeeRate": 0.0005,
+                "tradeMinLimit": 0,
+                "tradeMinQuantity": 0.642,
+                "tradeMinUSDT": 2,
+                "currency": "USDT",
+                "asset": "NCCO7241NATGAS2USD",
+                "status": 1,
+                "apiStateOpen": "true",
+                "apiStateClose": "true",
+                "ensureTrigger": false,
+                "triggerFeeRate": "0.00200000",
+                "brokerState": false,
+                "launchTime": 1776330000000,
+                "maintainTime": 0,
+                "offTime": 0,
+                "displayName": "Natural Gas(NG)-USDT"
+              },
+              "contract": {
+                "contractId": "102476",
+                "symbol": "NCCO7241NATGAS2USD-USDT",
+                "size": "0.001",
+                "quantityPrecision": 3,
+                "pricePrecision": 3,
+                "feeRate": 0.0005,
+                "makerFeeRate": 0.0002,
+                "takerFeeRate": 0.0005,
+                "tradeMinLimit": 0,
+                "tradeMinQuantity": 0.642,
+                "tradeMinUSDT": 2,
+                "currency": "USDT",
+                "asset": "NCCO7241NATGAS2USD",
+                "status": 1,
+                "apiStateOpen": "true",
+                "apiStateClose": "true",
+                "ensureTrigger": false,
+                "triggerFeeRate": "0.00200000",
+                "brokerState": false,
+                "launchTime": 1776330000000,
+                "maintainTime": 0,
+                "offTime": 0,
+                "displayName": "Natural Gas(NG)-USDT"
+              }
+            }
+          }
+        }
+      ]
     }
   ]
 }
