@@ -1531,7 +1531,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 mark_price = float(prepared['price'])
                 final_notional = abs(mark_price * final_qty)
                 allowed_loss = max(0.0, equity * (risk_pct / 100.0))
-                target_margin = min(final_notional, allowed_loss) if allowed_loss > 0 else 0.0
+                target_margin = allowed_loss if allowed_loss > 0 else 0.0
                 request_payload['riskControl'].update({
                     'effectivePositionSide': effective_position_side,
                     'finalQty': final_qty,
@@ -1557,15 +1557,22 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'currentMarginPctOfEquity': margin_pct_of_equity,
                     'targetMarginPctOfEquity': target_margin_pct_of_equity,
                 })
-                add_margin_amount = max(0.0, target_margin - current_margin)
+                margin_delta = target_margin - current_margin
+                margin_delta_abs = abs(margin_delta)
                 if equity > 0:
-                    add_margin_pct_of_equity = (add_margin_amount / equity) * 100.0
-                if final_qty > 0 and add_margin_amount > 0.00000001:
-                    _set_stage('add_margin')
-                    margin_ops['addMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, add_margin_amount, direction_type=1)
-                    request_payload['riskControl']['addMargin'] = add_margin_amount
+                    add_margin_pct_of_equity = (margin_delta_abs / equity) * 100.0
+                if final_qty > 0 and margin_delta_abs > 0.00000001:
+                    if margin_delta > 0:
+                        _set_stage('add_margin')
+                        margin_ops['addMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, margin_delta_abs, direction_type=1)
+                        request_payload['riskControl']['addMargin'] = margin_delta_abs
+                    else:
+                        _set_stage('reduce_margin')
+                        margin_ops['reduceMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, margin_delta_abs, direction_type=2)
+                        request_payload['riskControl']['reduceMargin'] = margin_delta_abs
                 request_payload['riskControl'].update({
-                    'addMarginPctOfEquity': add_margin_pct_of_equity,
+                    'marginDeltaPctOfEquity': add_margin_pct_of_equity,
+                    'marginDirection': 'add' if margin_delta > 0 else ('reduce' if margin_delta < 0 else 'none'),
                 })
                 request_payload['riskControl']['ops'] = margin_ops
 
