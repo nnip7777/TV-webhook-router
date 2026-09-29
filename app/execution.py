@@ -340,6 +340,26 @@ def _bingx_account_equity(balance_payload: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _bingx_account_available(balance_payload: Dict[str, Any]) -> float:
+    rows = (balance_payload or {}).get('data') or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        asset = str(row.get('asset') or '').upper()
+        if asset and asset != 'USDT':
+            continue
+        for key in ('availableMargin', 'availableBalance', 'available'):
+            value = row.get(key)
+            if value not in (None, ''):
+                try:
+                    return float(value)
+                except Exception:
+                    pass
+    return 0.0
+
+
 def _bingx_extract_position(positions_payload: Dict[str, Any], symbol: str, fallback_side: str = '') -> Dict[str, Any]:
     rows = (positions_payload or {}).get('data') or []
     if isinstance(rows, dict):
@@ -1564,12 +1584,27 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 if final_qty > 0 and margin_delta_abs > 0.00000001:
                     if margin_delta > 0:
                         _set_stage('add_margin')
-                        margin_ops['addMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, margin_delta_abs, direction_type=1)
-                        request_payload['riskControl']['addMargin'] = margin_delta_abs
+                        try:
+                            available = _bingx_account_available(margin_ops.get('balance') or {})
+                            request_payload['riskControl']['availableBalance'] = available
+                            actual_add = min(margin_delta_abs, available) if available > 0 else 0.0
+                            shortfall = margin_delta_abs - actual_add
+                            if shortfall > 0.00000001:
+                                request_payload['riskControl']['addMarginShortfall'] = shortfall
+                            if actual_add > 0.00000001:
+                                margin_ops['addMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, actual_add, direction_type=1)
+                                request_payload['riskControl']['addMargin'] = actual_add
+                            else:
+                                request_payload['riskControl']['addMarginSkipped'] = 'insufficient_balance'
+                        except Exception as add_err:
+                            margin_ops['addMarginError'] = str(add_err)
                     else:
                         _set_stage('reduce_margin')
-                        margin_ops['reduceMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, margin_delta_abs, direction_type=2)
-                        request_payload['riskControl']['reduceMargin'] = margin_delta_abs
+                        try:
+                            margin_ops['reduceMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, margin_delta_abs, direction_type=2)
+                            request_payload['riskControl']['reduceMargin'] = margin_delta_abs
+                        except Exception as reduce_err:
+                            margin_ops['reduceMarginError'] = str(reduce_err)
                 request_payload['riskControl'].update({
                     'marginDeltaPctOfEquity': add_margin_pct_of_equity,
                     'marginDirection': 'add' if margin_delta > 0 else ('reduce' if margin_delta < 0 else 'none'),

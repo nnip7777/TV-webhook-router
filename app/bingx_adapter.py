@@ -218,7 +218,7 @@ class BingXBroker:
             'symbol': symbol,
             'positionSide': str(position_side or 'BOTH').upper(),
             'amount': _decimal_text(amount, 8),
-            'directionType': int(direction_type),
+            'type': int(direction_type),
         })
 
     def get_position_mode(self) -> Dict[str, Any]:
