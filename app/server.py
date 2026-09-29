@@ -1537,8 +1537,14 @@ def _extract_bingx_risk_details(destination: Dict[str, Any]) -> str:
             'targetMargin',
             'targetMarginPctOfEquity',
             'addMargin',
+            'reduceMargin',
             'addMarginPctOfEquity',
+            'marginDeltaPctOfEquity',
+            'marginDirection',
             'liquidationPrice',
+            'liquidationPriceAfterAdjust',
+            'marginAfterAdjust',
+            'marginAfterAdjustPctOfEquity',
         ):
             value = risk.get(key)
             if value not in (None, ''):

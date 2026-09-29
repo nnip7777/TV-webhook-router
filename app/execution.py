@@ -1574,6 +1574,21 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'marginDeltaPctOfEquity': add_margin_pct_of_equity,
                     'marginDirection': 'add' if margin_delta > 0 else ('reduce' if margin_delta < 0 else 'none'),
                 })
+                if margin_delta_abs > 0.00000001:
+                    _set_stage('verify_margin_after_adjust')
+                    try:
+                        positions_after_margin = client.get_positions(prepared['symbol'])
+                        pos_after_margin = _bingx_extract_position(positions_after_margin, prepared['symbol'], effective_position_side)
+                        request_payload['riskControl']['liquidationPriceAfterAdjust'] = pos_after_margin.get('liquidationPrice') or pos_after_margin.get('liquidPrice')
+                        adjusted_margin = pos_after_margin.get('positionMargin') or pos_after_margin.get('isolatedMargin') or pos_after_margin.get('margin')
+                        request_payload['riskControl']['marginAfterAdjust'] = adjusted_margin
+                        if equity > 0 and adjusted_margin not in (None, ''):
+                            try:
+                                request_payload['riskControl']['marginAfterAdjustPctOfEquity'] = (abs(float(adjusted_margin)) / equity) * 100.0
+                            except Exception:
+                                pass
+                    except Exception as verify_err:
+                        request_payload['riskControl']['verifyMarginError'] = str(verify_err)
                 request_payload['riskControl']['ops'] = margin_ops
 
             _set_stage('done')
