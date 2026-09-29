@@ -2186,10 +2186,6 @@ def _all_known_tickers(config: Dict[str, Any], observed: Dict[str, Any]) -> List
     tickers = set(observed.get('tickers', {}).keys())
     for route in config.get('routes', []):
         tickers.update(_extract_tickers_from_route(route))
-    live_metrics = METRICS_CACHE.get('data') or {}
-    for broker_payload in live_metrics.values():
-        if isinstance(broker_payload, dict):
-            tickers.update((broker_payload.get('symbols') or {}).keys())
     return sorted(tickers, key=lambda ticker: _ticker_sort_key(ticker, config, observed))
 
 
