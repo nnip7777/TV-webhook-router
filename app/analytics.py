@@ -449,6 +449,17 @@ def sync_exchange_fills(broker: str, symbol: str, lookback_hours: int = 24) -> D
         with _DB_LOCK:
             with _connect() as conn:
                 _ensure_counter_keys(conn)
+                signal_id = f'exchange-sync:{broker}:{symbol}'
+                execution_id = f'exchange:{broker}:{symbol}'
+                conn.execute(
+                    'INSERT OR IGNORE INTO signals(signal_id, received_at, origin, source_ticker) VALUES(?,?,?,?)',
+                    (signal_id, datetime.now(LOCAL_TZ).isoformat(), 'exchange_sync', symbol),
+                )
+                conn.execute(
+                    '''INSERT OR IGNORE INTO executions(execution_id, signal_id, destination_index, received_at, broker, symbol, venue, side, status, dry_run)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                    (execution_id, signal_id, 0, datetime.now(LOCAL_TZ).isoformat(), broker, symbol, 'swap', '', 'exchange_sync', 0),
+                )
                 for row in rows:
                     broker_order_id = str(row.get('orderId') or row.get('orderID') or '')
                     trade_id = str(row.get('tradeId') or row.get('tradeID') or '')
@@ -481,7 +492,7 @@ def sync_exchange_fills(broker: str, symbol: str, lookback_hours: int = 24) -> D
                         'fill_id': fill_id,
                         'execution_id': f'exchange:{broker}:{symbol}',
                         'signal_id': f'exchange-sync:{broker}:{symbol}',
-                        'order_local_id': f'exchange:{broker}:{broker_order_id}',
+                        'order_local_id': None,
                         'broker_order_id': broker_order_id,
                         'fill_seq': _to_int(trade_id) or 0,
                         'phase': 'exchange_sync',
@@ -1107,14 +1118,14 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
                 float(exit_commission_alloc),
                 float(commission_total),
                 float(net_pnl),
-                str(row['open_fill_id'] or ''),
-                str(fill.get('fill_id') or ''),
-                str(row['open_order_local_id'] or ''),
-                str(fill.get('order_local_id') or ''),
-                str(row['open_signal_id'] or ''),
-                str(fill.get('signal_id') or ''),
-                str(row['open_execution_id'] or ''),
-                str(fill.get('execution_id') or ''),
+                str(row['open_fill_id']) if row['open_fill_id'] else None,
+                str(fill.get('fill_id')) if fill.get('fill_id') else None,
+                str(row['open_order_local_id']) if row['open_order_local_id'] else None,
+                str(fill.get('order_local_id')) if fill.get('order_local_id') else None,
+                str(row['open_signal_id']) if row['open_signal_id'] else None,
+                str(fill.get('signal_id')) if fill.get('signal_id') else None,
+                str(row['open_execution_id']) if row['open_execution_id'] else None,
+                str(fill.get('execution_id')) if fill.get('execution_id') else None,
             ),
         )
         if round_trip_cursor.rowcount:
@@ -1122,13 +1133,13 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
         conn.execute(
             'INSERT OR IGNORE INTO round_trip_fills(link_id, round_trip_id, fill_id, leg, matched_qty, price, commission_alloc) VALUES(?, ?, ?, ?, ?, ?, ?)',
             (
-                f'{round_trip_id}:entry', round_trip_id, str(row['open_fill_id'] or ''), 'entry', float(matched_qty), float(open_price), float(entry_commission_alloc),
+                f'{round_trip_id}:entry', round_trip_id, str(row['open_fill_id']) if row['open_fill_id'] else None, 'entry', float(matched_qty), float(open_price), float(entry_commission_alloc),
             ),
         )
         conn.execute(
             'INSERT OR IGNORE INTO round_trip_fills(link_id, round_trip_id, fill_id, leg, matched_qty, price, commission_alloc) VALUES(?, ?, ?, ?, ?, ?, ?)',
             (
-                f'{round_trip_id}:exit', round_trip_id, str(fill.get('fill_id') or ''), 'exit', float(matched_qty), float(price), float(exit_commission_alloc),
+                f'{round_trip_id}:exit', round_trip_id, str(fill.get('fill_id')) if fill.get('fill_id') else None, 'exit', float(matched_qty), float(price), float(exit_commission_alloc),
             ),
         )
         _update_daily_trade_stats(conn, str(fill.get('observed_at') or ''), broker, symbol, venue, matched_qty, gross_pnl, commission_total, net_pnl)
@@ -1165,10 +1176,10 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
                 float(qty_remaining),
                 float(fill_commission_remaining),
                 float(price),
-                str(fill.get('fill_id') or ''),
-                str(fill.get('order_local_id') or ''),
-                str(fill.get('execution_id') or ''),
-                str(fill.get('signal_id') or ''),
+                str(fill.get('fill_id')) if fill.get('fill_id') else None,
+                str(fill.get('order_local_id')) if fill.get('order_local_id') else None,
+                str(fill.get('execution_id')) if fill.get('execution_id') else None,
+                str(fill.get('signal_id')) if fill.get('signal_id') else None,
             ),
         )
 
