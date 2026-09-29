@@ -1387,7 +1387,8 @@ async function rebuildTodayAnalytics(){
     const res=await fetch('/api/effectiveness-rebuild-today',{method:'POST',headers:{'Accept':'application/json'}});
     const data=await res.json();
     if(!res.ok){throw new Error(data.error || ('HTTP '+res.status));}
-    status.innerHTML=`<span class='ok'>Today rebuild completed</span> · day: ${esc(data.day||'')} · seeded pre-day fills: ${fmtNum(data.seedFillsBeforeDay||0,0)} · day fills: ${fmtNum(data.replayedDayFills||0,0)} · effects updated: ${fmtNum(data.recomputedEffects||0,0)} · round-trips: ${fmtNum(((data.counters||{}).round_trips)||0,0)}`;
+    const sync = data.exchangeSync || {};
+    status.innerHTML=`<span class='ok'>Today rebuild completed</span> · day: ${esc(data.day||'')} · exchange sync: ${fmtNum(sync.imported||0,0)} imported, ${fmtNum(sync.skipped||0,0)} skipped · day fills: ${fmtNum(data.replayedDayFills||0,0)} · effects: ${fmtNum(data.recomputedEffects||0,0)} · round-trips: ${fmtNum(((data.counters||{}).round_trips)||0,0)}`;
     await load();
   }catch(err){
     status.innerHTML=`<span class='bad'>Today rebuild failed</span> · ${esc(err.message || err)}`;
@@ -1404,7 +1405,8 @@ async function rebuildAnalytics(){
     const res=await fetch('/api/effectiveness-rebuild',{method:'POST',headers:{'Accept':'application/json'}});
     const data=await res.json();
     if(!res.ok){throw new Error(data.error || ('HTTP '+res.status));}
-    status.innerHTML=`<span class='ok'>Full rebuild completed</span> · fills: ${fmtNum(data.replayedFills||0,0)} · effects updated: ${fmtNum(data.recomputedEffects||0,0)} · round-trips: ${fmtNum(((data.counters||{}).round_trips)||0,0)}`;
+    const sync = data.exchangeSync || {};
+    status.innerHTML=`<span class='ok'>Full rebuild completed</span> · exchange sync: ${fmtNum(sync.imported||0,0)} imported, ${fmtNum(sync.skipped||0,0)} skipped · fills: ${fmtNum(data.replayedFills||0,0)} · effects: ${fmtNum(data.recomputedEffects||0,0)} · round-trips: ${fmtNum(((data.counters||{}).round_trips)||0,0)}`;
     await load();
   }catch(err){
     status.innerHTML=`<span class='bad'>Full rebuild failed</span> · ${esc(err.message || err)}`;

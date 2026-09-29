@@ -512,19 +512,47 @@ def sync_exchange_fills(broker: str, symbol: str, lookback_hours: int = 24) -> D
     except Exception as e:
         return {'ok': False, 'imported': 0, 'skipped': 0, 'error': str(e)}
 
+def _sync_all_tracked_symbols() -> Dict[str, Any]:
+    """Sync fills from exchange for all broker+symbol pairs seen in analytics."""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                'SELECT DISTINCT broker, symbol FROM executions WHERE broker IS NOT NULL AND symbol IS NOT NULL'
+            ).fetchall()
+    except Exception:
+        rows = []
+
+    total_imported = 0
+    total_skipped = 0
+    for row in rows:
+        broker = str(row['broker'] or '').strip().lower()
+        symbol = str(row['symbol'] or '').strip()
+        if not broker or not symbol:
+            continue
+        if broker != 'bingx':
+            continue
+        result = sync_exchange_fills(broker, symbol, lookback_hours=72)
+        total_imported += int(result.get('imported') or 0)
+        total_skipped += int(result.get('skipped') or 0)
+    return {'syncedSymbols': len(rows), 'imported': total_imported, 'skipped': total_skipped}
+
 
 def rebuild_analytics() -> Dict[str, Any]:
+    sync_result = _sync_all_tracked_symbols()
     with _DB_LOCK:
         with _connect() as conn:
             result = _rebuild_all_locked(conn)
+            result['exchangeSync'] = sync_result
             return result
 
 
 def rebuild_analytics_today() -> Dict[str, Any]:
+    sync_result = _sync_all_tracked_symbols()
     today = datetime.now(LOCAL_TZ).date().isoformat()
     with _DB_LOCK:
         with _connect() as conn:
             result = _rebuild_day_locked(conn, today)
+            result['exchangeSync'] = sync_result
             result['day'] = today
             result['tz'] = 'Europe/Moscow'
             return result
