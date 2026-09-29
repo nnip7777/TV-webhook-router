@@ -420,6 +420,99 @@ def record_execution_analytics(decision: Dict[str, Any]) -> None:
                         _apply_fill_to_positions(conn, fill)
 
 
+def sync_exchange_fills(broker: str, symbol: str, lookback_hours: int = 24) -> Dict[str, Any]:
+    """Fetch fills from exchange and import ones not tracked by WHR."""
+    broker = str(broker or '').strip().lower()
+    symbol = str(symbol or '').strip()
+    if not broker or not symbol:
+        return {'ok': False, 'imported': 0, 'skipped': 0, 'error': 'missing broker or symbol'}
+
+    try:
+        if broker == 'bingx':
+            from bingx_adapter import BingXBroker
+            client = BingXBroker(testnet=False)
+        else:
+            return {'ok': False, 'imported': 0, 'skipped': 0, 'error': f'unsupported broker: {broker}'}
+
+        import time as _time
+        end_ts = int(_time.time() * 1000)
+        start_ts = end_ts - lookback_hours * 60 * 60 * 1000
+        payload = client.get_all_fill_orders(symbol=symbol, start_ts=start_ts, end_ts=end_ts, trading_unit='COIN')
+        data = (payload or {}).get('data') or {}
+        rows = data.get('fill_orders') or data.get('fillOrders') or data.get('fills') or []
+        if isinstance(data, list):
+            rows = data
+        rows = [r for r in rows if isinstance(r, dict)]
+
+        imported = 0
+        skipped = 0
+        with _DB_LOCK:
+            with _connect() as conn:
+                _ensure_counter_keys(conn)
+                for row in rows:
+                    broker_order_id = str(row.get('orderId') or row.get('orderID') or '')
+                    trade_id = str(row.get('tradeId') or row.get('tradeID') or '')
+                    qty = _to_float(row.get('volume') or row.get('qty') or row.get('executedQty'))
+                    if qty <= 0:
+                        continue
+                    price = _to_float(row.get('price') or row.get('avgPrice'))
+                    side = str(row.get('side') or '').strip().lower()
+                    if side not in ('buy', 'sell'):
+                        side = str(row.get('orderSide') or '').strip().lower()
+                    fill_id = f'exchange:{broker}:{symbol}:{broker_order_id or trade_id}:{trade_id or "0"}'
+
+                    exists = conn.execute('SELECT 1 FROM fills WHERE fill_id = ?', (fill_id,)).fetchone()
+                    if exists:
+                        skipped += 1
+                        continue
+
+                    commission = _to_float(row.get('commission') or row.get('fee'))
+                    commission_currency = str(row.get('currency') or row.get('commissionCurrency') or row.get('feeAsset') or '')
+                    observed_at = ''
+                    ts_val = row.get('filledTime') or row.get('filledTm') or row.get('time') or row.get('updateTime')
+                    if ts_val:
+                        try:
+                            ts_int = int(ts_val)
+                            observed_at = datetime.fromtimestamp(ts_int / 1000, tz=LOCAL_TZ).isoformat()
+                        except Exception:
+                            observed_at = str(ts_val)
+
+                    fill = {
+                        'fill_id': fill_id,
+                        'execution_id': f'exchange:{broker}:{symbol}',
+                        'signal_id': f'exchange-sync:{broker}:{symbol}',
+                        'order_local_id': f'exchange:{broker}:{broker_order_id}',
+                        'broker_order_id': broker_order_id,
+                        'fill_seq': _to_int(trade_id) or 0,
+                        'phase': 'exchange_sync',
+                        'observed_at': observed_at,
+                        'broker': broker,
+                        'symbol': symbol,
+                        'venue': 'swap',
+                        'side': side,
+                        'qty': qty,
+                        'price': price,
+                        'notional': qty * price if price else 0.0,
+                        'commission': commission,
+                        'commission_currency': commission_currency,
+                        'liquidity_flag': str(row.get('liquidityFlag') or ''),
+                        'position_effect': '',
+                        'source_type': 'exchange_sync',
+                        'raw_json': _json_text(row),
+                    }
+                    if _insert_fill(conn, fill):
+                        _recompute_fill_effect(conn, fill)
+                        _apply_fill_to_positions(conn, fill)
+                        imported += 1
+                    else:
+                        skipped += 1
+                _refresh_counters(conn)
+
+        return {'ok': True, 'imported': imported, 'skipped': skipped}
+    except Exception as e:
+        return {'ok': False, 'imported': 0, 'skipped': 0, 'error': str(e)}
+
+
 def rebuild_analytics() -> Dict[str, Any]:
     with _DB_LOCK:
         with _connect() as conn:

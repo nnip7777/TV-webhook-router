@@ -4026,6 +4026,19 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             'details': traceback.format_exc()[:2000],
         })
 
+    def _sync_fills_bg():
+        try:
+            destinations = ((decision.get('executionResult') or {}).get('destinations') or [])
+            for dest in destinations:
+                broker = str(dest.get('broker') or '').strip().lower()
+                symbol = str(dest.get('symbol') or '').strip()
+                if broker and symbol:
+                    sync_exchange_fills(broker, symbol, lookback_hours=48)
+        except Exception:
+            pass
+
+    threading.Thread(target=_sync_fills_bg, daemon=True).start()
+
     origin = str(decision.get('origin') or 'webhook').strip() or 'webhook'
     destination_kind = 'quick-order-destination' if origin == 'quick-order' else 'webhook-destination'
     summary_kind = 'quick-order' if origin == 'quick-order' else 'webhook'
@@ -5062,3 +5075,4 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
 
 def _process_webhook_job(job: Dict[str, Any]) -> None:
     _notify_execution_error(payload, decision)
+from analytics import sync_exchange_fills
