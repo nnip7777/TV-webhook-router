@@ -1038,7 +1038,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'symbol': prepared['symbol'],
                         'side': prepared['side'],
                         'type': 'LIMIT',
-                        'quantity': prepared['quantity'],
+                        'quantity': prepared.get('quantity') or prepared.get('quoteOrderQty') or quantity,
                         'price': prepared['price'],
                         'timeInForce': 'GTC',
                         'positionSide': api_position_side,
@@ -1132,7 +1132,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 before_position = _bingx_extract_position(positions_before, prepared['symbol'], requested_position_side)
                 before_qty = _bingx_position_qty(before_position)
                 mark_price = float(prepared['price'])
-                incoming_qty = abs(float(prepared['quantity']))
+                incoming_qty = abs(float(prepared.get('quantity') or prepared.get('quoteOrderQty') or 0))
                 expected_final_qty = max(0.0, before_qty + incoming_qty)
                 allowed_loss = max(0.0, equity * (risk_pct / 100.0))
                 expected_notional = abs(mark_price * expected_final_qty)
