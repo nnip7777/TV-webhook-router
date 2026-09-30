@@ -5,7 +5,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -197,6 +197,25 @@ CREATE TABLE IF NOT EXISTS exchange_income (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS broker_sync_state (
+    broker TEXT PRIMARY KEY,
+    last_synced_at TEXT NOT NULL,
+    cursor TEXT,
+    last_imported INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS instrument_meta (
+    symbol TEXT PRIMARY KEY,
+    shortname TEXT,
+    cash_unit TEXT NOT NULL,
+    price_step REAL NOT NULL DEFAULT 1.0,
+    minstep REAL NOT NULL DEFAULT 1.0,
+    facevalue REAL NOT NULL DEFAULT 1.0,
+    underlying_currency TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_executions_signal_id ON executions(signal_id);
 CREATE INDEX IF NOT EXISTS idx_orders_execution_id ON orders(execution_id);
 CREATE INDEX IF NOT EXISTS idx_orders_broker_order_id ON orders(broker_order_id);
@@ -303,8 +322,613 @@ def _fill_request_size(requested_qty_text: str, phase: str, request_json: str, p
     return f"{qty_text} {_fill_request_unit(phase, request_json, position_effect)}"
 
 
-def analytics_overview(limit: int = 20) -> Dict[str, Any]:
+def _channel_label(row: Dict[str, Any]) -> str:
+    signal_id = str(row.get('closing_signal_id') or row.get('opening_signal_id') or '')
+    origin = str(row.get('origin') or '').strip().lower()
+    if signal_id.startswith('exchange-sync:') or origin == 'exchange_sync':
+        return 'manual'
+    if origin == 'quick-order':
+        return 'quick'
+    if origin == 'webhook' or origin == 'tv':
+        return 'tv'
+    return origin or 'unknown'
+
+
+def _strategy_label(row: Dict[str, Any]) -> str:
+    """Final P&L attribution = traded instrument (broker symbol), not the channel.
+
+    manual / TV / quick on the same contract roll up into one instrument.
+    """
+    symbol = str(row.get('symbol') or '').strip()
+    if symbol:
+        return symbol
+    ticker = str(row.get('source_ticker') or '').strip()
+    if ticker:
+        return ticker
+    route = str(row.get('route_name') or '').strip()
+    if route:
+        return route
+    return _channel_label(row) or 'unknown'
+
+
+# BingX perps are quoted in USDT (price*qty already money).
+# Alor/Finam MOEX futures P&L from price deltas is in price points;
+# cash = points * price_step (RUB per 1 point per 1 contract). Commission is RUB.
+BROKER_CASH_UNIT = {
+    'bingx': 'USDT',
+    'bybit': 'USDT',
+    'alor': 'RUB',
+    'finam': 'RUB',
+    'schwab': 'USD',
+}
+
+
+def _base_code(symbol: str) -> str:
+    text = str(symbol or '').strip()
+    if '@' in text:
+        text = text.split('@', 1)[0]
+    return text
+
+
+def _load_instrument_meta_map(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    # Compatibility: older DBs may lack minstep.
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(instrument_meta)')}
+    minstep_col = 'minstep' if 'minstep' in cols else '1.0 AS minstep'
+    for row in conn.execute(f'SELECT symbol, shortname, cash_unit, price_step, {minstep_col}, facevalue, underlying_currency FROM instrument_meta'):
+        step = float(row['price_step'] or 1.0) or 1.0
+        minstep = float(row['minstep'] or 1.0) or 1.0
+        # Alor pricestep = RUB per 1 minstep; cash per 1.0 price point = pricestep / minstep.
+        cash_step = step / minstep if minstep else step
+        out[str(row['symbol'])] = {
+            'symbol': str(row['symbol']),
+            'shortname': str(row['shortname'] or ''),
+            'cash_unit': str(row['cash_unit'] or ''),
+            'price_step': cash_step,
+            'raw_pricestep': step,
+            'minstep': minstep,
+            'facevalue': float(row['facevalue'] or 1.0),
+            'underlying_currency': str(row['underlying_currency'] or ''),
+        }
+    return out
+
+
+def ensure_instrument_meta() -> Dict[str, Any]:
+    """Fill price_step (cash per 1 price point) for Alor/Finam futures from Alor securities."""
+    init_analytics_db()
+    try:
+        with _connect() as conn:
+            _ensure_counter_keys(conn)
+            existing = _load_instrument_meta_map(conn)
+            symbols = [str(r['symbol']) for r in conn.execute(
+                "SELECT DISTINCT symbol FROM fills WHERE broker IN ('alor','finam') AND symbol IS NOT NULL AND symbol != ''"
+            )]
+    except Exception:
+        return {'ok': False, 'error': 'db_read_failed', 'updated': 0}
+
+    need = []
+    for sym in symbols:
+        meta = existing.get(sym) or existing.get(_base_code(sym))
+        if not meta or float(meta.get('price_step') or 1.0) == 1.0 and meta.get('cash_unit') != 'USDT':
+            need.append(sym)
+    if not need:
+        return {'ok': True, 'updated': 0, 'cached': len(existing)}
+
+    updated = 0
+    try:
+        from alor_adapter import load_workspace_module
+        import asyncio
+        import httpx
+        from settings import ALOR_CONFIG_PATH
+        cfg = json.loads(Path(ALOR_CONFIG_PATH).read_text())
+        module = load_workspace_module()
+        client = module.AlorClient(
+            refresh_token=str(cfg.get('refresh_token') or ''),
+            portfolio=str(cfg.get('portfolio') or ''),
+            client_id=str(cfg.get('client_id') or ''),
+        )
+
+        async def _fetch(sym: str):
+            token = await client.get_access_token()
+            headers = {'Authorization': f'Bearer {token}'}
+            code = sym.split('@', 1)[0]
+            async with httpx.AsyncClient(timeout=30) as session:
+                for path_sym in (sym, code):
+                    url = f'https://api.alor.ru/md/v2/Securities/MOEX/{path_sym}'
+                    resp = await session.get(url, headers=headers)
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    if isinstance(data, list):
+                        data = data[0] if data else {}
+                    if isinstance(data, dict) and data:
+                        return data
+            return {}
+
+        async def _batch():
+            out = {}
+            for sym in need:
+                try:
+                    out[sym] = await _fetch(sym)
+                except Exception:
+                    out[sym] = {}
+            return out
+
+        fetched = asyncio.run(_batch())
+    except Exception as e:
+        return {'ok': False, 'error': str(e), 'updated': 0}
+
+    with _DB_LOCK:
+        with _connect() as conn:
+            cols = {r[1] for r in conn.execute('PRAGMA table_info(instrument_meta)')}
+            if 'minstep' not in cols:
+                conn.execute('ALTER TABLE instrument_meta ADD COLUMN minstep REAL NOT NULL DEFAULT 1.0')
+            for sym, data in fetched.items():
+                if not data:
+                    continue
+                step = _to_float(data.get('pricestep') or data.get('priceStep') or 1.0) or 1.0
+                minstep = _to_float(data.get('minstep') or data.get('minStep') or 1.0) or 1.0
+                face = _to_float(data.get('facevalue') or data.get('lotsize') or 1.0) or 1.0
+                shortname = str(data.get('shortname') or data.get('shortName') or _base_code(sym))
+                und = str(data.get('currency') or '')
+                for key in (sym, shortname):
+                    if not key:
+                        continue
+                    conn.execute(
+                        '''
+                        INSERT INTO instrument_meta(symbol, shortname, cash_unit, price_step, minstep, facevalue, underlying_currency, updated_at)
+                        VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                        ON CONFLICT(symbol) DO UPDATE SET
+                            shortname=excluded.shortname,
+                            cash_unit=excluded.cash_unit,
+                            price_step=excluded.price_step,
+                            minstep=excluded.minstep,
+                            facevalue=excluded.facevalue,
+                            underlying_currency=excluded.underlying_currency,
+                            updated_at=CURRENT_TIMESTAMP
+                        ''',
+                        (key, shortname, 'RUB', step, minstep, face, und),
+                    )
+                updated += 1
+    return {'ok': True, 'updated': updated}
+
+
+def _is_option_symbol(symbol: str) -> bool:
+    code = _base_code(symbol)
+    # MOEX option shortcodes: strike + C/P/B + month/year, e.g. GD2800BO5, NG2.6BS6, NG3.15BR6C
+    if any(token in code for token in ('BO', 'BN', 'BR', 'BS', 'BF', 'BP', 'BU', 'BV', 'BD', 'BQ')):
+        return True
+    return False
+
+
+def _instrument_cash_meta(broker: str, symbol: str, meta_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    broker = str(broker or '').strip().lower()
+    if broker in ('bingx', 'bybit', 'schwab'):
+        return {
+            'cash_unit': BROKER_CASH_UNIT.get(broker, 'USDT'),
+            'price_step': 1.0,
+            'points_unit': 'price',
+        }
+    meta = meta_map.get(symbol) or meta_map.get(_base_code(symbol)) or {}
+    # price_step in map is already cash per 1.0 quote point (loader divides pricestep/minstep).
+    step = float(meta.get('price_step') or 1.0) or 1.0
+    unit = str(meta.get('cash_unit') or 'RUB')
+    if not meta:
+        return {'cash_unit': 'POINTS', 'price_step': 1.0, 'points_unit': 'pts'}
+    # Option premium multiplies differently; keep points unless calibrated.
+    if _is_option_symbol(symbol) and not meta.get('calibrated'):
+        return {'cash_unit': 'POINTS', 'price_step': 1.0, 'points_unit': 'opt_pts'}
+    return {'cash_unit': unit, 'price_step': step, 'points_unit': 'pts'}
+
+
+def calibrate_price_step_from_trades() -> Dict[str, Any]:
+    """cash_step = Alor volume / (price * qty) — ground truth from trade notional."""
+    init_analytics_db()
+    updated = 0
+    try:
+        with _DB_LOCK:
+            with _connect() as conn:
+                cols = {r[1] for r in conn.execute('PRAGMA table_info(instrument_meta)')}
+                if 'calibrated' not in cols:
+                    conn.execute('ALTER TABLE instrument_meta ADD COLUMN calibrated INTEGER NOT NULL DEFAULT 0')
+                rows = conn.execute(
+                    '''
+                    SELECT symbol, price, qty, raw_json FROM fills
+                    WHERE broker='alor' AND price > 0 AND qty > 0
+                    '''
+                ).fetchall()
+                ratios: Dict[str, List[float]] = {}
+                for row in rows:
+                    try:
+                        raw = json.loads(row['raw_json'] or '{}')
+                        vol = float(raw.get('volume') or 0)
+                        pq = float(row['price']) * float(row['qty'])
+                        if vol > 0 and pq > 0:
+                            ratios.setdefault(str(row['symbol']), []).append(vol / pq)
+                    except Exception:
+                        continue
+                for symbol, vals in ratios.items():
+                    if not vals:
+                        continue
+                    cash_step = sum(vals) / len(vals)
+                    if cash_step <= 0:
+                        continue
+                    shortname = ''
+                    for key in (symbol, _base_code(symbol)):
+                        existing = conn.execute('SELECT shortname FROM instrument_meta WHERE symbol=?', (key,)).fetchone()
+                        if existing and existing['shortname']:
+                            shortname = str(existing['shortname'])
+                            break
+                    for key in {symbol, _base_code(symbol), shortname}:
+                        if not key:
+                            continue
+                        conn.execute(
+                            '''
+                            INSERT INTO instrument_meta(symbol, shortname, cash_unit, price_step, minstep, facevalue, underlying_currency, updated_at, calibrated)
+                            VALUES(?,?,?,?,1.0,1.0,?,CURRENT_TIMESTAMP,1)
+                            ON CONFLICT(symbol) DO UPDATE SET
+                                cash_unit=excluded.cash_unit,
+                                price_step=excluded.price_step,
+                                minstep=1.0,
+                                calibrated=1,
+                                updated_at=CURRENT_TIMESTAMP
+                            ''',
+                            (key, shortname or _base_code(symbol), 'RUB', cash_step, ''),
+                        )
+                    updated += 1
+    except Exception as e:
+        return {'ok': False, 'error': str(e), 'updated': 0}
+    return {'ok': True, 'updated': updated}
+
+
+def _cash_from_points(points_pnl: float, price_step: float) -> float:
+    return float(points_pnl or 0.0) * float(price_step or 1.0)
+
+
+def _metrics_block(rows: List[Dict[str, Any]], cash_unit: str = '') -> Dict[str, Any]:
+    trades = len(rows)
+    unit = cash_unit or 'MIXED'
+    if not trades:
+        return {
+            'cashUnit': unit,
+            'trades': 0, 'wins': 0, 'losses': 0, 'breakeven': 0,
+            'winRate': 0.0, 'profitFactor': 0.0,
+            'netCash': 0.0, 'grossCash': 0.0, 'commissionCash': 0.0,
+            'netPoints': 0.0, 'grossPoints': 0.0,
+            'avgWinCash': 0.0, 'avgLossCash': 0.0, 'avgTradeCash': 0.0,
+            'expectancyCash': 0.0, 'bestTradeCash': 0.0, 'worstTradeCash': 0.0,
+            'avgHoldSec': 0.0, 'totalQty': 0.0,
+        }
+    # Prefer cash fields; fall back to converting points.
+    def _cash(r: Dict[str, Any], kind: str) -> float:
+        if r.get(f'{kind}_cash') is not None:
+            return float(r.get(f'{kind}_cash') or 0.0)
+        step = float(r.get('price_step') or 1.0) or 1.0
+        return _cash_from_points(float(r.get(f'{kind}_pnl') or 0.0) if kind != 'commission' else float(r.get('commission_total') or 0.0), step)
+
+    net_cash = [float(r.get('net_cash') if r.get('net_cash') is not None else _cash(r, 'net')) for r in rows]
+    wins_list = [p for p in net_cash if p > 0]
+    losses_list = [p for p in net_cash if p < 0]
+    flat = [p for p in net_cash if p == 0]
+    wins = len(wins_list)
+    losses = len(losses_list)
+    net = sum(net_cash)
+    gross = sum(float(r.get('gross_cash') if r.get('gross_cash') is not None else _cash(r, 'gross')) for r in rows)
+    commission = sum(float(r.get('commission_cash') if r.get('commission_cash') is not None else _cash(r, 'commission')) for r in rows)
+    # Points are always the raw price-delta P&L (gross), never mixed with cash.
+    gross_points = sum(float(r.get('gross_pnl') or 0.0) for r in rows)
+    net_points = gross_points
+    gross_profit = sum(wins_list)
+    gross_loss = abs(sum(losses_list))
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
+    holds = [float(r.get('holding_time_sec') or 0.0) for r in rows if r.get('holding_time_sec') is not None]
+    qty = sum(abs(float(r.get('exit_qty') or r.get('entry_qty') or 0.0)) for r in rows)
+    return {
+        'cashUnit': unit,
+        'trades': trades,
+        'wins': wins,
+        'losses': losses,
+        'breakeven': len(flat),
+        'winRate': round(100.0 * wins / trades, 2) if trades else 0.0,
+        'profitFactor': round(profit_factor, 3) if profit_factor < 999 else 999.0,
+        'netCash': round(net, 4),
+        'grossCash': round(gross, 4),
+        'commissionCash': round(commission, 4),
+        'netPoints': round(net_points, 4),
+        'grossPoints': round(gross_points, 4),
+        'avgWinCash': round(gross_profit / wins, 4) if wins else 0.0,
+        'avgLossCash': round(-gross_loss / losses, 4) if losses else 0.0,
+        'avgTradeCash': round(net / trades, 4) if trades else 0.0,
+        'expectancyCash': round(net / trades, 4) if trades else 0.0,
+        'bestTradeCash': round(max(net_cash), 4) if net_cash else 0.0,
+        'worstTradeCash': round(min(net_cash), 4) if net_cash else 0.0,
+        'avgHoldSec': round(sum(holds) / len(holds), 1) if holds else 0.0,
+        'totalQty': round(qty, 4),
+    }
+
+
+def _load_round_trips_joined(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    return [dict(row) for row in conn.execute(
+        '''
+        SELECT
+            rt.*,
+            COALESCE(sc.origin, so.origin) AS origin,
+            COALESCE(sc.source_ticker, so.source_ticker) AS source_ticker,
+            COALESCE(sc.route_name, so.route_name) AS route_name,
+            COALESCE(sc.route_id, so.route_id) AS route_id
+        FROM round_trips rt
+        LEFT JOIN signals sc ON sc.signal_id = rt.closing_signal_id
+        LEFT JOIN signals so ON so.signal_id = rt.opening_signal_id
+        '''
+    ).fetchall()]
+
+
+def _group_metrics(rows: List[Dict[str, Any]], key_fn) -> List[Dict[str, Any]]:
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        key = key_fn(row)
+        buckets.setdefault(key, []).append(row)
+    out = []
+    for key, bucket in buckets.items():
+        # Never mix cash units inside one block.
+        units = {str(r.get('cash_unit') or 'MIXED') for r in bucket}
+        unit = next(iter(units)) if len(units) == 1 else 'MIXED'
+        block = _metrics_block(bucket, cash_unit=unit)
+        block['name'] = key
+        out.append(block)
+    out.sort(key=lambda r: r.get('netCash') or 0.0, reverse=True)
+    return out
+
+
+def performance_stats(brokers: List[str] | None = None, years: List[str] | None = None) -> Dict[str, Any]:
+    """Full closed-trade stats in cash units (RUB / USDT / USD), split by unit.
+
+    Alor/Finam futures: price-delta P&L is in points → cash = points × price_step (RUB).
+    BingX perps: already USDT. Units are never summed together.
+    brokers: optional allowlist (default = all).
+    years: optional year allowlist like ['2025','2026'] (default = all).
+    """
+    allow = None
+    if brokers is not None:
+        allow = {str(b).strip().lower() for b in brokers if str(b or '').strip()}
+    year_allow = None
+    if years is not None:
+        year_allow = {str(y).strip()[:4] for y in years if str(y or '').strip()}
+    meta_note = ensure_instrument_meta()
+    calib_note = calibrate_price_step_from_trades()
+    with _DB_LOCK:
+        with _connect() as conn:
+            _ensure_counter_keys(conn)
+            all_rows = _load_round_trips_joined(conn)
+            meta_map = _load_instrument_meta_map(conn)
+            available_years = sorted({
+                str(r.get('closed_at') or r.get('opened_at') or '')[:4]
+                for r in all_rows
+                if str(r.get('closed_at') or r.get('opened_at') or '')[:4]
+            })
+            income_by_asset: Dict[str, float] = {}
+            income_where = ' WHERE 1=1'
+            income_params: List[Any] = []
+            if allow:
+                marks = ','.join('?' for _ in allow)
+                income_where += f' AND broker IN ({marks})'
+                income_params.extend(sorted(allow))
+            if year_allow:
+                ymarks = ','.join('?' for _ in year_allow)
+                income_where += f" AND substr(observed_at,1,4) IN ({ymarks})"
+                income_params.extend(sorted(year_allow))
+            for row in conn.execute(f'SELECT asset, SUM(income) AS s FROM exchange_income{income_where} GROUP BY asset', income_params):
+                income_by_asset[str(row['asset'] or '')] = float(row['s'] or 0.0)
+            finam_vm = 0.0
+            finam_fee = 0.0
+            finam_account_by_year: Dict[str, Dict[str, float]] = {}
+            finam_allowed = allow is None or 'finam' in allow
+            if finam_allowed:
+                finam_where = " WHERE broker='finam'"
+                finam_params: List[Any] = []
+                if year_allow:
+                    ymarks = ','.join('?' for _ in year_allow)
+                    finam_where += f" AND substr(observed_at,1,4) IN ({ymarks})"
+                    finam_params.extend(sorted(year_allow))
+                for row in conn.execute(f"SELECT income_type, SUM(income) AS s FROM exchange_income{finam_where} GROUP BY income_type", finam_params):
+                    t = str(row['income_type'] or '')
+                    if t in ('INCOME', 'OUTCOMES'):
+                        finam_vm += float(row['s'] or 0.0)
+                    elif t == 'COMMISSION':
+                        finam_fee += float(row['s'] or 0.0)
+                for row in conn.execute(
+                    f"""
+                    SELECT substr(observed_at,1,4) AS y, income_type, SUM(income) AS s
+                    FROM exchange_income{finam_where} AND observed_at IS NOT NULL AND observed_at != ''
+                    GROUP BY y, income_type
+                    """,
+                    finam_params,
+                ):
+                    y = str(row['y'] or '')
+                    if not y:
+                        continue
+                    if year_allow and y not in year_allow:
+                        continue
+                    bucket = finam_account_by_year.setdefault(y, {'variationMarginRUB': 0.0, 'commissionRUB': 0.0, 'netRUB': 0.0})
+                    t = str(row['income_type'] or '')
+                    val = float(row['s'] or 0.0)
+                    if t in ('INCOME', 'OUTCOMES'):
+                        bucket['variationMarginRUB'] += val
+                    elif t == 'COMMISSION':
+                        bucket['commissionRUB'] += val
+                for bucket in finam_account_by_year.values():
+                    bucket['netRUB'] = bucket['variationMarginRUB'] + bucket['commissionRUB']
+                    for k in bucket:
+                        bucket[k] = round(bucket[k], 2)
+
+    rows = all_rows
+    if allow is not None:
+        rows = [r for r in rows if str(r.get('broker') or '').strip().lower() in allow]
+
+    for row in rows:
+        row['strategy'] = _strategy_label(row)
+        row['channel'] = _channel_label(row)
+        row['instrument'] = str(row.get('symbol') or '')
+        row['broker_name'] = str(row.get('broker') or '')
+        day = str(row.get('closed_at') or row.get('opened_at') or '')[:10]
+        row['trade_day'] = day or 'unknown'
+
+    if year_allow is not None:
+        rows = [r for r in rows if str(r.get('trade_day') or '')[:4] in year_allow]
+
+    for row in rows:
+        cash_meta = _instrument_cash_meta(row['broker_name'], row['instrument'], meta_map)
+        step = float(cash_meta.get('price_step') or 1.0) or 1.0
+        row['price_step'] = step
+        row['cash_unit'] = cash_meta['cash_unit']
+        gross_points = float(row.get('gross_pnl') or 0.0)
+        commission_points = float(row.get('commission_total') or 0.0)
+        # Alor/Finam: commission is already in RUB cash; do not treat it as points.
+        if row['cash_unit'] == 'USDT':
+            row['gross_cash'] = gross_points
+            row['commission_cash'] = commission_points
+        else:
+            row['gross_cash'] = _cash_from_points(gross_points, step)
+            row['commission_cash'] = commission_points if commission_points else 0.0
+        row['net_cash'] = float(row['gross_cash']) - float(row['commission_cash'])
+        row['net_pnl'] = float(row.get('net_pnl') or 0.0)
+        row['gross_pnl'] = gross_points
+
+    by_unit: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_unit.setdefault(row['cash_unit'], []).append(row)
+
+    overall_by_unit = {
+        unit: _metrics_block(bucket, cash_unit=unit)
+        for unit, bucket in sorted(by_unit.items(), key=lambda kv: -sum(float(r.get('net_cash') or 0.0) for r in kv[1]))
+    }
+
+    current_year = datetime.now(LOCAL_TZ).year
+    current_year_s = str(current_year)
+
+    def _period_slice(pred) -> Dict[str, Any]:
+        subset = [r for r in rows if pred(r)]
+        by_u: Dict[str, List[Dict[str, Any]]] = {}
+        for r in subset:
+            by_u.setdefault(r['cash_unit'], []).append(r)
+        return {
+            unit: _metrics_block(bucket, cash_unit=unit)
+            for unit, bucket in sorted(by_u.items(), key=lambda kv: -sum(float(r.get('net_cash') or 0.0) for r in kv[1]))
+        }
+
+    by_year: Dict[str, Dict[str, Any]] = {}
+    years = sorted({str(r.get('trade_day') or '')[:4] for r in rows if str(r.get('trade_day') or '')[:4]})
+    for y in years:
+        by_year[y] = _period_slice(lambda r, y=y: str(r.get('trade_day') or '').startswith(y))
+
+    ytd = _period_slice(lambda r: str(r.get('trade_day') or '').startswith(current_year_s))
+    trailing_365 = _period_slice(
+        lambda r: str(r.get('trade_day') or '') >= (datetime.now(LOCAL_TZ) - timedelta(days=365)).date().isoformat()
+    )
+
+    def _unit_aware(rows_in: List[Dict[str, Any]], key_fn) -> List[Dict[str, Any]]:
+        return _group_metrics(rows_in, lambda r: f"{key_fn(r)}|{r.get('cash_unit')}")
+
+    def _split_name(block: Dict[str, Any]) -> Dict[str, Any]:
+        name = str(block.get('name') or '')
+        if '|' in name:
+            base, unit = name.rsplit('|', 1)
+            block['name'] = base
+            block['cashUnit'] = unit
+        return block
+
+    by_strategy = [_split_name(b) for b in _unit_aware(rows, lambda r: r['strategy'])]
+    by_instrument = [_split_name(b) for b in _unit_aware(rows, lambda r: r['instrument'])]
+    by_channel = [_split_name(b) for b in _unit_aware(rows, lambda r: r['channel'])]
+    by_broker = [_split_name(b) for b in _unit_aware(rows, lambda r: r['broker_name'])]
+    by_direction = [_split_name(b) for b in _unit_aware(rows, lambda r: str(r.get('direction') or ''))]
+    by_day = [_split_name(b) for b in _unit_aware(rows, lambda r: r['trade_day'])]
+    by_day.sort(key=lambda r: r['name'])
+
+    open_lots_count = 0
+    open_qty = 0.0
+    try:
+        with _connect() as conn:
+            row = conn.execute('SELECT COUNT(*) AS c, COALESCE(SUM(remaining_qty),0) AS q FROM open_lots').fetchone()
+            open_lots_count = int(row['c'] or 0)
+            open_qty = float(row['q'] or 0.0)
+    except Exception:
+        pass
+
+    return {
+        'generatedAt': datetime.now(LOCAL_TZ).isoformat(),
+        'brokerFilter': sorted(allow) if allow is not None else 'all',
+        'yearFilter': sorted(year_allow) if year_allow is not None else 'all',
+        'availableYears': available_years,
+        'period': {
+            'from': min((r.get('opened_at') or '') for r in rows) if rows else '',
+            'to': max((r.get('closed_at') or '') for r in rows) if rows else '',
+        },
+        'cashUnits': {
+            'bingx': 'USDT — уже деньги (price×qty)',
+            'alor': 'RUB — пункты × cash_step; cash_step калиброван по volume/(price×qty)',
+            'finam': 'RUB — пункты × cash_step для фьючерсов; опционы в POINTS (без надёжного множителя)',
+            'finamVmCash': f'VM income FINAM = {finam_vm:.2f} RUB (фактический cash P&L по счёту)',
+            'finamFeeCash': f'Комиссии FINAM income = {finam_fee:.2f} RUB',
+            'note': 'Суммы в разных валютах НЕ складываются. POINTS — сырой P&L в пунктах/премии.',
+        },
+        'incomeByAsset': {k: round(v, 4) for k, v in income_by_asset.items()},
+        'finamAccountCash': {'variationMarginRUB': round(finam_vm, 2), 'commissionRUB': round(finam_fee, 2), 'netRUB': round(finam_vm + finam_fee, 2)},
+        'finamAccountCashByYear': finam_account_by_year,
+        'overallByUnit': overall_by_unit,
+        'byYear': by_year,
+        'ytd': {'year': current_year_s, 'byUnit': ytd},
+        'trailing365d': trailing_365,
+        'openLots': {'count': open_lots_count, 'qty': round(open_qty, 4)},
+        'byStrategy': by_strategy,
+        'byInstrument': by_instrument,
+        'byChannel': by_channel,
+        'byBroker': by_broker,
+        'byDirection': by_direction,
+        'byDay': by_day,
+        'instrumentMeta': {'fetch': meta_note, 'calibrate': calib_note},
+        'definitions': {
+            'netCash': 'денежный P&L. BingX=USDT. Alor/Finam futures: пункты×cash_step − комиссия (RUB).',
+            'netPoints': 'сырой P&L в пунктах цены / пунктах премии — НЕ деньги',
+            'cash_step': 'RUB за 1.0 пункта: Alor volume/(price×qty); для фьючерсов также pricestep/minstep',
+            'POINTS': 'инструмент без надёжного множителя (часто опционы) — считаем только в пунктах',
+            'winRate': 'доля закрытых сделок с netCash (или netPoints для POINTS) > 0, %',
+            'profitFactor': 'gross profit / |gross loss| (999 = без убытков)',
+            'finamAccountCash': 'VM (INCOME+OUTCOMES) и комиссии из Finam transactions — фактические RUB по счёту',
+            'strategy': 'итоговая атрибуция = биржевой инструмент (symbol); TV/quick/manual по одному контракту сгруппированы вместе',
+            'channel': 'manual = терминал брокера; tv = сигнал TradingView; quick = быстрый ордер WHR',
+        },
+    }
+
+
+def _filter_sql(alias: str, brokers: List[str] | None, years: List[str] | None, date_col: str) -> Tuple[str, List[Any]]:
+    """Build WHERE fragment for broker/year allowlists on a table alias."""
+    where = ''
+    params: List[Any] = []
+    if brokers is not None:
+        allow = [str(b).strip().lower() for b in brokers if str(b or '').strip()]
+        if not allow:
+            return ' AND 1=0', params
+        marks = ','.join('?' for _ in allow)
+        where += f" AND {alias}.broker IN ({marks})"
+        params.extend(allow)
+    if years is not None:
+        allow_y = [str(y).strip()[:4] for y in years if str(y or '').strip()]
+        if not allow_y:
+            return ' AND 1=0', params
+        marks = ','.join('?' for _ in allow_y)
+        where += f" AND substr({date_col},1,4) IN ({marks})"
+        params.extend(allow_y)
+    return where, params
+
+
+def analytics_overview(limit: int = 20, brokers: List[str] | None = None, years: List[str] | None = None) -> Dict[str, Any]:
     path = Path(ANALYTICS_DB_PATH)
+    lim = max(1, min(int(limit), 100))
+    f_where, f_params = _filter_sql('f', brokers, years, 'f.observed_at')
+    rt_where, rt_params = _filter_sql('rt', brokers, years, 'rt.closed_at')
+    d_where, d_params = _filter_sql('d', brokers, years, 'd.trade_day')
+    inc_where, inc_params = _filter_sql('i', brokers, years, 'i.observed_at')
     with _DB_LOCK:
         with _connect() as conn:
             _ensure_counter_keys(conn)
@@ -313,17 +937,18 @@ def analytics_overview(limit: int = 20) -> Dict[str, Any]:
                 for row in conn.execute('SELECT counter_key, counter_value FROM analytics_counters').fetchall()
             }
             latest_fills = [dict(row) for row in conn.execute(
-                '''
+                f'''
                 SELECT
                     f.fill_id, f.observed_at, f.broker, f.symbol, f.venue, f.side, f.qty, f.price, f.notional,
                     f.commission, f.commission_currency, f.order_local_id, f.execution_id, f.signal_id,
                     f.phase, f.position_effect, f.source_type, e.signal_mode, e.requested_qty_text, e.request_json
                 FROM fills f
                 LEFT JOIN executions e ON e.execution_id = f.execution_id
+                WHERE 1=1{f_where}
                 ORDER BY f.observed_at DESC, f.fill_id DESC
                 LIMIT ?
                 ''',
-                (max(1, min(int(limit), 100)),),
+                (*f_params, lim),
             ).fetchall()]
             for row in latest_fills:
                 phase = str(row.get('phase') or '')
@@ -339,13 +964,14 @@ def analytics_overview(limit: int = 20) -> Dict[str, Any]:
                 row['feeUnit'] = str(row.get('commission_currency') or quote_unit)
                 row['feeBasis'] = f"qty ({row['fillQtyUnit']}) × price = notional in {quote_unit}"
             latest_round_trips = [dict(row) for row in conn.execute(
-                '''
-                SELECT round_trip_id, closed_at, broker, symbol, venue, direction, entry_qty, entry_avg_price, exit_avg_price, gross_pnl, commission_total, net_pnl, opening_signal_id, closing_signal_id
-                FROM round_trips
-                ORDER BY closed_at DESC, round_trip_id DESC
+                f'''
+                SELECT rt.round_trip_id, rt.closed_at, rt.broker, rt.symbol, rt.venue, rt.direction, rt.entry_qty, rt.entry_avg_price, rt.exit_avg_price, rt.gross_pnl, rt.commission_total, rt.net_pnl, rt.opening_signal_id, rt.closing_signal_id
+                FROM round_trips rt
+                WHERE 1=1{rt_where}
+                ORDER BY rt.closed_at DESC, rt.round_trip_id DESC
                 LIMIT ?
                 ''',
-                (max(1, min(int(limit), 100)),),
+                (*rt_params, lim),
             ).fetchall()]
             for row in latest_round_trips:
                 base_unit, quote_unit = _symbol_units(str(row.get('symbol') or ''))
@@ -353,85 +979,82 @@ def analytics_overview(limit: int = 20) -> Dict[str, Any]:
                 row['priceUnit'] = quote_unit
                 row['pnlUnit'] = quote_unit
             latest_close_events = [dict(row) for row in conn.execute(
-                '''
+                f'''
                 SELECT
-                    closing_signal_id,
-                    closed_at,
-                    broker,
-                    symbol,
-                    venue,
-                    direction,
+                    rt.closing_signal_id,
+                    rt.closed_at,
+                    rt.broker,
+                    rt.symbol,
+                    rt.venue,
+                    rt.direction,
                     COUNT(*) AS lots_closed,
-                    COUNT(DISTINCT opening_signal_id) AS opening_signals,
-                    SUM(entry_qty) AS closed_qty_sum,
-                    SUM(gross_pnl) AS gross_pnl_sum,
-                    SUM(commission_total) AS commission_sum,
-                    SUM(net_pnl) AS net_pnl_sum
-                FROM round_trips
-                WHERE closing_signal_id IS NOT NULL AND closing_signal_id != ''
-                GROUP BY closing_signal_id, closed_at, broker, symbol, venue, direction
-                ORDER BY closed_at DESC, closing_signal_id DESC
+                    COUNT(DISTINCT rt.opening_signal_id) AS opening_signals,
+                    SUM(rt.entry_qty) AS closed_qty_sum,
+                    SUM(rt.gross_pnl) AS gross_pnl_sum,
+                    SUM(rt.commission_total) AS commission_sum,
+                    SUM(rt.net_pnl) AS net_pnl_sum
+                FROM round_trips rt
+                WHERE rt.closing_signal_id IS NOT NULL AND rt.closing_signal_id != ''{rt_where}
+                GROUP BY rt.closing_signal_id, rt.closed_at, rt.broker, rt.symbol, rt.venue, rt.direction
+                ORDER BY rt.closed_at DESC, rt.closing_signal_id DESC
                 LIMIT ?
                 ''',
-                (max(1, min(int(limit), 100)),),
+                (*rt_params, lim),
             ).fetchall()]
             for row in latest_close_events:
                 base_unit, quote_unit = _symbol_units(str(row.get('symbol') or ''))
                 row['qtyUnit'] = base_unit
                 row['pnlUnit'] = quote_unit
             latest_daily_stats = [dict(row) for row in conn.execute(
-                '''
-                SELECT round_trip_id, closed_at, broker, symbol, venue, direction, entry_qty, entry_avg_price, exit_avg_price, gross_pnl, commission_total, net_pnl, opening_signal_id, closing_signal_id
-                FROM round_trips
-                ORDER BY closed_at DESC, round_trip_id DESC
+                f'''
+                SELECT d.trade_day, d.broker, d.symbol, d.venue, d.lot_bucket, d.trades_count, d.gross_pnl_sum, d.commission_sum, d.net_pnl_sum, d.entry_qty_sum
+                FROM daily_trade_stats d
+                WHERE 1=1{d_where}
+                ORDER BY d.trade_day DESC, d.broker, d.symbol, d.venue, d.lot_bucket
                 LIMIT ?
                 ''',
-                (max(1, min(int(limit), 100)),),
-            ).fetchall()]
-            latest_daily_stats = [dict(row) for row in conn.execute(
-                '''
-                SELECT trade_day, broker, symbol, venue, lot_bucket, trades_count, gross_pnl_sum, commission_sum, net_pnl_sum, entry_qty_sum
-                FROM daily_trade_stats
-                ORDER BY trade_day DESC, broker, symbol, venue, lot_bucket
-                LIMIT ?
-                ''',
-                (max(1, min(int(limit), 100)),),
+                (*d_params, lim),
             ).fetchall()]
             latest_signal = conn.execute('SELECT signal_id, received_at, origin, source_ticker, side, qty_text FROM signals ORDER BY received_at DESC, signal_id DESC LIMIT 1').fetchone()
             latest_execution = conn.execute('SELECT execution_id, received_at, broker, symbol, venue, status, error_text FROM executions ORDER BY received_at DESC, execution_id DESC LIMIT 1').fetchone()
 
-            income_summary = conn.execute('''
-                SELECT symbol,
-                       SUM(CASE WHEN income_type='REALIZED_PNL' THEN income ELSE 0 END) AS realized_pnl,
-                       SUM(CASE WHEN income_type='TRADING_FEE' THEN income ELSE 0 END) AS total_fees,
-                       SUM(income) AS net_pnl,
-                       COUNT(CASE WHEN income_type='REALIZED_PNL' AND income > 0 THEN 1 END) AS wins,
-                       COUNT(CASE WHEN income_type='REALIZED_PNL' AND income < 0 THEN 1 END) AS losses
-                FROM exchange_income
-                GROUP BY symbol
+            income_summary = conn.execute(f'''
+                SELECT i.symbol,
+                       SUM(CASE WHEN i.income_type='REALIZED_PNL' THEN i.income ELSE 0 END) AS realized_pnl,
+                       SUM(CASE WHEN i.income_type='TRADING_FEE' THEN i.income ELSE 0 END) AS total_fees,
+                       SUM(i.income) AS net_pnl,
+                       COUNT(CASE WHEN i.income_type='REALIZED_PNL' AND i.income > 0 THEN 1 END) AS wins,
+                       COUNT(CASE WHEN i.income_type='REALIZED_PNL' AND i.income < 0 THEN 1 END) AS losses
+                FROM exchange_income i
+                WHERE 1=1{inc_where}
+                GROUP BY i.symbol
                 ORDER BY net_pnl DESC
-            ''').fetchall()
+            ''', inc_params).fetchall()
             income_rows = [dict(r) for r in income_summary]
 
-            income_totals = conn.execute('''
-                SELECT SUM(CASE WHEN income_type='REALIZED_PNL' THEN income ELSE 0 END) AS total_realized,
-                       SUM(CASE WHEN income_type='TRADING_FEE' THEN income ELSE 0 END) AS total_fees,
-                       SUM(income) AS total_net,
-                       COUNT(DISTINCT CASE WHEN income_type='REALIZED_PNL' THEN symbol END) AS symbols_traded
-                FROM exchange_income
-            ''').fetchone()
+            income_totals = conn.execute(f'''
+                SELECT SUM(CASE WHEN i.income_type='REALIZED_PNL' THEN i.income ELSE 0 END) AS total_realized,
+                       SUM(CASE WHEN i.income_type='TRADING_FEE' THEN i.income ELSE 0 END) AS total_fees,
+                       SUM(i.income) AS total_net,
+                       COUNT(DISTINCT CASE WHEN i.income_type='REALIZED_PNL' THEN i.symbol END) AS symbols_traded
+                FROM exchange_income i
+                WHERE 1=1{inc_where}
+            ''', inc_params).fetchone()
 
-            recent_income = [dict(r) for r in conn.execute('''
-                SELECT income_id, broker, symbol, income_type, income, asset, observed_at
-                FROM exchange_income
-                ORDER BY observed_at DESC
+            recent_income = [dict(r) for r in conn.execute(f'''
+                SELECT i.income_id, i.broker, i.symbol, i.income_type, i.income, i.asset, i.observed_at
+                FROM exchange_income i
+                WHERE 1=1{inc_where}
+                ORDER BY i.observed_at DESC
                 LIMIT ?
-            ''', (max(1, min(int(limit), 50)),)).fetchall()]
+            ''', (*inc_params, max(1, min(int(limit), 50)))).fetchall()]
     db_size_bytes = path.stat().st_size if path.exists() else 0
     return {
         'dbPath': str(path),
         'dbExists': path.exists(),
         'dbSizeBytes': db_size_bytes,
+        'brokerFilter': sorted(brokers) if brokers is not None else 'all',
+        'yearFilter': sorted(years) if years is not None else 'all',
         'counters': counters,
         'incomeBySymbol': income_rows,
         'incomeTotals': dict(income_totals) if income_totals else {},
@@ -467,173 +1090,496 @@ def record_execution_analytics(decision: Dict[str, Any]) -> None:
                         _apply_fill_to_positions(conn, fill)
 
 
-def sync_exchange_fills(broker: str, symbol: str, lookback_hours: int = 24) -> Dict[str, Any]:
+def _nested_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        for key in ('value', 'units', 'qty', 'quantity', 'amount'):
+            if key in value:
+                return value[key]
+        return ''
+    return value
+
+
+def _normalize_side(raw: Any) -> str:
+    text = str(raw or '').strip().lower()
+    if text in ('buy', 'side_buy', 'b', 'покупка'):
+        return 'buy'
+    if text in ('sell', 'side_sell', 's', 'продажа'):
+        return 'sell'
+    return text
+
+
+def _observed_at_from_row(row: Dict[str, Any]) -> str:
+    ts_val = (
+        row.get('filledTime') or row.get('filledTm') or row.get('timestamp')
+        or row.get('time') or row.get('updateTime') or row.get('date')
+    )
+    if not ts_val:
+        return ''
+    text = str(ts_val)
+    try:
+        ts_int = int(float(text))
+        if ts_int > 10_000_000_000:
+            return datetime.fromtimestamp(ts_int / 1000, tz=LOCAL_TZ).isoformat()
+        return datetime.fromtimestamp(ts_int, tz=LOCAL_TZ).isoformat()
+    except Exception:
+        pass
+    iso_text = text.replace('Z', '+00:00')
+    # Alor uses 7-digit fractional seconds; fromisoformat wants 3 or 6.
+    if '.' in iso_text and '+' in iso_text:
+        head, tail = iso_text.split('.', 1)
+        frac = ''
+        rest = tail
+        for i, ch in enumerate(tail):
+            if ch.isdigit():
+                frac += ch
+            else:
+                rest = tail[i:]
+                break
+        if len(frac) > 6:
+            frac = frac[:6]
+        elif 0 < len(frac) < 6:
+            frac = frac.ljust(6, '0')
+        iso_text = f'{head}.{frac}{rest}' if frac else f'{head}{rest}'
+    try:
+        dt = datetime.fromisoformat(iso_text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=LOCAL_TZ)
+        return dt.astimezone(LOCAL_TZ).isoformat()
+    except Exception:
+        pass
+    time_text = str(row.get('time') or '').strip()
+    date_text = str(row.get('date') or '').strip()
+    if date_text and time_text:
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%d.%m.%Y %H:%M:%S', '%d.%m.%Y %H:%M'):
+            try:
+                dt = datetime.strptime(f'{date_text} {time_text}', fmt).replace(tzinfo=LOCAL_TZ)
+                return dt.isoformat()
+            except Exception:
+                continue
+    return text
+
+
+def _finam_symbol_venue(symbol: str) -> str:
+    text = str(symbol or '')
+    if '@' in text:
+        return text.split('@', 1)[1].strip().upper() or 'MOEX'
+    return 'MOEX'
+
+
+def _normalize_broker_fill_row(broker: str, row: Dict[str, Any], default_symbol: str = '', default_venue: str = '') -> Dict[str, Any] | None:
+    broker = str(broker or '').strip().lower()
+    price_raw = row.get('price')
+    if price_raw is None:
+        price_raw = row.get('avgPrice')
+    # Field priority is broker-specific: BingX volume=qty, Alor volume=notional money.
+    if broker == 'alor':
+        qty_keys = ('qty', 'qtyUnits', 'qtyBatch', 'quantity', 'executedQty')
+    elif broker == 'finam':
+        qty_keys = ('size', 'qty', 'volume', 'quantity', 'executedQty')
+    else:
+        qty_keys = ('volume', 'qty', 'size', 'quantity', 'executedQty')
+    qty_raw = None
+    for key in qty_keys:
+        if row.get(key) is not None:
+            qty_raw = row.get(key)
+            break
+    price_raw = _nested_value(price_raw)
+    qty_raw = _nested_value(qty_raw)
+
+    qty = abs(_to_float(qty_raw))
+    if qty <= 0:
+        return None
+    price = abs(_to_float(price_raw))
+
+    symbol = str(row.get('symbol') or row.get('security') or row.get('ticker') or default_symbol or '').strip()
+    if not symbol:
+        return None
+
+    side = _normalize_side(row.get('side') or row.get('orderSide') or row.get('buysell'))
+    broker_order_id = str(
+        row.get('orderId') or row.get('orderID') or row.get('order_id')
+        or row.get('orderNo') or row.get('orderno') or row.get('ordno') or ''
+    )
+    trade_id = str(row.get('tradeId') or row.get('tradeID') or row.get('trade_id') or row.get('tradeNo') or row.get('id') or '')
+
+    commission_raw = row.get('commission') or row.get('fee') or row.get('brokerCommission')
+    if isinstance(commission_raw, dict):
+        commission_raw = _nested_value(commission_raw)
+    commission = _to_float(commission_raw)
+    commission_currency = str(
+        row.get('currency') or row.get('commissionCurrency') or row.get('feeAsset')
+        or row.get('currency_code') or ''
+    )
+
+    if broker == 'finam':
+        venue = _finam_symbol_venue(symbol)
+    elif broker == 'alor':
+        venue = str(row.get('exchange') or row.get('_alorExchange') or default_venue or 'MOEX').strip().upper()
+    else:
+        venue = str(row.get('category') or default_venue or 'swap').strip().lower()
+
+    fill_id = f'exchange:{broker}:{symbol}:{broker_order_id or trade_id}:{trade_id or "0"}'
+    return {
+        'fill_id': fill_id,
+        'execution_id': f'exchange:{broker}:{symbol}',
+        'signal_id': f'exchange-sync:{broker}:{symbol}',
+        'order_local_id': None,
+        'broker_order_id': broker_order_id,
+        'fill_seq': _to_int(trade_id) or 0,
+        'phase': 'exchange_sync',
+        'observed_at': _observed_at_from_row(row),
+        'broker': broker,
+        'symbol': symbol,
+        'venue': venue,
+        'side': side,
+        'qty': qty,
+        'price': price,
+        'notional': qty * price if price else 0.0,
+        'commission': commission,
+        'commission_currency': commission_currency,
+        'liquidity_flag': str(row.get('liquidityFlag') or ''),
+        'position_effect': '',
+        'source_type': 'exchange_sync',
+        'raw_json': _json_text(row),
+    }
+
+
+def _import_normalized_fills(conn: sqlite3.Connection, broker: str, fills: List[Dict[str, Any]]) -> Tuple[int, int]:
+    imported = 0
+    skipped = 0
+    by_symbol: Dict[str, Dict[str, Any]] = {}
+    for fill in fills:
+        symbol = str(fill.get('symbol') or '')
+        if not symbol:
+            continue
+        bucket = by_symbol.setdefault(symbol, {
+            'venue': str(fill.get('venue') or ''),
+            'items': [],
+        })
+        if not bucket['venue']:
+            bucket['venue'] = str(fill.get('venue') or '')
+        bucket['items'].append(fill)
+
+    now_iso = datetime.now(LOCAL_TZ).isoformat()
+    for symbol, bucket in by_symbol.items():
+        venue = bucket['venue'] or ('swap' if broker == 'bingx' else '')
+        signal_id = f'exchange-sync:{broker}:{symbol}'
+        execution_id = f'exchange:{broker}:{symbol}'
+        conn.execute(
+            'INSERT OR IGNORE INTO signals(signal_id, received_at, origin, source_ticker) VALUES(?,?,?,?)',
+            (signal_id, now_iso, 'exchange_sync', symbol),
+        )
+        conn.execute(
+            '''INSERT OR IGNORE INTO executions(execution_id, signal_id, destination_index, received_at, broker, symbol, venue, side, status, dry_run)
+            VALUES(?,?,?,?,?,?,?,?,?,?)''',
+            (execution_id, signal_id, 0, now_iso, broker, symbol, venue, '', 'exchange_sync', 0),
+        )
+        for fill in bucket['items']:
+            exists = conn.execute('SELECT 1 FROM fills WHERE fill_id = ?', (fill['fill_id'],)).fetchone()
+            if exists:
+                skipped += 1
+                continue
+            if _insert_fill(conn, fill):
+                _recompute_fill_effect(conn, fill)
+                _apply_fill_to_positions(conn, fill)
+                imported += 1
+            else:
+                skipped += 1
+    return imported, skipped
+
+
+def _get_sync_state(conn: sqlite3.Connection, broker: str) -> Dict[str, Any]:
+    row = conn.execute(
+        'SELECT broker, last_synced_at, cursor, last_imported FROM broker_sync_state WHERE broker=?',
+        (str(broker or ''),),
+    ).fetchone()
+    if not row:
+        return {'broker': broker, 'last_synced_at': '', 'cursor': '', 'last_imported': 0}
+    return {
+        'broker': row['broker'],
+        'last_synced_at': str(row['last_synced_at'] or ''),
+        'cursor': str(row['cursor'] or ''),
+        'last_imported': int(row['last_imported'] or 0),
+    }
+
+
+def _set_sync_state(conn: sqlite3.Connection, broker: str, last_synced_at: str, cursor: str = '', last_imported: int = 0) -> None:
+    conn.execute(
+        '''
+        INSERT INTO broker_sync_state(broker, last_synced_at, cursor, last_imported, updated_at)
+        VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+        ON CONFLICT(broker) DO UPDATE SET
+            last_synced_at=excluded.last_synced_at,
+            cursor=excluded.cursor,
+            last_imported=excluded.last_imported,
+            updated_at=CURRENT_TIMESTAMP
+        ''',
+        (str(broker or ''), str(last_synced_at or ''), str(cursor or ''), int(last_imported or 0)),
+    )
+
+
+def get_broker_sync_states() -> Dict[str, Dict[str, Any]]:
+    init_analytics_db()
+    with _DB_LOCK:
+        with _connect() as conn:
+            rows = conn.execute('SELECT broker, last_synced_at, cursor, last_imported FROM broker_sync_state').fetchall()
+            return {str(r['broker']): dict(r) for r in rows}
+
+
+def _sync_since_iso(broker: str) -> str:
+    """ISO start for incremental fetch: last sync minus 1-day overlap, or full history."""
+    full_history_start = '2020-01-01T00:00:00'
+    try:
+        with _connect() as conn:
+            state = _get_sync_state(conn, broker)
+    except Exception:
+        return full_history_start
+    raw = str(state.get('last_synced_at') or '').strip()
+    if not raw:
+        return full_history_start
+    try:
+        dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=LOCAL_TZ)
+        overlap = dt.astimezone(LOCAL_TZ) - timedelta(days=1)
+        return overlap.replace(tzinfo=None).isoformat()
+    except Exception:
+        return full_history_start
+
+
+def _fetch_broker_fill_rows(broker: str, symbol: str = '', lookback_hours: int = 24, since_iso: str = '') -> List[Dict[str, Any]]:
+    broker = str(broker or '').strip().lower()
+    rows: List[Dict[str, Any]] = []
+
+    if broker == 'bingx':
+        from bingx_adapter import BingXBroker
+        client = BingXBroker(testnet=False)
+        import time as _time
+        end_ts = int(_time.time() * 1000)
+        if since_iso:
+            try:
+                start_dt = datetime.fromisoformat(str(since_iso).replace('Z', '+00:00'))
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=LOCAL_TZ)
+                start_ts = int(start_dt.timestamp() * 1000)
+            except Exception:
+                start_ts = end_ts - lookback_hours * 60 * 60 * 1000
+        else:
+            start_ts = end_ts - lookback_hours * 60 * 60 * 1000
+        target_symbol = symbol
+        if not target_symbol:
+            return []
+        payload = client.get_all_fill_orders(symbol=target_symbol, start_ts=start_ts, end_ts=end_ts, trading_unit='COIN')
+        data = (payload or {}).get('data') or {}
+        raw_rows = data.get('fill_orders') or data.get('fillOrders') or data.get('fills') or []
+        if isinstance(data, list):
+            raw_rows = data
+        for row in raw_rows:
+            if isinstance(row, dict):
+                fill = _normalize_broker_fill_row('bingx', row, default_symbol=target_symbol, default_venue='swap')
+                if fill:
+                    rows.append(fill)
+        return rows
+
+    if broker == 'finam':
+        from finam_adapter import fetch_account_trades_sync
+        raw_rows = fetch_account_trades_sync(lookback_hours=lookback_hours, since_iso=since_iso)
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            if symbol and str(row.get('symbol') or '') != symbol:
+                continue
+            fill = _normalize_broker_fill_row('finam', row, default_venue='MOEX')
+            if fill:
+                rows.append(fill)
+        return rows
+
+    if broker == 'alor':
+        from alor_adapter import fetch_account_trades_sync
+        raw_rows = fetch_account_trades_sync(lookback_hours=lookback_hours, since_iso=since_iso)
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            row_symbol = str(row.get('symbol') or row.get('security') or '')
+            if symbol and row_symbol != symbol:
+                continue
+            fill = _normalize_broker_fill_row('alor', row, default_venue=str(row.get('_alorExchange') or row.get('exchange') or 'MOEX'))
+            if fill:
+                rows.append(fill)
+        return rows
+
+    return rows
+
+
+def sync_exchange_fills(broker: str, symbol: str, lookback_hours: int = 24, since_iso: str = '') -> Dict[str, Any]:
     """Fetch fills from exchange and import ones not tracked by WHR."""
     broker = str(broker or '').strip().lower()
     symbol = str(symbol or '').strip()
-    if not broker or not symbol:
+    if not broker:
+        return {'ok': False, 'imported': 0, 'skipped': 0, 'error': 'missing broker'}
+    if broker == 'bingx' and not symbol:
         return {'ok': False, 'imported': 0, 'skipped': 0, 'error': 'missing broker or symbol'}
 
     try:
-        if broker == 'bingx':
-            from bingx_adapter import BingXBroker
-            client = BingXBroker(testnet=False)
-        else:
-            return {'ok': False, 'imported': 0, 'skipped': 0, 'error': f'unsupported broker: {broker}'}
-
-        import time as _time
-        end_ts = int(_time.time() * 1000)
-        start_ts = end_ts - lookback_hours * 60 * 60 * 1000
-        payload = client.get_all_fill_orders(symbol=symbol, start_ts=start_ts, end_ts=end_ts, trading_unit='COIN')
-        data = (payload or {}).get('data') or {}
-        rows = data.get('fill_orders') or data.get('fillOrders') or data.get('fills') or []
-        if isinstance(data, list):
-            rows = data
-        rows = [r for r in rows if isinstance(r, dict)]
-
-        imported = 0
-        skipped = 0
+        fills = _fetch_broker_fill_rows(broker, symbol=symbol, lookback_hours=lookback_hours, since_iso=since_iso)
         with _DB_LOCK:
             with _connect() as conn:
                 _ensure_counter_keys(conn)
-                signal_id = f'exchange-sync:{broker}:{symbol}'
-                execution_id = f'exchange:{broker}:{symbol}'
-                conn.execute(
-                    'INSERT OR IGNORE INTO signals(signal_id, received_at, origin, source_ticker) VALUES(?,?,?,?)',
-                    (signal_id, datetime.now(LOCAL_TZ).isoformat(), 'exchange_sync', symbol),
-                )
-                conn.execute(
-                    '''INSERT OR IGNORE INTO executions(execution_id, signal_id, destination_index, received_at, broker, symbol, venue, side, status, dry_run)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)''',
-                    (execution_id, signal_id, 0, datetime.now(LOCAL_TZ).isoformat(), broker, symbol, 'swap', '', 'exchange_sync', 0),
-                )
-                for row in rows:
-                    broker_order_id = str(row.get('orderId') or row.get('orderID') or '')
-                    trade_id = str(row.get('tradeId') or row.get('tradeID') or '')
-                    qty = _to_float(row.get('volume') or row.get('qty') or row.get('executedQty'))
-                    if qty <= 0:
-                        continue
-                    price = _to_float(row.get('price') or row.get('avgPrice'))
-                    side = str(row.get('side') or '').strip().lower()
-                    if side not in ('buy', 'sell'):
-                        side = str(row.get('orderSide') or '').strip().lower()
-                    fill_id = f'exchange:{broker}:{symbol}:{broker_order_id or trade_id}:{trade_id or "0"}'
-
-                    exists = conn.execute('SELECT 1 FROM fills WHERE fill_id = ?', (fill_id,)).fetchone()
-                    if exists:
-                        skipped += 1
-                        continue
-
-                    commission = _to_float(row.get('commission') or row.get('fee'))
-                    commission_currency = str(row.get('currency') or row.get('commissionCurrency') or row.get('feeAsset') or '')
-                    observed_at = ''
-                    ts_val = row.get('filledTime') or row.get('filledTm') or row.get('time') or row.get('updateTime')
-                    if ts_val:
-                        try:
-                            ts_int = int(ts_val)
-                            observed_at = datetime.fromtimestamp(ts_int / 1000, tz=LOCAL_TZ).isoformat()
-                        except Exception:
-                            observed_at = str(ts_val)
-
-                    fill = {
-                        'fill_id': fill_id,
-                        'execution_id': f'exchange:{broker}:{symbol}',
-                        'signal_id': f'exchange-sync:{broker}:{symbol}',
-                        'order_local_id': None,
-                        'broker_order_id': broker_order_id,
-                        'fill_seq': _to_int(trade_id) or 0,
-                        'phase': 'exchange_sync',
-                        'observed_at': observed_at,
-                        'broker': broker,
-                        'symbol': symbol,
-                        'venue': 'swap',
-                        'side': side,
-                        'qty': qty,
-                        'price': price,
-                        'notional': qty * price if price else 0.0,
-                        'commission': commission,
-                        'commission_currency': commission_currency,
-                        'liquidity_flag': str(row.get('liquidityFlag') or ''),
-                        'position_effect': '',
-                        'source_type': 'exchange_sync',
-                        'raw_json': _json_text(row),
-                    }
-                    if _insert_fill(conn, fill):
-                        _recompute_fill_effect(conn, fill)
-                        _apply_fill_to_positions(conn, fill)
-                        imported += 1
-                    else:
-                        skipped += 1
+                imported, skipped = _import_normalized_fills(conn, broker, fills)
                 _refresh_counters(conn)
-
         return {'ok': True, 'imported': imported, 'skipped': skipped}
     except Exception as e:
         return {'ok': False, 'imported': 0, 'skipped': 0, 'error': str(e)}
 
 
-def sync_exchange_income(broker: str, symbol: str, lookback_hours: int = 72) -> Dict[str, Any]:
-    """Fetch income (REALIZED_PNL, TRADING_FEE) from exchange and store as fact."""
+def sync_account_fills(broker: str, lookback_hours: int = 72) -> Dict[str, Any]:
+    """Import account-level trades from last sync date (or full history on first run)."""
+    broker = str(broker or '').strip().lower()
+    if broker not in ('finam', 'alor', 'bingx'):
+        return {'ok': False, 'imported': 0, 'skipped': 0, 'error': f'unsupported broker: {broker}'}
+    try:
+        init_analytics_db()
+        since_iso = _sync_since_iso(broker)
+        fills = _fetch_broker_fill_rows(broker, symbol='', lookback_hours=lookback_hours, since_iso=since_iso)
+        imported = 0
+        skipped = 0
+        max_observed = ''
+        with _DB_LOCK:
+            with _connect() as conn:
+                _ensure_counter_keys(conn)
+                imported, skipped = _import_normalized_fills(conn, broker, fills)
+                for fill in fills:
+                    observed = str(fill.get('observed_at') or '')
+                    if observed and observed > max_observed:
+                        max_observed = observed
+                _refresh_counters(conn)
+        now_iso = datetime.now(LOCAL_TZ).isoformat()
+        last_synced = max_observed or now_iso
+        with _DB_LOCK:
+            with _connect() as conn:
+                _set_sync_state(conn, broker, last_synced_at=last_synced, last_imported=imported)
+        result = {
+            'ok': True,
+            'imported': imported,
+            'skipped': skipped,
+            'since': since_iso,
+            'lastSyncedAt': last_synced,
+        }
+        if broker == 'finam':
+            income = sync_exchange_income(broker, symbol='', lookback_hours=lookback_hours, since_iso=since_iso)
+            result['income'] = income
+        return result
+    except Exception as e:
+        return {'ok': False, 'imported': 0, 'skipped': 0, 'error': str(e)}
+
+
+def sync_exchange_income(broker: str, symbol: str = '', lookback_hours: int = 72, since_iso: str = '') -> Dict[str, Any]:
+    """Fetch income (REALIZED_PNL, TRADING_FEE, Finam cash ops) and store as fact."""
     broker = str(broker or '').strip().lower()
     symbol = str(symbol or '').strip()
-    if not broker or not symbol:
-        return {'ok': False, 'imported': 0, 'error': 'missing broker or symbol'}
+    if not broker:
+        return {'ok': False, 'imported': 0, 'error': 'missing broker'}
 
     try:
+        imported = 0
         if broker == 'bingx':
+            if not symbol:
+                return {'ok': False, 'imported': 0, 'error': 'missing symbol for bingx'}
             from bingx_adapter import BingXBroker
             client = BingXBroker(testnet=False)
-        else:
-            return {'ok': False, 'imported': 0, 'error': f'unsupported broker: {broker}'}
+            import time as _time
+            end_ts = int(_time.time() * 1000)
+            start_ts = end_ts - lookback_hours * 60 * 60 * 1000
 
-        import time as _time
-        end_ts = int(_time.time() * 1000)
-        start_ts = end_ts - lookback_hours * 60 * 60 * 1000
+            for income_type in ('REALIZED_PNL', 'TRADING_FEE'):
+                payload = client.get_income(symbol=symbol, income_type=income_type, start_time=start_ts, end_time=end_ts, limit=1000)
+                data = (payload or {}).get('data') or []
+                if isinstance(data, dict):
+                    data = [data]
+                rows = [r for r in data if isinstance(r, dict)]
 
-        imported = 0
-        for income_type in ('REALIZED_PNL', 'TRADING_FEE'):
-            payload = client.get_income(symbol=symbol, income_type=income_type, start_time=start_ts, end_time=end_ts, limit=1000)
-            data = (payload or {}).get('data') or []
-            if isinstance(data, dict):
-                data = [data]
-            rows = [r for r in data if isinstance(r, dict)]
+                with _DB_LOCK:
+                    with _connect() as conn:
+                        _ensure_counter_keys(conn)
+                        for row in rows:
+                            trade_id = str(row.get('tradeId') or '')
+                            order_id = str(row.get('orderId') or '')
+                            ts_val = row.get('time')
+                            income_id = f'income:{broker}:{symbol}:{income_type}:{trade_id or order_id or ts_val or "0"}'
 
+                            exists = conn.execute('SELECT 1 FROM exchange_income WHERE income_id = ?', (income_id,)).fetchone()
+                            if exists:
+                                continue
+
+                            observed_at = ''
+                            if ts_val:
+                                try:
+                                    ts_int = int(ts_val)
+                                    observed_at = datetime.fromtimestamp(ts_int / 1000, tz=LOCAL_TZ).isoformat()
+                                except Exception:
+                                    observed_at = str(ts_val)
+
+                            conn.execute(
+                                '''INSERT OR IGNORE INTO exchange_income(income_id, broker, symbol, income_type, income, asset, trade_id, order_id, observed_at, raw_json)
+                                VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                                (
+                                    income_id, broker, symbol, income_type,
+                                    _to_float(row.get('income')),
+                                    str(row.get('asset') or ''),
+                                    trade_id, order_id, observed_at, _json_text(row),
+                                ),
+                            )
+                            imported += 1
+                        _refresh_counters(conn)
+
+            return {'ok': True, 'imported': imported}
+
+        if broker == 'finam':
+            from finam_adapter import fetch_account_transactions_sync
+            rows = [r for r in (fetch_account_transactions_sync(lookback_hours=lookback_hours, since_iso=since_iso) or []) if isinstance(r, dict)]
             with _DB_LOCK:
                 with _connect() as conn:
                     _ensure_counter_keys(conn)
                     for row in rows:
-                        trade_id = str(row.get('tradeId') or '')
-                        order_id = str(row.get('orderId') or '')
-                        ts_val = row.get('time')
-                        income_id = f'income:{broker}:{symbol}:{income_type}:{trade_id or order_id or ts_val or "0"}'
-
+                        tx_id = str(row.get('id') or '')
+                        income_type = str(row.get('category') or row.get('transaction_category') or 'CASH').upper()
+                        row_symbol = str(row.get('symbol') or '')
+                        symbols = row.get('symbols') or []
+                        if not row_symbol and isinstance(symbols, list) and symbols:
+                            row_symbol = str(symbols[0] or '')
+                        if symbol and row_symbol and row_symbol != symbol:
+                            continue
+                        if symbol and not row_symbol:
+                            row_symbol = symbol
+                        change = row.get('change') or {}
+                        income = 0.0
+                        if isinstance(change, dict):
+                            income = _to_float(change.get('units')) + _to_float(change.get('nanos')) / 1_000_000_000.0
+                        else:
+                            income = _to_float(change)
+                        income_id = f'income:{broker}:{row_symbol or "account"}:{income_type}:{tx_id or "0"}'
                         exists = conn.execute('SELECT 1 FROM exchange_income WHERE income_id = ?', (income_id,)).fetchone()
                         if exists:
                             continue
-
-                        observed_at = ''
-                        if ts_val:
-                            try:
-                                ts_int = int(ts_val)
-                                observed_at = datetime.fromtimestamp(ts_int / 1000, tz=LOCAL_TZ).isoformat()
-                            except Exception:
-                                observed_at = str(ts_val)
-
+                        observed_at = _observed_at_from_row(row)
                         conn.execute(
                             '''INSERT OR IGNORE INTO exchange_income(income_id, broker, symbol, income_type, income, asset, trade_id, order_id, observed_at, raw_json)
                             VALUES(?,?,?,?,?,?,?,?,?,?)''',
                             (
-                                income_id, broker, symbol, income_type,
-                                _to_float(row.get('income')),
-                                str(row.get('asset') or ''),
-                                trade_id, order_id, observed_at, _json_text(row),
+                                income_id, broker, row_symbol, income_type,
+                                income,
+                                str((change.get('currency_code') if isinstance(change, dict) else '') or row.get('currency') or ''),
+                                '', tx_id, observed_at, _json_text(row),
                             ),
                         )
                         imported += 1
                     _refresh_counters(conn)
+            return {'ok': True, 'imported': imported}
 
-        return {'ok': True, 'imported': imported}
+        return {'ok': False, 'imported': 0, 'error': f'unsupported broker: {broker}'}
     except Exception as e:
         return {'ok': False, 'imported': 0, 'error': str(e)}
+
 
 def _sync_all_tracked_symbols() -> Dict[str, Any]:
     """Sync fills from exchange for all broker+symbol pairs seen in analytics."""
@@ -647,6 +1593,15 @@ def _sync_all_tracked_symbols() -> Dict[str, Any]:
 
     total_imported = 0
     total_skipped = 0
+    account_results: Dict[str, Any] = {}
+
+    # Account-level brokers: incremental sync from last_synced_at (full history on first run).
+    for broker in ('finam', 'alor'):
+        result = sync_account_fills(broker)
+        account_results[broker] = result
+        total_imported += int(result.get('imported') or 0)
+        total_skipped += int(result.get('skipped') or 0)
+
     for row in rows:
         broker = str(row['broker'] or '').strip().lower()
         symbol = str(row['symbol'] or '').strip()
@@ -654,14 +1609,25 @@ def _sync_all_tracked_symbols() -> Dict[str, Any]:
             continue
         if broker != 'bingx':
             continue
-        result = sync_exchange_fills(broker, symbol, lookback_hours=72)
+        since_iso = _sync_since_iso('bingx:' + symbol)
+        result = sync_exchange_fills(broker, symbol, lookback_hours=72, since_iso=since_iso)
         total_imported += int(result.get('imported') or 0)
         total_skipped += int(result.get('skipped') or 0)
         sync_exchange_income(broker, symbol, lookback_hours=72)
-    return {'syncedSymbols': len(rows), 'imported': total_imported, 'skipped': total_skipped}
+        if result.get('ok'):
+            with _DB_LOCK:
+                with _connect() as conn:
+                    _set_sync_state(conn, 'bingx:' + symbol, last_synced_at=datetime.now(LOCAL_TZ).isoformat(), last_imported=int(result.get('imported') or 0))
+    return {
+        'syncedSymbols': len(rows),
+        'imported': total_imported,
+        'skipped': total_skipped,
+        'accountSync': account_results,
+    }
 
 
 def rebuild_analytics() -> Dict[str, Any]:
+    init_analytics_db()
     sync_result = _sync_all_tracked_symbols()
     with _DB_LOCK:
         with _connect() as conn:
@@ -671,6 +1637,7 @@ def rebuild_analytics() -> Dict[str, Any]:
 
 
 def rebuild_analytics_today() -> Dict[str, Any]:
+    init_analytics_db()
     sync_result = _sync_all_tracked_symbols()
     today = datetime.now(LOCAL_TZ).date().isoformat()
     with _DB_LOCK:
@@ -702,7 +1669,6 @@ def _load_fill_rows_with_requests(conn: sqlite3.Connection) -> List[sqlite3.Row]
             f.raw_json, e.request_json
         FROM fills f
         LEFT JOIN executions e ON e.execution_id = f.execution_id
-        WHERE f.observed_at >= datetime('now', '-30 days')
         ORDER BY f.observed_at, f.fill_id
         '''
     ).fetchall()

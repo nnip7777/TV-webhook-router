@@ -322701,44 +322701,6 @@
   },
   "routes": [
     {
-      "id": "ui-ff2",
-      "name": "UI mapping for FF2!",
-      "enabled": true,
-      "uiManaged": true,
-      "match": {
-        "sourceTicker": [
-          "FF2!"
-        ],
-        "side": "*"
-      },
-      "destinations": [
-        {
-          "account": "P095154",
-          "exchange": "FORTS",
-          "executionMode": "maker",
-          "qtyMode": "fixed",
-          "broker": "alor",
-          "symbol": "TTF-10.26",
-          "qty": 1,
-          "qtyKind": "contracts",
-          "sideMode": "sign"
-        },
-        {
-          "account": "1915526",
-          "exchange": "RTSX",
-          "executionMode": "maker",
-          "qtyMode": "fixed",
-          "broker": "finam",
-          "symbol": "FFV6",
-          "qty": 1,
-          "qtyKind": "contracts",
-          "sideMode": "sign"
-        }
-      ],
-      "uiCreatedAt": "2026-09-16T04:48:02.949735Z",
-      "uiUpdatedAt": "2026-09-21T09:04:57.748994Z"
-    },
-    {
       "id": "ui-ng1",
       "name": "UI mapping for NG1!",
       "enabled": true,
@@ -322819,7 +322781,7 @@
               }
             }
           },
-          "riskPct": 5.0,
+          "riskPct": 12.0,
           "marginType": "ISOLATED",
           "qty": 75,
           "qtyKind": "contracts",
@@ -322827,7 +322789,7 @@
         }
       ],
       "uiCreatedAt": "2026-09-25T09:05:30.760411Z",
-      "uiUpdatedAt": "2026-09-28T07:11:30.595241Z"
+      "uiUpdatedAt": "2026-09-29T15:05:13.778641Z"
     },
     {
       "id": "ui-natgasusdt-p",
@@ -322910,7 +322872,7 @@
               }
             }
           },
-          "riskPct": 5.0,
+          "riskPct": 12.0,
           "marginType": "ISOLATED",
           "qty": 100,
           "qtyKind": "contracts",
@@ -322918,16 +322880,16 @@
         }
       ],
       "uiCreatedAt": "2026-09-25T09:05:31.892003Z",
-      "uiUpdatedAt": "2026-09-28T07:11:24.357777Z"
+      "uiUpdatedAt": "2026-09-29T15:04:59.374881Z"
     },
     {
-      "id": "ui-ncco7241natgas2usd-usdt",
-      "name": "UI mapping for NCCO7241NATGAS2USD-USDT",
+      "id": "ui-naturalgasngusdt-p",
+      "name": "UI mapping for NATURALGASNGUSDT.P",
       "enabled": true,
       "uiManaged": true,
       "match": {
         "sourceTicker": [
-          "NCCO7241NATGAS2USD-USDT"
+          "NATURALGASNGUSDT.P"
         ],
         "side": "*"
       },
@@ -323001,197 +322963,15 @@
               }
             }
           },
-          "riskPct": 5.0,
+          "riskPct": 12.0,
           "marginType": "ISOLATED",
           "qty": 75,
           "qtyKind": "contracts",
           "sideMode": "sign"
         }
       ],
-      "uiCreatedAt": "2026-09-25T09:05:34.250555Z",
-      "uiUpdatedAt": "2026-09-28T07:11:12.702062Z"
-    },
-    {
-      "id": "ui-xautusdt-p",
-      "name": "UI mapping for XAUTUSDT.P",
-      "enabled": true,
-      "uiManaged": true,
-      "match": {
-        "sourceTicker": [
-          "XAUTUSDT.P"
-        ],
-        "side": "*"
-      },
-      "destinations": [
-        {
-          "account": "swap",
-          "category": "swap",
-          "executionMode": "maker",
-          "qtyMode": "fixed",
-          "positionSide": "BOTH",
-          "testnet": false,
-          "broker": "bingx",
-          "symbol": "NCCOGOLD2USD-USDT",
-          "limits": {
-            "minQty": 0.0005,
-            "minUsdt": 2,
-            "qtyStep": "0.0001",
-            "priceStep": 0.01,
-            "quantityPrecision": 4,
-            "pricePrecision": 2,
-            "raw": {
-              "symbol": {
-                "contractId": "101773",
-                "symbol": "NCCOGOLD2USD-USDT",
-                "size": "0.0001",
-                "quantityPrecision": 4,
-                "pricePrecision": 2,
-                "feeRate": 0.0005,
-                "makerFeeRate": 0.0002,
-                "takerFeeRate": 0.0005,
-                "tradeMinLimit": 0,
-                "tradeMinQuantity": 0.0005,
-                "tradeMinUSDT": 2,
-                "currency": "USDT",
-                "asset": "NCCOGOLD2USD",
-                "status": 1,
-                "apiStateOpen": "true",
-                "apiStateClose": "true",
-                "ensureTrigger": true,
-                "triggerFeeRate": "0.00050000",
-                "brokerState": false,
-                "launchTime": 1760424900000,
-                "maintainTime": 0,
-                "offTime": 0,
-                "displayName": "GOLD(XAU)-USDT"
-              },
-              "contract": {
-                "contractId": "101773",
-                "symbol": "NCCOGOLD2USD-USDT",
-                "size": "0.0001",
-                "quantityPrecision": 4,
-                "pricePrecision": 2,
-                "feeRate": 0.0005,
-                "makerFeeRate": 0.0002,
-                "takerFeeRate": 0.0005,
-                "tradeMinLimit": 0,
-                "tradeMinQuantity": 0.0005,
-                "tradeMinUSDT": 2,
-                "currency": "USDT",
-                "asset": "NCCOGOLD2USD",
-                "status": 1,
-                "apiStateOpen": "true",
-                "apiStateClose": "true",
-                "ensureTrigger": true,
-                "triggerFeeRate": "0.00050000",
-                "brokerState": false,
-                "launchTime": 1760424900000,
-                "maintainTime": 0,
-                "offTime": 0,
-                "displayName": "GOLD(XAU)-USDT"
-              }
-            }
-          },
-          "riskPct": 5.0,
-          "marginType": "ISOLATED",
-          "qty": 50,
-          "qtyKind": "contracts",
-          "sideMode": "sign"
-        }
-      ],
-      "uiCreatedAt": "2026-09-28T06:21:43.449096Z",
-      "uiUpdatedAt": "2026-09-28T07:11:18.696550Z"
-    },
-    {
-      "id": "ui-gc1",
-      "name": "UI mapping for GC1!",
-      "enabled": true,
-      "uiManaged": true,
-      "match": {
-        "sourceTicker": [
-          "GC1!"
-        ],
-        "side": "*"
-      },
-      "destinations": [
-        {
-          "account": "swap",
-          "category": "swap",
-          "executionMode": "maker",
-          "qtyMode": "fixed",
-          "positionSide": "BOTH",
-          "testnet": false,
-          "broker": "bingx",
-          "symbol": "NCCOGOLD2USD-USDT",
-          "limits": {
-            "minQty": 0.0005,
-            "minUsdt": 2,
-            "qtyStep": "0.0001",
-            "priceStep": 0.01,
-            "quantityPrecision": 4,
-            "pricePrecision": 2,
-            "raw": {
-              "symbol": {
-                "contractId": "101773",
-                "symbol": "NCCOGOLD2USD-USDT",
-                "size": "0.0001",
-                "quantityPrecision": 4,
-                "pricePrecision": 2,
-                "feeRate": 0.0005,
-                "makerFeeRate": 0.0002,
-                "takerFeeRate": 0.0005,
-                "tradeMinLimit": 0,
-                "tradeMinQuantity": 0.0005,
-                "tradeMinUSDT": 2,
-                "currency": "USDT",
-                "asset": "NCCOGOLD2USD",
-                "status": 1,
-                "apiStateOpen": "true",
-                "apiStateClose": "true",
-                "ensureTrigger": true,
-                "triggerFeeRate": "0.00050000",
-                "brokerState": false,
-                "launchTime": 1760424900000,
-                "maintainTime": 0,
-                "offTime": 0,
-                "displayName": "GOLD(XAU)-USDT"
-              },
-              "contract": {
-                "contractId": "101773",
-                "symbol": "NCCOGOLD2USD-USDT",
-                "size": "0.0001",
-                "quantityPrecision": 4,
-                "pricePrecision": 2,
-                "feeRate": 0.0005,
-                "makerFeeRate": 0.0002,
-                "takerFeeRate": 0.0005,
-                "tradeMinLimit": 0,
-                "tradeMinQuantity": 0.0005,
-                "tradeMinUSDT": 2,
-                "currency": "USDT",
-                "asset": "NCCOGOLD2USD",
-                "status": 1,
-                "apiStateOpen": "true",
-                "apiStateClose": "true",
-                "ensureTrigger": true,
-                "triggerFeeRate": "0.00050000",
-                "brokerState": false,
-                "launchTime": 1760424900000,
-                "maintainTime": 0,
-                "offTime": 0,
-                "displayName": "GOLD(XAU)-USDT"
-              }
-            }
-          },
-          "riskPct": 5.0,
-          "marginType": "ISOLATED",
-          "qty": 50,
-          "qtyKind": "contracts",
-          "sideMode": "sign"
-        }
-      ],
-      "uiCreatedAt": "2026-09-28T07:12:33.721158Z",
-      "uiUpdatedAt": "2026-09-28T07:24:44.572778Z"
+      "uiCreatedAt": "2026-09-29T10:22:34.644080Z",
+      "uiUpdatedAt": "2026-09-29T15:05:07.897563Z"
     }
   ]
 }

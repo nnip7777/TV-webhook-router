@@ -9,7 +9,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional, Dict, List, Union, Any
 
@@ -202,6 +202,40 @@ class AlorClient:
                 return data if isinstance(data, list) else []
             _raise_http_error('Alor orders', resp)
 
+    async def get_trades(self, exchange: str, history: bool = False,
+                         from_ts: Optional[int] = None, to_ts: Optional[int] = None,
+                         date_from: Optional[str] = None,
+                         from_id: Optional[str] = None,
+                         limit: int = 500) -> List[Dict[str, Any]]:
+        """Client trades.
+
+        Current session:  /md/v2/Clients/{exchange}/{portfolio}/trades
+        Past sessions:    /md/v2/Stats/{exchange}/{portfolio}/history/trades
+        """
+        exchange = _normalize_alor_exchange(exchange)
+        if history:
+            url = f"https://api.alor.ru/md/v2/Stats/{exchange}/{self.portfolio}/history/trades"
+        else:
+            url = f"https://api.alor.ru/md/v2/Clients/{exchange}/{self.portfolio}/trades"
+        params: Dict[str, Any] = {'limit': int(limit)}
+        if history:
+            params['orderByTradeDate'] = 'true'
+            params['descending'] = 'false'
+            if date_from:
+                params['dateFrom'] = str(date_from)
+            elif from_ts is not None:
+                params['dateFrom'] = datetime.fromtimestamp(int(from_ts), tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.0000000Z')
+            if from_id:
+                params['fromId'] = str(from_id)
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=await self._headers(), params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data if isinstance(data, list) else []
+            if resp.status_code in (403, 404):
+                return []
+            _raise_http_error('Alor trades', resp)
+
     async def place_limit_order(self, symbol: str, exchange: str, side: str,
                                  quantity: int, price: float,
                                  comment: str = "") -> Dict:
@@ -287,6 +321,27 @@ class FinamClient:
                 data = resp.json()
                 return list((data or {}).get('orders') or [])
             _raise_http_error('Finam orders', resp)
+
+    async def get_account_trades(self, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
+        """Account trades in [start_iso, end_iso]. Finam requires interval.startTime/endTime."""
+        url = f"https://api.finam.ru/v1/accounts/{self.account_id}/trades"
+        params = {'interval.startTime': start_iso, 'interval.endTime': end_iso}
+        async with httpx.AsyncClient(http2=True, timeout=30) as client:
+            resp = await client.get(url, headers=await self._headers(), params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                return list((data or {}).get('trades') or [])
+            _raise_http_error('Finam trades', resp)
+
+    async def get_account_transactions(self, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
+        url = f"https://api.finam.ru/v1/accounts/{self.account_id}/transactions"
+        params = {'interval.startTime': start_iso, 'interval.endTime': end_iso}
+        async with httpx.AsyncClient(http2=True, timeout=30) as client:
+            resp = await client.get(url, headers=await self._headers(), params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                return list((data or {}).get('transactions') or [])
+            _raise_http_error('Finam transactions', resp)
 
     async def place_order(self, symbol: str, board: str, side: str,
                           quantity: int, price: Optional[float] = None,

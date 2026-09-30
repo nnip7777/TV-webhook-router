@@ -26,7 +26,7 @@ from schwab.client.base import BaseClient
 from schwab_adapter import SchwabBroker
 from bingx_adapter import _bingx_rows
 from execution import execute_route_sync
-from analytics import analytics_overview, init_analytics_db, record_execution_analytics, rebuild_analytics, rebuild_analytics_today
+from analytics import analytics_overview, init_analytics_db, performance_stats, record_execution_analytics, rebuild_analytics, rebuild_analytics_today, sync_account_fills
 from settings import (
     ALOR_API_BASE_URL,
     ALOR_CONFIG_PATH,
@@ -65,6 +65,7 @@ METRICS_CACHE: Dict[str, Any] = {
     'new_tickers': [],
 }
 METRICS_SYNC_INTERVAL_SECONDS = 20
+TRADE_SYNC_INTERVAL_SECONDS = 90
 WEBHOOK_QUEUE: queue.Queue = queue.Queue()
 WEBHOOK_WORKER_COUNT = 1
 OBSERVED_SIGNALS_LOCK = threading.Lock()
@@ -1348,6 +1349,14 @@ button[disabled]{opacity:.65;cursor:wait}
 </style></head><body>
 <div class='panel'><div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/journal'>journal</a><a href='/logout'>logout</a></div><h2 style='margin-bottom:6px;'>Эффективность сделок</h2><div class='muted'>Страница читает только готовые данные из SQLite, без пересчёта истории на старте сервера и без rebuild аналитики при открытии. Все времена на этой странице показаны в MSK.</div></div>
 <div class='panel'><div style='display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;'><div id='status' class='muted'>Загрузка…</div><div style='display:flex;flex-direction:column;align-items:flex-end;gap:6px;'><div style='display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;'><button id='rebuildTodayBtn' type='button' onclick='rebuildTodayAnalytics()'>Rebuild today only</button><button id='rebuildBtn' type='button' onclick='rebuildAnalytics()'>Rebuild all analytics</button></div><div id='rebuildStatus' class='muted'>Today-only rebuild честно восстанавливает стартовый state до 00:00 MSK и затем пересчитывает текущий день. Full rebuild пересобирает всю производную аналитику.</div></div></div><div id='meta' class='grid' style='margin-top:12px;'></div></div>
+<div class='panel'><h3 style='margin-top:0;'>Полная статистика</h3><div class='muted' style='margin-bottom:8px;'>Доходность, винрейт и профит-фактор по закрытым round-trips. <b>Alor/Finam</b> — cash = пункты × cash_step = <b>RUB</b>; <b>BingX</b> — <b>USDT</b>. Валюты не смешиваются. Итоговая атрибуция P&amp;L — по <b>инструменту</b> (symbol); канал tv / manual / quick — отдельно.</div>
+<div style='display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:8px;'><span class='muted'>Брокеры:</span>
+<label style='cursor:pointer;'><input type='checkbox' class='broker-filter' value='alor' checked onchange='reloadStats()'> alor</label>
+<label style='cursor:pointer;'><input type='checkbox' class='broker-filter' value='finam' checked onchange='reloadStats()'> finam</label>
+<label style='cursor:pointer;'><input type='checkbox' class='broker-filter' value='bingx' checked onchange='reloadStats()'> bingx</label>
+<span class='muted'>Годы:</span><span id='yearFilters' class='muted'>…</span>
+<span class='muted' id='perfFilterNote'></span></div>
+<div id='perfmeta' class='grid' style='margin-bottom:12px;'></div><h4>По валютам / брокерам (cash)</h4><div id='perfUnits' class='grid' style='margin-bottom:12px;'></div><h4>YTD <span id='ytdYear' class='muted'></span></h4><div id='perfYtd' class='grid' style='margin-bottom:12px;'></div><h4>По годам</h4><div id='perfByYear'></div><h4>По инструментам (итог)</h4><div id='perfInstrument'></div><h4>По стратегиям</h4><div id='perfStrategy'></div><h4>По каналу (tv / manual / quick)</h4><div id='perfChannel'></div><h4>По брокерам</h4><div id='perfBroker'></div><h4>По направлению</h4><div id='perfDirection'></div></div>
 <div class='panel'><h3 style='margin-top:0;'>Последний сигнал / исполнение</h3><div id='latest' class='grid'></div></div>
 <div class='panel'><h3 style='margin-top:0;'>Последние fills</h3><div class='muted' style='margin-bottom:8px;'>`fill qty` показывает фактический размер исполнения. Для BingX swap он отображается кратко как `cts`, чтобы не дублировать длинное имя инструмента из колонки `symbol`. `request size` и `sizing basis` показывают, чем был задан размер сигнала, например `10 usdt` для open и `0.35 contracts` для close. Комиссия концептуально считается от notional (`qty × price`), но источником истины остаются фактические fee/income данные из API биржи.</div><div id='fills'></div></div>
 <div class='panel'><h3 style='margin-top:0;'>Последние close events</h3><div class='muted' style='margin-bottom:8px;'>Сводка по одному закрывающему signal. Если один close закрыл несколько старых lot-ов, здесь это будет одна строка с суммой.</div><div id='closeevents'></div></div>
@@ -1414,10 +1423,128 @@ async function rebuildAnalytics(){
     setRebuildBusy(false);
   }
 }
+function perfCards(overall, openLots, period, incomeByAsset){
+  const cards=[
+    ['Net Cash (основная)', fmtNum(overall.netCash,2)+' '+(overall.cashUnit||'')],
+    ['Gross Cash', fmtNum(overall.grossCash,2)+' '+(overall.cashUnit||'')],
+    ['Комиссии', fmtNum(overall.commissionCash,2)+' '+(overall.cashUnit||'')],
+    ['Net Points (сырой)', fmtNum(overall.netPoints,2)],
+    ['Сделок', fmtNum(overall.trades,0)],
+    ['Win rate', fmtNum(overall.winRate,1)+'%'],
+    ['Profit factor', fmtNum(overall.profitFactor,2)],
+    ['Expectancy', fmtNum(overall.expectancyCash,3)],
+    ['Avg win / loss', fmtNum(overall.avgWinCash,2)+' / '+fmtNum(overall.avgLossCash,2)],
+    ['Best / worst', fmtNum(overall.bestTradeCash,2)+' / '+fmtNum(overall.worstTradeCash,2)],
+    ['Wins / losses', fmtNum(overall.wins,0)+' / '+fmtNum(overall.losses,0)],
+    ['Open lots', fmtNum((openLots||{}).count||0,0)+' ('+fmtNum((openLots||{}).qty||0,2)+')'],
+    ['Период', esc((period||{}).from||'')+' → '+esc((period||{}).to||'')]
+  ];
+  return cards.map(([k,v])=>`<div class='card'><div class='k'>${esc(k)}</div><div class='v'>${v}</div></div>`).join('');
+}
+function unitCards(overallByUnit, finamAccountCash){
+  const parts=Object.entries(overallByUnit||{}).map(([unit,m])=>
+    `<div class='card'><div class='k'>${esc(unit)}</div><div class='v'>${fmtNum(m.netCash,2)}</div><div class='muted'>n=${fmtNum(m.trades,0)} · win ${fmtNum(m.winRate,1)}% · PF ${fmtNum(m.profitFactor,2)}</div></div>`
+  );
+  if(finamAccountCash){
+    parts.push(
+      `<div class='card'><div class='k'>Finam account cash (VM+fee)</div><div class='v ${Number(finamAccountCash.netRUB)>=0?'ok':'bad'}'>${fmtNum(finamAccountCash.netRUB,2)} RUB</div><div class='muted'>VM ${fmtNum(finamAccountCash.variationMarginRUB,0)} · fee ${fmtNum(finamAccountCash.commissionRUB,0)}</div></div>`
+    );
+  }
+  return parts.join('');
+}
+const perfCols=[
+  {key:'name',label:'name'},
+  {key:'cashUnit',label:'unit'},
+  {key:'trades',label:'trades',render:v=>fmtNum(v,0)},
+  {key:'wins',label:'W/L',render:(v,r)=>`${fmtNum(v,0)}/${fmtNum(r.losses,0)}`},
+  {key:'winRate',label:'win%',render:v=>fmtNum(v,1)},
+  {key:'profitFactor',label:'PF',render:v=>fmtNum(v,2)},
+  {key:'netCash',label:'net cash',render:(v,r)=>`<span class='${Number(v)>=0?'ok':'bad'}'>${fmtNum(v,2)} ${esc(r.cashUnit||'')}</span>`},
+  {key:'netPoints',label:'net pts',render:v=>fmtNum(v,2)},
+  {key:'commissionCash',label:'fee',render:(v,r)=>`${fmtNum(v,2)} ${esc(r.cashUnit||'')}`},
+  {key:'expectancyCash',label:'exp',render:v=>fmtNum(v,3)},
+  {key:'avgWinCash',label:'avgW',render:v=>fmtNum(v,2)},
+  {key:'avgLossCash',label:'avgL',render:v=>fmtNum(v,2)},
+  {key:'avgHoldSec',label:'hold',render:v=>fmtNum(Number(v)/3600,1)+'h'}
+];
+function yearRowsTable(byYear, finamAccountCashByYear){
+  const years=Object.keys(byYear||{}).sort();
+  const cols=[
+    {key:'name',label:'year'},
+    {key:'unit',label:'unit'},
+    {key:'trades',label:'trades',render:v=>fmtNum(v,0)},
+    {key:'winRate',label:'win%',render:v=>fmtNum(v,1)},
+    {key:'profitFactor',label:'PF',render:v=>fmtNum(v,2)},
+    {key:'netCash',label:'net cash',render:(v,r)=>`<span class='${Number(v)>=0?'ok':'bad'}'>${fmtNum(v,2)} ${esc(r.unit||'')}</span>`},
+    {key:'finamVm',label:'Finam VM+fee',render:v=>v==null?'':`<span class='${Number(v)>=0?'ok':'bad'}'>${fmtNum(v,2)} RUB</span>`}
+  ];
+  const rows=[];
+  for(const y of years){
+    const units=byYear[y]||{};
+    const acct=(finamAccountCashByYear||{})[y];
+    const finamVm=acct ? acct.netRUB : null;
+    for(const [unit,m] of Object.entries(units)){
+      rows.push({name:y, unit, trades:m.trades, winRate:m.winRate, profitFactor:m.profitFactor, netCash:m.netCash, finamVm: unit==='RUB'?finamVm:null});
+    }
+  }
+  return renderTable(cols, rows);
+}
+function periodCards(byUnit, title){
+  return Object.entries(byUnit||{}).map(([unit,m])=>
+    `<div class='card'><div class='k'>${esc(title)} · ${esc(unit)}</div><div class='v ${Number(m.netCash)>=0?'ok':'bad'}'>${fmtNum(m.netCash,2)}</div><div class='muted'>n=${fmtNum(m.trades,0)} · win ${fmtNum(m.winRate,1)}% · PF ${fmtNum(m.profitFactor,2)}</div></div>`
+  ).join('');
+}
+function selectedBrokers(){
+  return Array.from(document.querySelectorAll('.broker-filter:checked')).map(el=>el.value);
+}
+function selectedYears(){
+  return Array.from(document.querySelectorAll('.year-filter:checked')).map(el=>el.value);
+}
+function filterQuery(){
+  const brokers=selectedBrokers();
+  const years=selectedYears();
+  return 'brokers='+encodeURIComponent(brokers.join(','))+'&years='+encodeURIComponent(years.join(','));
+}
+function ensureYearFilters(availableYears){
+  const host=document.getElementById('yearFilters');
+  if(!host) return;
+  if(host.dataset.ready==='1') return;
+  const years=(availableYears||[]).slice().sort().reverse();
+  if(!years.length){host.textContent='—';return;}
+  host.innerHTML=years.map(y=>`<label style='cursor:pointer;margin-right:10px;'><input type='checkbox' class='year-filter' value='${esc(y)}' checked onchange='reloadStats()'> ${esc(y)}</label>`).join('');
+  host.dataset.ready='1';
+}
+function reloadStats(){ load(); loadPerformance(); }
+async function loadPerformance(){
+  try{
+    const res=await fetch('/api/performance-stats?'+filterQuery(),{headers:{'Accept':'application/json'}});
+    const data=await res.json();
+    if(!res.ok){throw new Error(data.error || ('HTTP '+res.status));}
+    ensureYearFilters(data.availableYears);
+    const units=data.overallByUnit||{};
+    const headline=Object.entries(units).sort((a,b)=>(b[1].trades||0)-(a[1].trades||0))[0]?.[1] || {};
+    const note=document.getElementById('perfFilterNote');
+    const brokers=selectedBrokers(), years=selectedYears();
+    if(note){note.textContent = ((brokers.length>=3 && years.length>=(data.availableYears||[]).length)?'все':'фильтр');}
+    document.getElementById('perfmeta').innerHTML=perfCards(headline, data.openLots, data.period, data.incomeByAsset);
+    document.getElementById('perfUnits').innerHTML=unitCards(units, data.finamAccountCash);
+    document.getElementById('ytdYear').textContent='('+esc(data.ytd?.year||'')+')';
+    document.getElementById('perfYtd').innerHTML=periodCards(data.ytd?.byUnit||{}, 'YTD')+
+      ((data.finamAccountCash && brokers.includes('finam')) ? periodCards({RUB:{netCash:(data.finamAccountCashByYear?.[data.ytd?.year||'']||{}).netRUB||0, trades:0, winRate:0, profitFactor:0}}, 'Finam VM YTD') : '');
+    document.getElementById('perfByYear').innerHTML=yearRowsTable(data.byYear||{}, data.finamAccountCashByYear||{});
+    document.getElementById('perfInstrument').innerHTML=renderTable(perfCols, data.byInstrument||[]);
+    document.getElementById('perfStrategy').innerHTML=renderTable(perfCols, data.byStrategy||[]);
+    document.getElementById('perfChannel').innerHTML=renderTable(perfCols, data.byChannel||[]);
+    document.getElementById('perfBroker').innerHTML=renderTable(perfCols, data.byBroker||[]);
+    document.getElementById('perfDirection').innerHTML=renderTable(perfCols, data.byDirection||[]);
+  }catch(err){
+    document.getElementById('perfmeta').innerHTML=`<div class='bad'>${esc(err.message||err)}</div>`;
+  }
+}
 async function load(){
   const status=document.getElementById('status');
   try{
-    const res=await fetch('/api/effectiveness-overview',{headers:{'Accept':'application/json'}});
+    const res=await fetch('/api/effectiveness-overview?'+filterQuery(),{headers:{'Accept':'application/json'}});
     const data=await res.json();
     if(!res.ok){throw new Error(data.error || ('HTTP '+res.status));}
     status.innerHTML=`<span class='ok'>OK</span> · db: <code>${esc(data.dbPath)}</code> · size: ${fmtNum((data.dbSizeBytes||0)/1024,1)} KB`;
@@ -1465,6 +1592,7 @@ async function load(){
       {key:'net_pnl_sum',label:'net (quote)',render:v=>`<span class='${Number(v)>=0?'ok':'bad'}'>${fmtNum(v,4)}</span>`}
     ], data.latestDailyStats || []);
   }catch(err){ status.innerHTML=`<span class='bad'>Ошибка</span> · ${esc(err.message || err)}`; }
+  loadPerformance();
 }
 load();
 </script></body></html>"""
@@ -3088,6 +3216,20 @@ def _metrics_sync_loop() -> None:
         time.sleep(METRICS_SYNC_INTERVAL_SECONDS)
 
 
+def _trade_sync_loop() -> None:
+    """Pull Alor/Finam account trades from last sync date into analytics."""
+    while True:
+        try:
+            for broker in ('finam', 'alor'):
+                try:
+                    sync_account_fills(broker)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(TRADE_SYNC_INTERVAL_SECONDS)
+
+
 async def _alor_get_access_token(refresh_token: str) -> str:
     import httpx
     base = ALOR_OAUTH_URL.rstrip('/')
@@ -4031,9 +4173,14 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
     def _sync_fills_bg():
         try:
             destinations = ((decision.get('executionResult') or {}).get('destinations') or [])
+            synced_account = set()
             for dest in destinations:
                 broker = str(dest.get('broker') or '').strip().lower()
                 symbol = str(dest.get('symbol') or '').strip()
+                if broker in ('finam', 'alor') and broker not in synced_account:
+                    sync_account_fills(broker)
+                    synced_account.add(broker)
+                    continue
                 if broker and symbol:
                     sync_exchange_fills(broker, symbol, lookback_hours=48)
                     sync_exchange_income(broker, symbol, lookback_hours=48)
@@ -4343,9 +4490,22 @@ class Handler(BaseHTTPRequestHandler):
             if not _has_permission(current_user, 'canViewJournal'):
                 return self._json(403, {'error': 'forbidden'})
             try:
-                return self._json(200, analytics_overview(limit=20))
+                query = parse_qs(self.path.split('?', 1)[1] if '?' in self.path else '', keep_blank_values=True)
+                brokers = [b for b in (query.get('brokers') or [''])[0].split(',') if b.strip()] if 'brokers' in query else None
+                years = [y for y in (query.get('years') or [''])[0].split(',') if y.strip()] if 'years' in query else None
+                return self._json(200, analytics_overview(limit=20, brokers=brokers, years=years))
             except Exception as e:
                 return self._json(500, {'error': 'analytics_overview_failed', 'details': str(e)})
+        if route_path == '/api/performance-stats':
+            if not _has_permission(current_user, 'canViewJournal'):
+                return self._json(403, {'error': 'forbidden'})
+            try:
+                query = parse_qs(self.path.split('?', 1)[1] if '?' in self.path else '', keep_blank_values=True)
+                brokers = [b for b in (query.get('brokers') or [''])[0].split(',') if b.strip()] if 'brokers' in query else None
+                years = [y for y in (query.get('years') or [''])[0].split(',') if y.strip()] if 'years' in query else None
+                return self._json(200, performance_stats(brokers=brokers, years=years))
+            except Exception as e:
+                return self._json(500, {'error': 'performance_stats_failed', 'details': str(e)})
         if route_path == '/settings/backup/download':
             if not _has_permission(current_user, 'canDownloadBackups'):
                 return self._json(403, {'error': 'forbidden'})
@@ -5012,6 +5172,7 @@ def main():
     for idx in range(WEBHOOK_WORKER_COUNT):
         threading.Thread(target=_webhook_worker_loop, name=f'webhook-worker-{idx+1}', daemon=True).start()
     threading.Thread(target=_metrics_sync_loop, name='broker-metrics-sync', daemon=True).start()
+    threading.Thread(target=_trade_sync_loop, name='broker-trade-sync', daemon=True).start()
     build = _build_summary()
     append_journal({
         'time': _utcnow_iso(),
@@ -5021,7 +5182,7 @@ def main():
         'qty': '',
         'brokers': [],
         'status': 'ok' if analytics_init.get('ok') else 'degraded',
-        'details': f'listening on http://{SERVER_HOST}:{SERVER_PORT}/ pid={os.getpid()} workers={WEBHOOK_WORKER_COUNT} metricsSync={METRICS_SYNC_INTERVAL_SECONDS}s builtAt={build.get("builtAt","")} fileCount={build.get("fileCount","")} analyticsDb={analytics_init.get("path","")} analyticsOk={analytics_init.get("ok")} analyticsError={analytics_init.get("error","")[:200]}',
+        'details': f'listening on http://{SERVER_HOST}:{SERVER_PORT}/ pid={os.getpid()} workers={WEBHOOK_WORKER_COUNT} metricsSync={METRICS_SYNC_INTERVAL_SECONDS}s tradeSync={TRADE_SYNC_INTERVAL_SECONDS}s builtAt={build.get("builtAt","")} fileCount={build.get("fileCount","")} analyticsDb={analytics_init.get("path","")} analyticsOk={analytics_init.get("ok")} analyticsError={analytics_init.get("error","")[:200]}',
         'version': build.get('version', 'unknown'),
         'serverHash': build.get('serverHash', ''),
     })
