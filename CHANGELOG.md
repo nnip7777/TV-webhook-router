@@ -1,3 +1,10 @@
+## 2026.10.02-001
+- Full Alor/Finam account trade sync + cash-unit performance stats (RUB/USDT split, years/YTD, broker+year filters).
+- BingX risk: target terminal `riskRate` (Risk field) = riskPct%; check adjust_isolated_margin responses with min-margin fallback.
+- Do not override BingX leverage (user sets it in terminal).
+- Pre-trade add_margin to riskPct target before placing order; abort without placing if free margin is short.
+- Post-trade risk verify/adjust kept; journal logs pre-trade abort clearly (stage=pre_trade_margin_aborted).
+
 ## 2026.07.05-001
 - Fixed Finam/Alor position display ("pos" column) not showing actual positions.
 - Root cause: `_live_symbol_qty_text()` only did exact symbol match. When broker symbol is `FFN6` but metrics cache has `FFN6@RTSX` (with board suffix), position was not found.
