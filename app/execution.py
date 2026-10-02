@@ -1182,8 +1182,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 incoming_qty = abs(float(prepared.get('quantity') or prepared.get('quoteOrderQty') or 0))
                 expected_final_qty = max(0.0, before_qty + incoming_qty)
                 unrealized_before = _bingx_account_unrealized(balance)
-                # Terminal risk = usedMargin/equity = (isolated - unrealized)/equity.
-                # Target isolated so that usedMargin/equity == riskPct.
+                # Terminal Risk = riskRate = maintenance / isolated.
+                # Target isolated so riskRate == riskPct% (e.g.12 → 0.12).
                 allowed_loss = max(0.0, equity * (risk_pct / 100.0))
                 target_isolated_pre = allowed_loss + unrealized_before
                 if target_isolated_pre < 0:
@@ -1578,17 +1578,38 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 mark_price = float(prepared['price'])
                 final_notional = abs(mark_price * final_qty)
                 unrealized_after = _bingx_account_unrealized(balance)
-                # Terminal "risk" ≈ usedMargin/equity = (isolated - unrealized)/equity.
-                # Set isolated so usedMargin/equity == riskPct after adjust.
-                target_used = max(0.0, equity * (risk_pct / 100.0))
-                target_margin = target_used + unrealized_after
-                if target_margin < 0:
+                # Terminal "Risk" field = riskRate = maintenanceMargin / isolated.
+                # maintenance ≈ 0.3% × notional (verified on live position).
+                # Target isolated so riskRate == riskPct% after adjust.
+                current_rr = 0.0
+                try:
+                    current_rr = float(after_position.get('riskRate') or 0)
+                except Exception:
+                    current_rr = 0.0
+                current_iso_for_maint = 0.0
+                try:
+                    if position_margin not in (None, ''):
+                        current_iso_for_maint = abs(float(position_margin))
+                except Exception:
+                    current_iso_for_maint = 0.0
+                if current_rr > 0 and current_iso_for_maint > 0:
+                    maintenance_margin = current_rr * current_iso_for_maint
+                else:
+                    maintenance_margin = 0.003 * final_notional
+                target_risk_rate = max(0.0, risk_pct) / 100.0
+                if target_risk_rate > 0 and maintenance_margin > 0:
+                    target_margin = maintenance_margin / target_risk_rate
+                else:
                     target_margin = 0.0
+                target_used = 0.0  # legacy; terminal risk is riskRate
                 request_payload['riskControl'].update({
                     'effectivePositionSide': effective_position_side,
                     'finalQty': final_qty,
                     'finalNotional': final_notional,
                     'unrealizedProfit': unrealized_after,
+                    'currentRiskRate': current_rr,
+                    'maintenanceMargin': maintenance_margin,
+                    'targetRiskRate': target_risk_rate,
                     'targetUsedMargin': target_used,
                     'targetMargin': target_margin,
                     'liquidationPrice': liquidation_price,
@@ -1604,10 +1625,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 target_margin_pct_of_equity = None
                 add_margin_pct_of_equity = None
                 current_used = None
-                if equity > 0:
-                    current_used = current_margin - unrealized_after
-                    margin_pct_of_equity = (current_used / equity) * 100.0
-                    target_margin_pct_of_equity = (target_used / equity) * 100.0
+                if current_rr > 0:
+                    margin_pct_of_equity = current_rr * 100.0
+                target_margin_pct_of_equity = risk_pct
                 request_payload['riskControl'].update({
                     'currentMarginValue': current_margin,
                     'currentUsedMargin': current_used,
@@ -1702,6 +1722,12 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         request_payload['riskControl']['liquidationPriceAfterAdjust'] = pos_after_margin.get('liquidationPrice') or pos_after_margin.get('liquidPrice')
                         adjusted_margin = pos_after_margin.get('positionMargin') or pos_after_margin.get('isolatedMargin') or pos_after_margin.get('margin')
                         request_payload['riskControl']['marginAfterAdjust'] = adjusted_margin
+                        try:
+                            rr_after = float(pos_after_margin.get('riskRate') or 0)
+                            request_payload['riskControl']['riskRateAfterAdjust'] = rr_after
+                            request_payload['riskControl']['marginAfterAdjustPctOfEquity'] = rr_after * 100.0
+                        except Exception:
+                            pass
                         balance_verify = client.get_balance()
                         equity_verify = _bingx_account_equity(balance_verify) or equity
                         unrealized_verify = _bingx_account_unrealized(balance_verify)
@@ -1711,8 +1737,6 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 after_used = after_isolated - unrealized_verify
                                 request_payload['riskControl']['unrealizedProfitAfter'] = unrealized_verify
                                 request_payload['riskControl']['usedMarginAfterAdjust'] = after_used
-                                if equity_verify > 0:
-                                    request_payload['riskControl']['marginAfterAdjustPctOfEquity'] = (after_used / equity_verify) * 100.0
                                 if margin_delta < 0 and current_margin > 0 and after_isolated >= current_margin - 0.00000001:
                                     request_payload['riskControl']['reduceMarginNoEffect'] = True
                             except Exception:
