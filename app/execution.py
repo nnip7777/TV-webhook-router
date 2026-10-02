@@ -360,6 +360,13 @@ def _bingx_account_available(balance_payload: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _bingx_api_ok(resp: Any) -> bool:
+    if not isinstance(resp, dict):
+        return False
+    code = resp.get('code')
+    return code in (None, 0, '0', '000000')
+
+
 def _bingx_extract_position(positions_payload: Dict[str, Any], symbol: str, fallback_side: str = '') -> Dict[str, Any]:
     rows = (positions_payload or {}).get('data') or []
     if isinstance(rows, dict):
@@ -1581,6 +1588,15 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 margin_delta_abs = abs(margin_delta)
                 if equity > 0:
                     add_margin_pct_of_equity = (margin_delta_abs / equity) * 100.0
+                pre_leverage = 0
+                try:
+                    pre_leverage = int(float((request_payload.get('riskControl') or {}).get('preTradeLeverage') or 0))
+                except Exception:
+                    pre_leverage = 0
+                # Exchange will not allow isolated margin below ~notional/leverage.
+                estimated_min_margin = 0.0
+                if final_notional > 0 and pre_leverage > 0:
+                    estimated_min_margin = final_notional / float(pre_leverage)
                 if final_qty > 0 and margin_delta_abs > 0.00000001:
                     if margin_delta > 0:
                         _set_stage('add_margin')
@@ -1592,19 +1608,58 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             if shortfall > 0.00000001:
                                 request_payload['riskControl']['addMarginShortfall'] = shortfall
                             if actual_add > 0.00000001:
-                                margin_ops['addMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, actual_add, direction_type=1)
+                                add_resp = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, actual_add, direction_type=1)
+                                margin_ops['addMargin'] = add_resp
                                 request_payload['riskControl']['addMargin'] = actual_add
+                                if not _bingx_api_ok(add_resp):
+                                    request_payload['riskControl']['addMarginFailed'] = True
+                                    request_payload['riskControl']['addMarginApiCode'] = add_resp.get('code') if isinstance(add_resp, dict) else None
+                                    request_payload['riskControl']['addMarginApiMsg'] = str((add_resp or {}).get('msg') or '') if isinstance(add_resp, dict) else str(add_resp)
                             else:
                                 request_payload['riskControl']['addMarginSkipped'] = 'insufficient_balance'
                         except Exception as add_err:
                             margin_ops['addMarginError'] = str(add_err)
+                            request_payload['riskControl']['addMarginError'] = str(add_err)
                     else:
                         _set_stage('reduce_margin')
-                        try:
-                            margin_ops['reduceMargin'] = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, margin_delta_abs, direction_type=2)
-                            request_payload['riskControl']['reduceMargin'] = margin_delta_abs
-                        except Exception as reduce_err:
-                            margin_ops['reduceMarginError'] = str(reduce_err)
+                        effective_target = target_margin
+                        if estimated_min_margin > target_margin + 0.00000001:
+                            effective_target = estimated_min_margin
+                            request_payload['riskControl']['targetMarginFallback'] = 'below_exchange_min'
+                            request_payload['riskControl']['targetMarginRequested'] = target_margin
+                            request_payload['riskControl']['targetMarginFloor'] = estimated_min_margin
+                        reduce_amount = max(0.0, current_margin - effective_target)
+                        request_payload['riskControl']['reduceMarginTarget'] = effective_target
+                        if reduce_amount <= 0.00000001:
+                            request_payload['riskControl']['reduceMarginSkipped'] = 'already_at_or_below_floor'
+                        else:
+                            reduce_resp = None
+                            reduce_err_text = ''
+                            try:
+                                reduce_resp = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, reduce_amount, direction_type=2)
+                                margin_ops['reduceMargin'] = reduce_resp
+                                request_payload['riskControl']['reduceMargin'] = reduce_amount
+                                request_payload['riskControl']['reduceMarginApiCode'] = reduce_resp.get('code') if isinstance(reduce_resp, dict) else None
+                                if not _bingx_api_ok(reduce_resp):
+                                    request_payload['riskControl']['reduceMarginFailed'] = True
+                                    request_payload['riskControl']['reduceMarginApiMsg'] = str(reduce_resp.get('msg') or '') if isinstance(reduce_resp, dict) else str(reduce_resp)
+                                    # Fallback: retry a smaller chunk (half), still above floor.
+                                    retry_amount = reduce_amount / 2.0
+                                    if retry_amount > 0.00000001 and current_margin - retry_amount >= effective_target - 0.00000001:
+                                        try:
+                                            retry_resp = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, retry_amount, direction_type=2)
+                                            margin_ops['reduceMarginRetry'] = retry_resp
+                                            request_payload['riskControl']['reduceMarginRetry'] = retry_amount
+                                            request_payload['riskControl']['reduceMarginRetryApiCode'] = retry_resp.get('code') if isinstance(retry_resp, dict) else None
+                                            if _bingx_api_ok(retry_resp):
+                                                request_payload['riskControl']['reduceMarginFailed'] = False
+                                                request_payload['riskControl']['reduceMargin'] = retry_amount
+                                        except Exception as retry_err:
+                                            margin_ops['reduceMarginRetryError'] = str(retry_err)
+                            except Exception as reduce_err:
+                                reduce_err_text = str(reduce_err)
+                                margin_ops['reduceMarginError'] = reduce_err_text
+                                request_payload['riskControl']['reduceMarginError'] = reduce_err_text
                 request_payload['riskControl'].update({
                     'marginDeltaPctOfEquity': add_margin_pct_of_equity,
                     'marginDirection': 'add' if margin_delta > 0 else ('reduce' if margin_delta < 0 else 'none'),
@@ -1619,7 +1674,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         request_payload['riskControl']['marginAfterAdjust'] = adjusted_margin
                         if equity > 0 and adjusted_margin not in (None, ''):
                             try:
-                                request_payload['riskControl']['marginAfterAdjustPctOfEquity'] = (abs(float(adjusted_margin)) / equity) * 100.0
+                                after_val = abs(float(adjusted_margin))
+                                request_payload['riskControl']['marginAfterAdjustPctOfEquity'] = (after_val / equity) * 100.0
+                                if margin_delta < 0 and current_margin > 0 and after_val >= current_margin - 0.00000001:
+                                    request_payload['riskControl']['reduceMarginNoEffect'] = True
                             except Exception:
                                 pass
                     except Exception as verify_err:
