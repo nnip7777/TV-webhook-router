@@ -1190,16 +1190,12 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     target_isolated_pre = 0.0
                 expected_notional = abs(mark_price * expected_final_qty)
                 target_margin_pre = min(expected_notional, target_isolated_pre) if target_isolated_pre > 0 else 0.0
-                raw_leverage = (expected_notional / target_margin_pre) if target_margin_pre > 0 else 1.0
-                leverage_cap = 125
-                if is_non_crypto_index:
-                    try:
-                        contract_leverage = int(float(contract_meta.get('maxLongLeverage') or contract_meta.get('maxShortLeverage') or contract_meta.get('maxLeverage') or 0))
-                        if contract_leverage > 0:
-                            leverage_cap = min(leverage_cap, contract_leverage)
-                    except Exception:
-                        leverage_cap = 125
-                leverage = max(1, min(leverage_cap, int(math.ceil(raw_leverage))))
+                # Do not change leverage — user sets it in BingX terminal.
+                actual_leverage = 0
+                try:
+                    actual_leverage = int(float(before_position.get('leverage') or 0))
+                except Exception:
+                    actual_leverage = 0
                 request_payload['riskControl'] = {
                     'mode': 'non_crypto' if is_non_crypto_index else 'standard',
                     'equity': equity,
@@ -1210,15 +1206,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'incomingQty': incoming_qty,
                     'expectedFinalQty': expected_final_qty,
                     'expectedNotional': expected_notional,
-                    'preTradeLeverage': leverage,
+                    'preTradeLeverage': actual_leverage,
+                    'leverageSource': 'position_or_terminal',
                 }
                 _set_stage('set_margin_type')
                 margin_ops['setMarginType'] = client.set_margin_type(prepared['symbol'], 'ISOLATED')
-                _set_stage('set_leverage')
-                leverage_side = requested_position_side
-                if leverage_side not in ('LONG', 'SHORT'):
-                    leverage_side = 'LONG' if side == 'buy' else 'SHORT'
-                margin_ops['setLeverage'] = client.set_leverage(prepared['symbol'], leverage_side, leverage)
 
             effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
             def _run_limit_repost_loop(loop_prepared: Dict[str, Any], loop_position_side: str, loop_reduce_only: Any, stage_prefix: str = ''):
