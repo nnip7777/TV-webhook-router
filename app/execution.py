@@ -387,6 +387,24 @@ def _bingx_api_ok(resp: Any) -> bool:
     return code in (None, 0, '0', '000000')
 
 
+def _bingx_position_isolated(pos: Dict[str, Any]) -> float:
+    for key in ('margin', 'positionMargin', 'isolatedMargin'):
+        if pos and pos.get(key) not in (None, ''):
+            try:
+                return abs(float(pos.get(key)))
+            except Exception:
+                pass
+    return 0.0
+
+
+def _bingx_target_isolated_for_notional(notional: float, risk_pct: float) -> float:
+    """Isolated margin so terminal riskRate = riskPct% (riskRate ≈ 0.3%×notional / isolated)."""
+    if notional <= 0 or risk_pct is None or risk_pct <= 0:
+        return 0.0
+    maintenance = 0.003 * abs(notional)
+    return maintenance / (float(risk_pct) / 100.0)
+
+
 def _bingx_extract_position(positions_payload: Dict[str, Any], symbol: str, fallback_side: str = '') -> Dict[str, Any]:
     rows = (positions_payload or {}).get('data') or []
     if isinstance(rows, dict):
@@ -1202,6 +1220,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'unrealizedProfit': unrealized_before,
                     'allowedLoss': allowed_loss,
                     'targetIsolatedPre': target_isolated_pre,
+                    'targetIsolatedRiskRate': _bingx_target_isolated_for_notional(expected_notional, risk_pct),
                     'beforeQty': before_qty,
                     'incomingQty': incoming_qty,
                     'expectedFinalQty': expected_final_qty,
@@ -1213,6 +1232,140 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 margin_ops['setMarginType'] = client.set_margin_type(prepared['symbol'], 'ISOLATED')
 
             effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
+
+            def _ensure_pretrade_margin(position_side: str) -> Dict[str, Any] | None:
+                """Add isolated to riskPct target before opening/adding.
+
+                Returns None if OK; error dict → abort without placing order.
+                """
+                if dry_run or not risk_control_enabled:
+                    return None
+                rc = request_payload.setdefault('riskControl', {})
+                target_iso = _bingx_target_isolated_for_notional(
+                    float(rc.get('expectedNotional') or 0.0), risk_pct
+                )
+                rc['preTradeTargetIsolated'] = target_iso
+                if target_iso <= 0:
+                    return None
+                _set_stage('pre_trade_get_position')
+                try:
+                    pos_rows = client.get_positions(prepared['symbol'])
+                    pos = _bingx_extract_position(pos_rows, prepared['symbol'], position_side)
+                except Exception as e:
+                    return {
+                        'code': -1,
+                        'msg': f'pre-trade margin: cannot read position: {e}',
+                        'riskControl': rc,
+                    }
+                current_iso = _bingx_position_isolated(pos)
+                rc['preTradeIsolated'] = current_iso
+                need_add = max(0.0, target_iso - current_iso)
+                rc['preTradeNeedAdd'] = need_add
+                if need_add <= 0.00000001:
+                    rc['preTradeAddMargin'] = 0.0
+                    return None
+
+                _set_stage('pre_trade_get_balance')
+                try:
+                    pre_bal = client.get_balance()
+                except Exception as e:
+                    return {
+                        'code': -1,
+                        'msg': f'pre-trade margin: cannot read balance: {e}',
+                        'riskControl': rc,
+                    }
+                available = _bingx_account_available(pre_bal)
+                rc['preTradeAvailable'] = available
+
+                # New position: cannot call positionMargin yet — require free balance
+                # for post-fill top-up to target (initial margin comes out of available too).
+                if current_iso <= 0:
+                    if available + 1e-8 < target_iso:
+                        rc['preTradeAddMarginSkipped'] = 'insufficient_balance_for_new_position'
+                        return {
+                            'code': -1,
+                            'msg': (
+                                f'pre-trade margin insufficient for new position: '
+                                f'need {target_iso:.4f} USDT free, available {available:.4f}'
+                            ),
+                            'riskControl': rc,
+                        }
+                    rc['preTradeAddMargin'] = 0.0
+                    rc['preTradeAddMarginNote'] = 'new_position_reserved_via_available'
+                    return None
+
+                if available + 1e-8 < need_add:
+                    rc['preTradeAddMarginSkipped'] = 'insufficient_balance'
+                    rc['preTradeAddMarginShortfall'] = need_add - available
+                    return {
+                        'code': -1,
+                        'msg': (
+                            f'pre-trade margin insufficient: need add {need_add:.4f} USDT, '
+                            f'available {available:.4f} — order not placed'
+                        ),
+                        'riskControl': rc,
+                    }
+
+                _set_stage('pre_trade_add_margin')
+                try:
+                    add_resp = client.adjust_isolated_margin(
+                        prepared['symbol'], position_side, need_add, direction_type=1
+                    )
+                except Exception as e:
+                    rc['preTradeAddMarginError'] = str(e)
+                    return {
+                        'code': -1,
+                        'msg': f'pre-trade add_margin failed: {e} — order not placed',
+                        'riskControl': rc,
+                    }
+                margin_ops['preTradeAddMargin'] = add_resp
+                rc['preTradeAddMargin'] = need_add
+                if not _bingx_api_ok(add_resp):
+                    rc['preTradeAddMarginFailed'] = True
+                    rc['preTradeAddMarginApiCode'] = add_resp.get('code') if isinstance(add_resp, dict) else None
+                    rc['preTradeAddMarginApiMsg'] = str((add_resp or {}).get('msg') or '') if isinstance(add_resp, dict) else str(add_resp)
+                    return {
+                        'code': -1,
+                        'msg': (
+                            f'pre-trade add_margin rejected: code={rc.get("preTradeAddMarginApiCode")} '
+                            f'msg={rc.get("preTradeAddMarginApiMsg")} — order not placed'
+                        ),
+                        'riskControl': rc,
+                    }
+
+                _set_stage('pre_trade_verify_margin')
+                try:
+                    pos2_rows = client.get_positions(prepared['symbol'])
+                    pos2 = _bingx_extract_position(pos2_rows, prepared['symbol'], position_side)
+                    iso_after = _bingx_position_isolated(pos2)
+                    rc['preTradeIsolatedAfterAdd'] = iso_after
+                    # Allow small slack (mark/uPnL drift)
+                    if iso_after + 0.05 < target_iso * 0.5:
+                        # add claimed ok but isolated still far below target
+                        rc['preTradeAddMarginNoEffect'] = True
+                        return {
+                            'code': -1,
+                            'msg': (
+                                f'pre-trade margin still low after add: isolated={iso_after:.4f} '
+                                f'target={target_iso:.4f} — order not placed'
+                            ),
+                            'riskControl': rc,
+                        }
+                except Exception as e:
+                    rc['preTradeVerifyError'] = str(e)
+                return None
+
+            # Simple open/add: top up risk margin BEFORE placing.
+            # close-then-open: skip here (frees margin first); ensure before target open below.
+            if not target_mode_close_then_open and risk_control_enabled and not dry_run:
+                pre_abort = _ensure_pretrade_margin(
+                    api_position_side if api_position_side != 'BOTH' else requested_position_side
+                )
+                if pre_abort:
+                    if margin_ops:
+                        pre_abort['_riskControl'] = margin_ops
+                    return pre_abort
+
             def _run_limit_repost_loop(loop_prepared: Dict[str, Any], loop_position_side: str, loop_reduce_only: Any, stage_prefix: str = ''):
                 order_attempts = []
                 poll_plan_ms = [350, 700, 1200]
@@ -1496,48 +1649,56 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     target_open_qty_kind = 'usdt'
                     open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None, qty_kind=target_open_qty_kind)
                     request_payload['targetOpenQtyKind'] = target_open_qty_kind
-                    open_result, open_final_order_row, open_remaining_qty, open_attempts, open_effective_position_side = _run_limit_repost_loop(
-                        open_prepared,
-                        open_position_side,
-                        None,
-                        stage_prefix='target_open_',
-                    )
-                    effective_position_side = open_effective_position_side or open_position_side
-                    request_payload['targetOpenAttempts'] = [
-                        {
-                            'attempt': item.get('attempt'),
-                            'placedQty': item.get('placedQty'),
-                            'placedPrice': item.get('placedPrice'),
-                            'orderId': item.get('orderId'),
-                            'finalStatus': item.get('finalStatus'),
-                            'executedQty': item.get('executedQty'),
-                            'remainingQty': item.get('remainingQty'),
-                        }
-                        for item in open_attempts
-                    ]
-                    request_payload['targetOpenFinalRemainingQty'] = open_remaining_qty
-                    result = open_result
-                    final_order_row = open_final_order_row
-                    remaining_qty = open_remaining_qty
-                    order_attempts.extend([{**item, 'phase': 'target-open'} for item in open_attempts])
-
-                    if isinstance(result, dict) and result.get('code') in (None, 0, '0'):
-                        _set_stage('target_direction_verify_final_positions')
-                        final_positions = client.get_positions(prepared['symbol'])
-                        request_payload['positionPayloadAfterTargetOpenRaw'] = final_positions
-                        final_position_rows = _bingx_position_rows(final_positions, prepared['symbol'])
-                        final_buckets = _bingx_position_buckets(final_positions, prepared['symbol'])
-                        request_payload['positionRowsAfterTargetOpenRaw'] = final_position_rows
-                        request_payload['positionBucketsAfterTargetOpen'] = {k: float(v) for k, v in final_buckets.items()}
-                        expected_side = 'LONG' if target_direction == 'long' else 'SHORT'
-                        opposite_side = 'SHORT' if expected_side == 'LONG' else 'LONG'
-                        final_expected_qty = final_buckets.get(expected_side, Decimal('0')) or Decimal('0')
-                        final_opposite_qty = final_buckets.get(opposite_side, Decimal('0')) or Decimal('0')
-                        if final_expected_qty <= 0 or final_opposite_qty > 0:
-                            result = {
-                                'code': -1,
-                                'msg': f'target-direction final reconcile failed: expected {expected_side} > 0 and {opposite_side} == 0, got {final_buckets}'
+                    pre_abort = None
+                    if risk_control_enabled and not dry_run:
+                        pre_abort = _ensure_pretrade_margin(open_position_side)
+                    if pre_abort:
+                        result = pre_abort
+                        final_order_row = {}
+                        remaining_qty = '0'
+                    else:
+                        open_result, open_final_order_row, open_remaining_qty, open_attempts, open_effective_position_side = _run_limit_repost_loop(
+                            open_prepared,
+                            open_position_side,
+                            None,
+                            stage_prefix='target_open_',
+                        )
+                        effective_position_side = open_effective_position_side or open_position_side
+                        request_payload['targetOpenAttempts'] = [
+                            {
+                                'attempt': item.get('attempt'),
+                                'placedQty': item.get('placedQty'),
+                                'placedPrice': item.get('placedPrice'),
+                                'orderId': item.get('orderId'),
+                                'finalStatus': item.get('finalStatus'),
+                                'executedQty': item.get('executedQty'),
+                                'remainingQty': item.get('remainingQty'),
                             }
+                            for item in open_attempts
+                        ]
+                        request_payload['targetOpenFinalRemainingQty'] = open_remaining_qty
+                        result = open_result
+                        final_order_row = open_final_order_row
+                        remaining_qty = open_remaining_qty
+                        order_attempts.extend([{**item, 'phase': 'target-open'} for item in open_attempts])
+
+                        if isinstance(result, dict) and result.get('code') in (None, 0, '0'):
+                            _set_stage('target_direction_verify_final_positions')
+                            final_positions = client.get_positions(prepared['symbol'])
+                            request_payload['positionPayloadAfterTargetOpenRaw'] = final_positions
+                            final_position_rows = _bingx_position_rows(final_positions, prepared['symbol'])
+                            final_buckets = _bingx_position_buckets(final_positions, prepared['symbol'])
+                            request_payload['positionRowsAfterTargetOpenRaw'] = final_position_rows
+                            request_payload['positionBucketsAfterTargetOpen'] = {k: float(v) for k, v in final_buckets.items()}
+                            expected_side = 'LONG' if target_direction == 'long' else 'SHORT'
+                            opposite_side = 'SHORT' if expected_side == 'LONG' else 'LONG'
+                            final_expected_qty = final_buckets.get(expected_side, Decimal('0')) or Decimal('0')
+                            final_opposite_qty = final_buckets.get(opposite_side, Decimal('0')) or Decimal('0')
+                            if final_expected_qty <= 0 or final_opposite_qty > 0:
+                                result = {
+                                    'code': -1,
+                                    'msg': f'target-direction final reconcile failed: expected {expected_side} > 0 and {opposite_side} == 0, got {final_buckets}'
+                                }
 
             request_payload['orderAttempts'] = [
                 {
