@@ -1115,6 +1115,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 }
 
             margin_ops: Dict[str, Any] = {}
+            pretrade_aborted = False
             requested_position_side = position_side
             if requested_position_side == 'BOTH':
                 requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
@@ -1241,6 +1242,19 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 if dry_run or not risk_control_enabled:
                     return None
                 rc = request_payload.setdefault('riskControl', {})
+
+                def _pretrade_abort(msg: str) -> Dict[str, Any]:
+                    _set_stage('pre_trade_margin_aborted')
+                    rc['preTradeMarginAborted'] = True
+                    return {
+                        'code': -1,
+                        'msg': msg,
+                        'stage': request_payload.get('stage'),
+                        'stageTrace': request_payload.get('stageTrace', []),
+                        'riskControl': rc,
+                        '_riskControl': margin_ops,
+                    }
+
                 target_iso = _bingx_target_isolated_for_notional(
                     float(rc.get('expectedNotional') or 0.0), risk_pct
                 )
@@ -1252,11 +1266,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     pos_rows = client.get_positions(prepared['symbol'])
                     pos = _bingx_extract_position(pos_rows, prepared['symbol'], position_side)
                 except Exception as e:
-                    return {
-                        'code': -1,
-                        'msg': f'pre-trade margin: cannot read position: {e}',
-                        'riskControl': rc,
-                    }
+                    return _pretrade_abort(f'pre-trade margin: cannot read position: {e} — order not placed')
                 current_iso = _bingx_position_isolated(pos)
                 rc['preTradeIsolated'] = current_iso
                 need_add = max(0.0, target_iso - current_iso)
@@ -1269,11 +1279,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 try:
                     pre_bal = client.get_balance()
                 except Exception as e:
-                    return {
-                        'code': -1,
-                        'msg': f'pre-trade margin: cannot read balance: {e}',
-                        'riskControl': rc,
-                    }
+                    return _pretrade_abort(f'pre-trade margin: cannot read balance: {e} — order not placed')
                 available = _bingx_account_available(pre_bal)
                 rc['preTradeAvailable'] = available
 
@@ -1282,14 +1288,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 if current_iso <= 0:
                     if available + 1e-8 < target_iso:
                         rc['preTradeAddMarginSkipped'] = 'insufficient_balance_for_new_position'
-                        return {
-                            'code': -1,
-                            'msg': (
-                                f'pre-trade margin insufficient for new position: '
-                                f'need {target_iso:.4f} USDT free, available {available:.4f}'
-                            ),
-                            'riskControl': rc,
-                        }
+                        return _pretrade_abort(
+                            f'pre-trade margin insufficient for new position: '
+                            f'need {target_iso:.4f} USDT free, available {available:.4f} — order not placed'
+                        )
                     rc['preTradeAddMargin'] = 0.0
                     rc['preTradeAddMarginNote'] = 'new_position_reserved_via_available'
                     return None
@@ -1297,14 +1299,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 if available + 1e-8 < need_add:
                     rc['preTradeAddMarginSkipped'] = 'insufficient_balance'
                     rc['preTradeAddMarginShortfall'] = need_add - available
-                    return {
-                        'code': -1,
-                        'msg': (
-                            f'pre-trade margin insufficient: need add {need_add:.4f} USDT, '
-                            f'available {available:.4f} — order not placed'
-                        ),
-                        'riskControl': rc,
-                    }
+                    return _pretrade_abort(
+                        f'pre-trade margin insufficient: need add {need_add:.4f} USDT, '
+                        f'available {available:.4f} — order not placed'
+                    )
 
                 _set_stage('pre_trade_add_margin')
                 try:
@@ -1313,25 +1311,17 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     )
                 except Exception as e:
                     rc['preTradeAddMarginError'] = str(e)
-                    return {
-                        'code': -1,
-                        'msg': f'pre-trade add_margin failed: {e} — order not placed',
-                        'riskControl': rc,
-                    }
+                    return _pretrade_abort(f'pre-trade add_margin failed: {e} — order not placed')
                 margin_ops['preTradeAddMargin'] = add_resp
                 rc['preTradeAddMargin'] = need_add
                 if not _bingx_api_ok(add_resp):
                     rc['preTradeAddMarginFailed'] = True
                     rc['preTradeAddMarginApiCode'] = add_resp.get('code') if isinstance(add_resp, dict) else None
                     rc['preTradeAddMarginApiMsg'] = str((add_resp or {}).get('msg') or '') if isinstance(add_resp, dict) else str(add_resp)
-                    return {
-                        'code': -1,
-                        'msg': (
-                            f'pre-trade add_margin rejected: code={rc.get("preTradeAddMarginApiCode")} '
-                            f'msg={rc.get("preTradeAddMarginApiMsg")} — order not placed'
-                        ),
-                        'riskControl': rc,
-                    }
+                    return _pretrade_abort(
+                        f'pre-trade add_margin rejected: code={rc.get("preTradeAddMarginApiCode")} '
+                        f'msg={rc.get("preTradeAddMarginApiMsg")} — order not placed'
+                    )
 
                 _set_stage('pre_trade_verify_margin')
                 try:
@@ -1341,27 +1331,24 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     rc['preTradeIsolatedAfterAdd'] = iso_after
                     # Allow small slack (mark/uPnL drift)
                     if iso_after + 0.05 < target_iso * 0.5:
-                        # add claimed ok but isolated still far below target
                         rc['preTradeAddMarginNoEffect'] = True
-                        return {
-                            'code': -1,
-                            'msg': (
-                                f'pre-trade margin still low after add: isolated={iso_after:.4f} '
-                                f'target={target_iso:.4f} — order not placed'
-                            ),
-                            'riskControl': rc,
-                        }
+                        return _pretrade_abort(
+                            f'pre-trade margin still low after add: isolated={iso_after:.4f} '
+                            f'target={target_iso:.4f} — order not placed'
+                        )
                 except Exception as e:
                     rc['preTradeVerifyError'] = str(e)
                 return None
 
             # Simple open/add: top up risk margin BEFORE placing.
             # close-then-open: skip here (frees margin first); ensure before target open below.
+            pretrade_aborted = False
             if not target_mode_close_then_open and risk_control_enabled and not dry_run:
                 pre_abort = _ensure_pretrade_margin(
                     api_position_side if api_position_side != 'BOTH' else requested_position_side
                 )
                 if pre_abort:
+                    pretrade_aborted = True
                     if margin_ops:
                         pre_abort['_riskControl'] = margin_ops
                     return pre_abort
@@ -1653,6 +1640,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     if risk_control_enabled and not dry_run:
                         pre_abort = _ensure_pretrade_margin(open_position_side)
                     if pre_abort:
+                        pretrade_aborted = True
                         result = pre_abort
                         final_order_row = {}
                         remaining_qty = '0'
@@ -1726,7 +1714,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 request_payload['finalExecutedQty'] = str(_bingx_order_executed_qty(final_order_row))
                 request_payload['finalRemainingQty'] = remaining_qty
 
-            if risk_control_enabled:
+            # Post-trade risk adjust only when an order was actually attempted
+            # (skip after pre-trade abort — position did not change from our fill).
+            if risk_control_enabled and not pretrade_aborted:
                 _set_stage('get_balance_after')
                 balance = margin_ops.get('balance') or client.get_balance()
                 equity = _bingx_account_equity(balance)
