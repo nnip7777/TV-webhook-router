@@ -360,6 +360,26 @@ def _bingx_account_available(balance_payload: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _bingx_account_unrealized(balance_payload: Dict[str, Any]) -> float:
+    rows = (balance_payload or {}).get('data') or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        asset = str(row.get('asset') or '').upper()
+        if asset and asset != 'USDT':
+            continue
+        for key in ('unrealizedProfit', 'unrealizedPnl', 'unrealizedProfitLoss'):
+            value = row.get(key)
+            if value not in (None, ''):
+                try:
+                    return float(value)
+                except Exception:
+                    pass
+    return 0.0
+
+
 def _bingx_api_ok(resp: Any) -> bool:
     if not isinstance(resp, dict):
         return False
@@ -1161,9 +1181,15 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 mark_price = float(prepared['price'])
                 incoming_qty = abs(float(prepared.get('quantity') or prepared.get('quoteOrderQty') or 0))
                 expected_final_qty = max(0.0, before_qty + incoming_qty)
+                unrealized_before = _bingx_account_unrealized(balance)
+                # Terminal risk = usedMargin/equity = (isolated - unrealized)/equity.
+                # Target isolated so that usedMargin/equity == riskPct.
                 allowed_loss = max(0.0, equity * (risk_pct / 100.0))
+                target_isolated_pre = allowed_loss + unrealized_before
+                if target_isolated_pre < 0:
+                    target_isolated_pre = 0.0
                 expected_notional = abs(mark_price * expected_final_qty)
-                target_margin_pre = min(expected_notional, allowed_loss) if allowed_loss > 0 else 0.0
+                target_margin_pre = min(expected_notional, target_isolated_pre) if target_isolated_pre > 0 else 0.0
                 raw_leverage = (expected_notional / target_margin_pre) if target_margin_pre > 0 else 1.0
                 leverage_cap = 125
                 if is_non_crypto_index:
@@ -1177,7 +1203,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 request_payload['riskControl'] = {
                     'mode': 'non_crypto' if is_non_crypto_index else 'standard',
                     'equity': equity,
+                    'unrealizedProfit': unrealized_before,
                     'allowedLoss': allowed_loss,
+                    'targetIsolatedPre': target_isolated_pre,
                     'beforeQty': before_qty,
                     'incomingQty': incoming_qty,
                     'expectedFinalQty': expected_final_qty,
@@ -1557,12 +1585,19 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 position_margin = after_position.get('positionMargin') or after_position.get('isolatedMargin') or after_position.get('margin')
                 mark_price = float(prepared['price'])
                 final_notional = abs(mark_price * final_qty)
-                allowed_loss = max(0.0, equity * (risk_pct / 100.0))
-                target_margin = allowed_loss if allowed_loss > 0 else 0.0
+                unrealized_after = _bingx_account_unrealized(balance)
+                # Terminal "risk" ≈ usedMargin/equity = (isolated - unrealized)/equity.
+                # Set isolated so usedMargin/equity == riskPct after adjust.
+                target_used = max(0.0, equity * (risk_pct / 100.0))
+                target_margin = target_used + unrealized_after
+                if target_margin < 0:
+                    target_margin = 0.0
                 request_payload['riskControl'].update({
                     'effectivePositionSide': effective_position_side,
                     'finalQty': final_qty,
                     'finalNotional': final_notional,
+                    'unrealizedProfit': unrealized_after,
+                    'targetUsedMargin': target_used,
                     'targetMargin': target_margin,
                     'liquidationPrice': liquidation_price,
                     'currentPositionMargin': position_margin,
@@ -1576,11 +1611,14 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 margin_pct_of_equity = None
                 target_margin_pct_of_equity = None
                 add_margin_pct_of_equity = None
+                current_used = None
                 if equity > 0:
-                    margin_pct_of_equity = (current_margin / equity) * 100.0
-                    target_margin_pct_of_equity = (target_margin / equity) * 100.0
+                    current_used = current_margin - unrealized_after
+                    margin_pct_of_equity = (current_used / equity) * 100.0
+                    target_margin_pct_of_equity = (target_used / equity) * 100.0
                 request_payload['riskControl'].update({
                     'currentMarginValue': current_margin,
+                    'currentUsedMargin': current_used,
                     'currentMarginPctOfEquity': margin_pct_of_equity,
                     'targetMarginPctOfEquity': target_margin_pct_of_equity,
                 })
@@ -1672,11 +1710,18 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         request_payload['riskControl']['liquidationPriceAfterAdjust'] = pos_after_margin.get('liquidationPrice') or pos_after_margin.get('liquidPrice')
                         adjusted_margin = pos_after_margin.get('positionMargin') or pos_after_margin.get('isolatedMargin') or pos_after_margin.get('margin')
                         request_payload['riskControl']['marginAfterAdjust'] = adjusted_margin
-                        if equity > 0 and adjusted_margin not in (None, ''):
+                        balance_verify = client.get_balance()
+                        equity_verify = _bingx_account_equity(balance_verify) or equity
+                        unrealized_verify = _bingx_account_unrealized(balance_verify)
+                        if adjusted_margin not in (None, ''):
                             try:
-                                after_val = abs(float(adjusted_margin))
-                                request_payload['riskControl']['marginAfterAdjustPctOfEquity'] = (after_val / equity) * 100.0
-                                if margin_delta < 0 and current_margin > 0 and after_val >= current_margin - 0.00000001:
+                                after_isolated = abs(float(adjusted_margin))
+                                after_used = after_isolated - unrealized_verify
+                                request_payload['riskControl']['unrealizedProfitAfter'] = unrealized_verify
+                                request_payload['riskControl']['usedMarginAfterAdjust'] = after_used
+                                if equity_verify > 0:
+                                    request_payload['riskControl']['marginAfterAdjustPctOfEquity'] = (after_used / equity_verify) * 100.0
+                                if margin_delta < 0 and current_margin > 0 and after_isolated >= current_margin - 0.00000001:
                                     request_payload['riskControl']['reduceMarginNoEffect'] = True
                             except Exception:
                                 pass
