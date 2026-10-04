@@ -2584,6 +2584,79 @@ def _catalog_candidates_for_broker(ticker: str, broker_name: str, instruments: D
     return candidates[:limit]
 
 
+def _safe_datalist_id(prefix: str, *parts: str) -> str:
+    raw = '-'.join(str(p or '') for p in parts)
+    safe = re.sub(r'[^A-Za-z0-9._-]+', '_', raw)
+    return f'{prefix}{safe}'
+
+
+def _routing_used_symbols(config: Dict[str, Any], broker_name: str) -> List[str]:
+    """Broker symbols already present in routing (order preserved)."""
+    ordered: List[str] = []
+    seen = set()
+
+    def _add(value: Any) -> None:
+        text = str(value or '').strip()
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+
+    mapping = _current_mapping(config)
+    for ticker in mapping:
+        dest = (mapping.get(ticker) or {}).get(broker_name) or {}
+        _add(dest.get('symbol'))
+    for route in config.get('routes', []) or []:
+        for dest in route.get('destinations', []) or []:
+            if dest.get('broker') == broker_name:
+                _add(dest.get('symbol'))
+    broker_cfg = (config.get('brokers') or {}).get(broker_name) or {}
+    symbol_map = broker_cfg.get('symbolMap') or {}
+    for value in symbol_map.values():
+        _add(value)
+    return ordered
+
+
+def _catalog_symbols_for_broker(broker_name: str, instruments: Dict[str, Any]) -> List[str]:
+    """Known instruments.json broker symbols (preferred/exact first)."""
+    seen = set()
+    ordered: List[str] = []
+    rows = []
+    for instrument in instruments.get('instruments', []):
+        broker_data = (instrument.get('brokers') or {}).get(broker_name) or {}
+        symbol = str(broker_data.get('symbol') or '').strip()
+        if not symbol:
+            continue
+        score = 100
+        if instrument.get('preferred'):
+            score += 50
+        if broker_data.get('fallbackOnly') or broker_data.get('proxy'):
+            score -= 30
+        rows.append((-score, str(instrument.get('canonical') or ''), symbol))
+    rows.sort()
+    for _s, _c, symbol in rows:
+        if symbol not in seen:
+            seen.add(symbol)
+            ordered.append(symbol)
+    return ordered
+
+
+def _broker_lookup_symbols_ordered(config: Dict[str, Any], broker_name: str, instruments: Dict[str, Any]) -> List[str]:
+    """Order: routing-used → catalog instruments → rest of exchange list."""
+    parts: List[str] = []
+    seen = set()
+
+    def _extend(items: List[str]) -> None:
+        for text in items:
+            if text and text not in seen:
+                seen.add(text)
+                parts.append(text)
+
+    _extend(_routing_used_symbols(config, broker_name))
+    _extend(_catalog_symbols_for_broker(broker_name, instruments))
+    _extend(_broker_lookup_symbols(config, broker_name, instruments))
+    return parts
+
+
 def _best_catalog_candidate(ticker: str, broker_name: str, instruments: Dict[str, Any]) -> Dict[str, Any]:
     candidates = _catalog_candidates_for_broker(ticker, broker_name, instruments, limit=1)
     return candidates[0] if candidates else {}
@@ -3405,7 +3478,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
 
     lookup_lists = []
     for broker_name, _broker_cfg in brokers:
-        symbols = _broker_lookup_symbols(config, broker_name, instruments)
+        symbols = _broker_lookup_symbols_ordered(config, broker_name, instruments)
         venues = _broker_lookup_venues(config, broker_name, instruments)
         lookup_lists.append(
             f"<datalist id='lookup-symbol-{html.escape(broker_name)}'>" + ''.join(f"<option value='{html.escape(s)}'></option>" for s in symbols) + "</datalist>"
