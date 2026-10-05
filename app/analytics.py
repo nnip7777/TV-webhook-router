@@ -1279,6 +1279,10 @@ def _import_normalized_fills(conn: sqlite3.Connection, broker: str, fills: List[
             if exists:
                 skipped += 1
                 continue
+            # Same economic fill from another source (order path vs exchange sync).
+            if _logical_fill_exists(conn, fill):
+                skipped += 1
+                continue
             if _insert_fill(conn, fill):
                 _recompute_fill_effect(conn, fill)
                 _apply_fill_to_positions(conn, fill)
@@ -1286,6 +1290,46 @@ def _import_normalized_fills(conn: sqlite3.Connection, broker: str, fills: List[
             else:
                 skipped += 1
     return imported, skipped
+
+
+def _fill_epoch(observed_at: Any) -> int | None:
+    if not observed_at:
+        return None
+    try:
+        d = datetime.fromisoformat(str(observed_at).replace('Z', '+00:00'))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=LOCAL_TZ)
+        return int(d.timestamp())
+    except Exception:
+        return None
+
+
+def _logical_fill_exists(conn: sqlite3.Connection, fill: Dict[str, Any]) -> bool:
+    """True if a twin fill already exists (same broker/symbol/side/qty/price/time ±1s)."""
+    epoch = _fill_epoch(fill.get('observed_at'))
+    if epoch is None:
+        return False
+    broker = str(fill.get('broker') or '')
+    symbol = str(fill.get('symbol') or '')
+    side = str(fill.get('side') or '')
+    try:
+        qty = float(fill.get('qty') or 0)
+        price = float(fill.get('price') or 0)
+    except Exception:
+        return False
+    fill_id = str(fill.get('fill_id') or '')
+    for row in conn.execute(
+        '''SELECT fill_id, observed_at FROM fills
+           WHERE broker=? AND symbol=? AND side=?
+             AND abs(qty - ?) < 1e-6 AND abs(price - ?) < 1e-9''',
+        (broker, symbol, side, qty, price),
+    ):
+        if str(row['fill_id']) == fill_id:
+            continue
+        other = _fill_epoch(row['observed_at'])
+        if other is not None and abs(other - epoch) <= 1:
+            return True
+    return False
 
 
 def _get_sync_state(conn: sqlite3.Connection, broker: str) -> Dict[str, Any]:
@@ -1491,7 +1535,7 @@ def sync_exchange_income(broker: str, symbol: str = '', lookback_hours: int = 72
             end_ts = int(_time.time() * 1000)
             start_ts = end_ts - lookback_hours * 60 * 60 * 1000
 
-            for income_type in ('REALIZED_PNL', 'TRADING_FEE'):
+            for income_type in ('REALIZED_PNL', 'TRADING_FEE', 'FUNDING_FEE', 'INSURANCE_CLEAR'):
                 payload = client.get_income(symbol=symbol, income_type=income_type, start_time=start_ts, end_time=end_ts, limit=1000)
                 data = (payload or {}).get('data') or []
                 if isinstance(data, dict):
@@ -2114,6 +2158,21 @@ def _insert_fill(conn: sqlite3.Connection, fill: Dict[str, Any]) -> bool:
     return inserted
 
 
+def _hedge_position_side(fill: Dict[str, Any]) -> str:
+    """LONG/SHORT from BingX fill payload (empty = one-way / netting)."""
+    try:
+        raw = fill.get('raw_json') or '{}'
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if isinstance(raw, dict):
+            ps = str(raw.get('positionSide') or '').upper()
+            if ps in ('LONG', 'SHORT'):
+                return ps
+    except Exception:
+        pass
+    return ''
+
+
 def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> None:
     fill_side = str(fill.get('side') or '').lower()
     if fill_side not in ('buy', 'sell'):
@@ -2122,6 +2181,7 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
     symbol = str(fill.get('symbol') or '')
     venue = str(fill.get('venue') or '')
     position_effect = str(fill.get('position_effect') or '').lower()
+    hedge = _hedge_position_side(fill)
     qty_remaining = Decimal(str(fill.get('qty') or 0))
     if qty_remaining <= 0:
         return
@@ -2132,15 +2192,34 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
     close_like_effects = {'close', 'open_or_close', 'reduce_long', 'reduce_short'}
     open_like_effects = {'open', 'open_or_close', 'add_long', 'add_short', 'reduce_long', 'reduce_short'}
 
+    # Hedge mode: LONG/SHORT are separate books — do not net them.
+    # LONG: sell closes longs only; buy opens/increases longs only.
+    # SHORT: buy closes shorts only; sell opens/increases shorts only.
+    allow_close = position_effect in close_like_effects
+    allow_open = position_effect in open_like_effects
+    if hedge == 'LONG':
+        allow_close = (fill_side == 'sell' and allow_close)
+        allow_open = (fill_side == 'buy' and allow_open)
+        if fill_side == 'buy':
+            opposite_side_for_close = 'buy'  # unused
+        else:
+            opposite_side_for_close = 'buy'  # sell closes long lots
+    elif hedge == 'SHORT':
+        allow_close = (fill_side == 'buy' and allow_close)
+        allow_open = (fill_side == 'sell' and allow_open)
+        opposite_side_for_close = 'sell'  # buy closes short lots
+    else:
+        opposite_side_for_close = opposite_side
+
     rows = []
-    if position_effect in close_like_effects:
+    if allow_close:
         rows = conn.execute(
             '''
             SELECT * FROM open_lots
             WHERE broker=? AND symbol=? AND venue=? AND side=? AND remaining_qty > 0
             ORDER BY opened_at, lot_id
             ''',
-            (broker, symbol, venue, opposite_side),
+            (broker, symbol, venue, opposite_side_for_close),
         ).fetchall()
 
     if rows:
@@ -2216,7 +2295,7 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
             qty_remaining -= matched_qty
             fill_commission_remaining -= exit_commission_alloc
 
-    if qty_remaining > 0 and position_effect in open_like_effects:
+    if qty_remaining > 0 and allow_open:
         lot_id = f"lot:{fill['fill_id']}"
         conn.execute(
             '''
