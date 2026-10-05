@@ -1801,34 +1801,45 @@ def _rebuild_all_locked(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def _overlay_bingx_realized_pnl(conn: sqlite3.Connection) -> int:
-    """Set BingX round_trip net_pnl from REALIZED_PNL income (exchange cash truth).
+    """Set BingX RT net/gross/commission from REALIZED_PNL + TRADING_FEE income.
 
-    Matches same symbol + observed_at within 3s of closed_at.
+    Cash truth from exchange: net = REALIZED_PNL, fee = TRADING_FEE at same ts,
+    gross = net - fee (signed fee) so display is always net = gross + fee.
     """
+    def _epoch(s: Any) -> int | None:
+        return _fill_epoch(s)
+
     try:
-        incomes = conn.execute(
+        realized_rows = conn.execute(
             """SELECT symbol, income, observed_at FROM exchange_income
                WHERE broker='bingx' AND income_type='REALIZED_PNL'
                  AND observed_at IS NOT NULL AND observed_at != ''"""
         ).fetchall()
+        fee_rows = conn.execute(
+            """SELECT symbol, income, observed_at FROM exchange_income
+               WHERE broker='bingx' AND income_type='TRADING_FEE'
+                 AND observed_at IS NOT NULL AND observed_at != ''"""
+        ).fetchall()
     except Exception:
         return 0
-    if not incomes:
+    if not realized_rows:
         return 0
 
-    def _epoch(s: Any) -> int | None:
-        return _fill_epoch(s)
+    def _by_symbol(rows) -> Dict[str, List[tuple]]:
+        out: Dict[str, List[tuple]] = {}
+        for row in rows:
+            e = _epoch(row['observed_at'])
+            if e is None:
+                continue
+            out.setdefault(str(row['symbol'] or ''), []).append((e, float(row['income'] or 0.0)))
+        return out
 
-    by_sym: Dict[str, List[tuple]] = {}
-    for row in incomes:
-        e = _epoch(row['observed_at'])
-        if e is None:
-            continue
-        by_sym.setdefault(str(row['symbol'] or ''), []).append((e, float(row['income'] or 0.0)))
+    realized_by_sym = _by_symbol(realized_rows)
+    fee_by_sym = _by_symbol(fee_rows)
 
     overlaid = 0
     rts = conn.execute(
-        """SELECT round_trip_id, symbol, closed_at FROM round_trips
+        """SELECT round_trip_id, symbol, closed_at, commission_total FROM round_trips
            WHERE broker='bingx' AND symbol IS NOT NULL AND symbol != ''"""
     ).fetchall()
     updates = []
@@ -1837,14 +1848,27 @@ def _overlay_bingx_realized_pnl(conn: sqlite3.Connection) -> int:
         if closed_e is None:
             continue
         symbol = str(rt['symbol'] or '')
-        for inc_e, inc_income in by_sym.get(symbol, []):
+        net_val = None
+        for inc_e, inc_income in realized_by_sym.get(symbol, []):
             if abs(inc_e - closed_e) <= 3:
-                updates.append((float(inc_income), str(rt['round_trip_id'])))
+                net_val = float(inc_income)
                 break
-    for income, rt_id in updates:
+        if net_val is None:
+            continue
+        fee_val = None
+        matched_fees = [f for fe, f in fee_by_sym.get(symbol, []) if abs(fe - closed_e) <= 3]
+        if matched_fees:
+            fee_val = sum(matched_fees)
+        else:
+            fee_val = float(rt['commission_total'] or 0.0)
+        # net = gross + fee  (fee is signed negative cost)
+        # gross = net - fee
+        gross_val = net_val - fee_val
+        updates.append((gross_val, fee_val, net_val, str(rt['round_trip_id'])))
+    for gross, fee, net, rt_id in updates:
         conn.execute(
-            'UPDATE round_trips SET net_pnl=? WHERE round_trip_id=?',
-            (income, rt_id),
+            'UPDATE round_trips SET gross_pnl=?, commission_total=?, net_pnl=? WHERE round_trip_id=?',
+            (gross, fee, net, rt_id),
         )
         overlaid += 1
     return overlaid
@@ -1874,6 +1898,7 @@ def _rebuild_day_locked(conn: sqlite3.Connection, day: str) -> Dict[str, Any]:
         if fill_day == day:
             _apply_fill_to_positions(conn, fill)
             day_count += 1
+    overlayed = _overlay_bingx_realized_pnl(conn)
     _refresh_counters(conn)
     counters = {
         str(row['counter_key']): int(row['counter_value'] or 0)
