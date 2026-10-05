@@ -869,13 +869,17 @@ def performance_stats(brokers: List[str] | None = None, years: List[str] | None 
                 label = 'DEPOSIT'
             elif income_type in ('WITHDRAW', 'WITHDRAWAL'):
                 label = 'WITHDRAW'
+            net_cash = round(float(r['s'] or 0.0), 6)
+            # Income lines have no separate gross/fee: fee=0, gross=net so gross+fee=net.
             by_income.append({
                 'name': label,
                 'broker': str(r['broker'] or ''),
                 'cashUnit': str(r['asset'] or ''),
                 'incomeType': income_type,
                 'trades': int(r['n'] or 0),
-                'netCash': round(float(r['s'] or 0.0), 6),
+                'grossCash': net_cash,
+                'commissionCash': 0.0,
+                'netCash': net_cash,
                 'from': str(r['mn'] or ''),
                 'to': str(r['mx'] or ''),
             })
@@ -1786,6 +1790,7 @@ def _rebuild_all_locked(conn: sqlite3.Connection) -> Dict[str, Any]:
         replayed_fills += 1
         _apply_fill_to_positions(conn, fill)
     overlayed = _overlay_bingx_realized_pnl(conn)
+    fee_norm = _normalize_round_trip_fees_and_daily(conn)
     _refresh_counters(conn)
     counters = {
         str(row['counter_key']): int(row['counter_value'] or 0)
@@ -1796,8 +1801,43 @@ def _rebuild_all_locked(conn: sqlite3.Connection) -> Dict[str, Any]:
         'replayedFills': replayed_fills,
         'recomputedEffects': recomputed_effects,
         'incomeOverlay': overlayed,
+        'feeNormalize': fee_norm,
         'counters': counters,
     }
+
+
+def _normalize_round_trip_fees_and_daily(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Unify commission sign (always <= 0), net = gross + fee, rebuild daily from RTs."""
+    conn.execute(
+        '''UPDATE round_trips SET commission_total = -ABS(commission_total)
+           WHERE commission_total > 0'''
+    )
+    conn.execute(
+        '''UPDATE round_trips SET net_pnl = gross_pnl + commission_total'''
+    )
+    conn.execute('DELETE FROM daily_trade_stats')
+    rows = conn.execute(
+        '''SELECT broker, symbol, venue, closed_at, entry_qty, gross_pnl, commission_total, net_pnl
+           FROM round_trips'''
+    ).fetchall()
+    for r in rows:
+        qty = abs(float(r['entry_qty'] or 0))
+        _update_daily_trade_stats(
+            conn,
+            str(r['closed_at'] or ''),
+            str(r['broker'] or ''),
+            str(r['symbol'] or ''),
+            str(r['venue'] or ''),
+            Decimal(str(qty)),
+            Decimal(str(r['gross_pnl'] or 0)),
+            Decimal(str(r['commission_total'] or 0)),
+            Decimal(str(r['net_pnl'] or 0)),
+        )
+    bad = conn.execute(
+        '''SELECT COUNT(*) FROM round_trips
+           WHERE abs(gross_pnl + commission_total - net_pnl) > 1e-4'''
+    ).fetchone()[0]
+    return {'rtMismatches': int(bad or 0), 'dailyRows': int(conn.execute('SELECT COUNT(*) FROM daily_trade_stats').fetchone()[0] or 0)}
 
 
 def _overlay_bingx_realized_pnl(conn: sqlite3.Connection) -> int:
@@ -1899,6 +1939,7 @@ def _rebuild_day_locked(conn: sqlite3.Connection, day: str) -> Dict[str, Any]:
             _apply_fill_to_positions(conn, fill)
             day_count += 1
     overlayed = _overlay_bingx_realized_pnl(conn)
+    fee_norm = _normalize_round_trip_fees_and_daily(conn)
     _refresh_counters(conn)
     counters = {
         str(row['counter_key']): int(row['counter_value'] or 0)
@@ -1910,6 +1951,8 @@ def _rebuild_day_locked(conn: sqlite3.Connection, day: str) -> Dict[str, Any]:
         'seedFillsBeforeDay': pre_day_count,
         'replayedDayFills': day_count,
         'recomputedEffects': recomputed_effects,
+        'incomeOverlay': overlayed,
+        'feeNormalize': fee_norm,
         'counters': counters,
     }
 
@@ -2358,7 +2401,9 @@ def _apply_fill_to_positions(conn: sqlite3.Connection, fill: Dict[str, Any]) -> 
                 gross_pnl = (avg_entry_price - price) * matched_qty
                 direction = 'short'
             commission_total = entry_commission_alloc + exit_commission_alloc
-            net_pnl = gross_pnl - commission_total
+            # Store fee as signed cost (always <= 0). net = gross + fee.
+            commission_total = -abs(commission_total) if commission_total != 0 else Decimal('0')
+            net_pnl = gross_pnl + commission_total
             earliest_open = min(str(r['opened_at'] or '') for r in rows)
             round_trip_id = _round_trip_id(f"avg:{broker}:{symbol}", fill['fill_id'], matched_qty)
             holding_time_sec = _holding_seconds(earliest_open, str(fill.get('observed_at') or ''))
