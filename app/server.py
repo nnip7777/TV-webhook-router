@@ -1356,7 +1356,7 @@ button[disabled]{opacity:.65;cursor:wait}
 <label style='cursor:pointer;'><input type='checkbox' class='broker-filter' value='bingx' checked onchange='reloadStats()'> bingx</label>
 <span class='muted'>Годы:</span><span id='yearFilters' class='muted'>…</span>
 <span class='muted' id='perfFilterNote'></span></div>
-<div id='perfmeta' class='grid' style='margin-bottom:12px;'></div><h4>По валютам / брокерам (cash)</h4><div id='perfUnits' class='grid' style='margin-bottom:12px;'></div><h4>YTD <span id='ytdYear' class='muted'></span></h4><div id='perfYtd' class='grid' style='margin-bottom:12px;'></div><h4>По годам</h4><div id='perfByYear'></div><h4>По инструментам (итог)</h4><div id='perfInstrument'></div><h4>По стратегиям</h4><div id='perfStrategy'></div><h4>По каналу (tv / manual / quick)</h4><div id='perfChannel'></div><h4>По брокерам</h4><div id='perfBroker'></div><h4>По направлению</h4><div id='perfDirection'></div></div>
+<div id='perfmeta' class='grid' style='margin-bottom:12px;'></div><h4>По валютам / брокерам (cash)</h4><div id='perfUnits' class='grid' style='margin-bottom:12px;'></div><h4>YTD <span id='ytdYear' class='muted'></span></h4><div id='perfYtd' class='grid' style='margin-bottom:12px;'></div><h4>По годам</h4><div id='perfByYear'></div><h4>По инструментам (итог)</h4><div id='perfInstrument'></div><h4>По стратегиям</h4><div id='perfStrategy'></div><h4>По каналу (tv / manual / quick)</h4><div id='perfChannel'></div><h4>По доходам (income: funding / fees / deposit)</h4><div id='perfIncome'></div><h4>По брокерам</h4><div id='perfBroker'></div><h4>По направлению</h4><div id='perfDirection'></div></div>
 <div class='panel'><h3 style='margin-top:0;'>Последний сигнал / исполнение</h3><div id='latest' class='grid'></div></div>
 <div class='panel'><h3 style='margin-top:0;'>Последние fills</h3><div class='muted' style='margin-bottom:8px;'>`fill qty` показывает фактический размер исполнения. Для BingX swap он отображается кратко как `cts`, чтобы не дублировать длинное имя инструмента из колонки `symbol`. `request size` и `sizing basis` показывают, чем был задан размер сигнала, например `10 usdt` для open и `0.35 contracts` для close. Комиссия концептуально считается от notional (`qty × price`), но источником истины остаются фактические fee/income данные из API биржи.</div><div id='fills'></div></div>
 <div class='panel'><h3 style='margin-top:0;'>Последние close events</h3><div class='muted' style='margin-bottom:8px;'>Сводка по одному закрывающему signal. Если один close закрыл несколько старых lot-ов, здесь это будет одна строка с суммой.</div><div id='closeevents'></div></div>
@@ -1535,6 +1535,15 @@ async function loadPerformance(){
     document.getElementById('perfInstrument').innerHTML=renderTable(perfCols, data.byInstrument||[]);
     document.getElementById('perfStrategy').innerHTML=renderTable(perfCols, data.byStrategy||[]);
     document.getElementById('perfChannel').innerHTML=renderTable(perfCols, data.byChannel||[]);
+    document.getElementById('perfIncome').innerHTML=renderTable([
+      {key:'name',label:'type'},
+      {key:'broker',label:'broker'},
+      {key:'cashUnit',label:'asset'},
+      {key:'trades',label:'n',render:v=>fmtNum(v,0)},
+      {key:'netCash',label:'sum',render:(v,r)=>`<span class='${Number(v)>=0?'ok':'bad'}'>${fmtNum(v,6)} ${esc(r.cashUnit||'')}</span>`},
+      {key:'from',label:'from',render:v=>fmtTime(v)},
+      {key:'to',label:'to',render:v=>fmtTime(v)}
+    ], data.byIncome||[]);
     document.getElementById('perfBroker').innerHTML=renderTable(perfCols, data.byBroker||[]);
     document.getElementById('perfDirection').innerHTML=renderTable(perfCols, data.byDirection||[]);
   }catch(err){

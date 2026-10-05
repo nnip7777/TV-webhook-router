@@ -845,6 +845,44 @@ def performance_stats(brokers: List[str] | None = None, years: List[str] | None 
     by_day = [_split_name(b) for b in _unit_aware(rows, lambda r: r['trade_day'])]
     by_day.sort(key=lambda r: r['name'])
 
+    by_income: List[Dict[str, Any]] = []
+    try:
+        with _connect() as conn:
+            inc_rows = conn.execute(
+                '''
+                SELECT broker, income_type, asset,
+                       COUNT(*) AS n,
+                       SUM(income) AS s,
+                       MIN(observed_at) AS mn,
+                       MAX(observed_at) AS mx
+                FROM exchange_income
+                WHERE income_type IS NOT NULL AND income_type != ''
+                GROUP BY broker, income_type, asset
+                '''
+            ).fetchall()
+        for r in inc_rows:
+            income_type = str(r['income_type'] or '')
+            label = income_type
+            if income_type == 'FUNDING_FEE':
+                label = 'FUNDING'
+            elif income_type in ('DEPOSIT', 'DEPOSIT_WITHDRAW'):
+                label = 'DEPOSIT'
+            elif income_type in ('WITHDRAW', 'WITHDRAWAL'):
+                label = 'WITHDRAW'
+            by_income.append({
+                'name': label,
+                'broker': str(r['broker'] or ''),
+                'cashUnit': str(r['asset'] or ''),
+                'incomeType': income_type,
+                'trades': int(r['n'] or 0),
+                'netCash': round(float(r['s'] or 0.0), 6),
+                'from': str(r['mn'] or ''),
+                'to': str(r['mx'] or ''),
+            })
+        by_income.sort(key=lambda x: (x['name'], x['broker'], -(x['trades'] or 0)))
+    except Exception:
+        by_income = []
+
     open_lots_count = 0
     open_qty = 0.0
     try:
@@ -886,6 +924,7 @@ def performance_stats(brokers: List[str] | None = None, years: List[str] | None 
         'byBroker': by_broker,
         'byDirection': by_direction,
         'byDay': by_day,
+        'byIncome': by_income,
         'instrumentMeta': {'fetch': meta_note, 'calibrate': calib_note},
         'definitions': {
             'netCash': 'денежный P&L. BingX=USDT. Alor/Finam futures: пункты×cash_step − комиссия (RUB).',
@@ -1746,6 +1785,7 @@ def _rebuild_all_locked(conn: sqlite3.Connection) -> Dict[str, Any]:
             recomputed_effects += 1
         replayed_fills += 1
         _apply_fill_to_positions(conn, fill)
+    overlayed = _overlay_bingx_realized_pnl(conn)
     _refresh_counters(conn)
     counters = {
         str(row['counter_key']): int(row['counter_value'] or 0)
@@ -1755,8 +1795,59 @@ def _rebuild_all_locked(conn: sqlite3.Connection) -> Dict[str, Any]:
         'ok': True,
         'replayedFills': replayed_fills,
         'recomputedEffects': recomputed_effects,
+        'incomeOverlay': overlayed,
         'counters': counters,
     }
+
+
+def _overlay_bingx_realized_pnl(conn: sqlite3.Connection) -> int:
+    """Set BingX round_trip net_pnl from REALIZED_PNL income (exchange cash truth).
+
+    Matches same symbol + observed_at within 3s of closed_at.
+    """
+    try:
+        incomes = conn.execute(
+            """SELECT symbol, income, observed_at FROM exchange_income
+               WHERE broker='bingx' AND income_type='REALIZED_PNL'
+                 AND observed_at IS NOT NULL AND observed_at != ''"""
+        ).fetchall()
+    except Exception:
+        return 0
+    if not incomes:
+        return 0
+
+    def _epoch(s: Any) -> int | None:
+        return _fill_epoch(s)
+
+    by_sym: Dict[str, List[tuple]] = {}
+    for row in incomes:
+        e = _epoch(row['observed_at'])
+        if e is None:
+            continue
+        by_sym.setdefault(str(row['symbol'] or ''), []).append((e, float(row['income'] or 0.0)))
+
+    overlaid = 0
+    rts = conn.execute(
+        """SELECT round_trip_id, symbol, closed_at FROM round_trips
+           WHERE broker='bingx' AND symbol IS NOT NULL AND symbol != ''"""
+    ).fetchall()
+    updates = []
+    for rt in rts:
+        closed_e = _epoch(rt['closed_at'])
+        if closed_e is None:
+            continue
+        symbol = str(rt['symbol'] or '')
+        for inc_e, inc_income in by_sym.get(symbol, []):
+            if abs(inc_e - closed_e) <= 3:
+                updates.append((float(inc_income), str(rt['round_trip_id'])))
+                break
+    for income, rt_id in updates:
+        conn.execute(
+            'UPDATE round_trips SET net_pnl=? WHERE round_trip_id=?',
+            (income, rt_id),
+        )
+        overlaid += 1
+    return overlaid
 
 
 def _rebuild_day_locked(conn: sqlite3.Connection, day: str) -> Dict[str, Any]:
