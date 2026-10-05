@@ -1,3 +1,11 @@
+## 2026.10.05-001
+- Broker symbol lookup order: symbols already in routing first, then instruments.json catalog, then full exchange list (type-to-filter).
+- Telegram alerts on execution errors (notify was unreachable after main(); now called from job path).
+- BingX hedge positionSide: LONG/SHORT lots do not net against each other; dedupe logical twin fills.
+- BingX round-trips: net/gross/fee from REALIZED_PNL + TRADING_FEE; gas close 05-10 = +0.263104 USDT.
+- Unify fee sign (always <= 0); net = gross + fee on all brokers; daily_trade_stats rebuilt from round-trips after overlay.
+- Income table: FUNDING / DEPOSIT / WITHDRAW as separate lines (funding included in stats).
+
 ## 2026.10.02-001
 - Full Alor/Finam account trade sync + cash-unit performance stats (RUB/USDT split, years/YTD, broker+year filters).
 - BingX risk: target terminal `riskRate` (Risk field) = riskPct%; check adjust_isolated_margin responses with min-margin fallback.
