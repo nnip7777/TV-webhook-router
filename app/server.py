@@ -25,7 +25,18 @@ from finam_adapter import auth_check_sync as finam_auth_check_sync
 from schwab.client.base import BaseClient
 from schwab_adapter import SchwabBroker
 from bingx_adapter import _bingx_rows
-from execution import execute_route_sync
+from execution import (
+    RISK_SYNC_GROWTH_RATIO,
+    _bingx_account_available,
+    _bingx_api_ok,
+    _bingx_position_isolated,
+    _bingx_position_qty,
+    bingx_risk_pct_by_symbol,
+    execute_route_sync,
+    risk_sync_default_pct,
+    risk_sync_should_adjust,
+    risk_sync_target_isolated,
+)
 from analytics import analytics_overview, init_analytics_db, performance_stats, record_execution_analytics, rebuild_analytics, rebuild_analytics_today, sync_account_fills, sync_exchange_fills, sync_exchange_income
 from settings import (
     ALOR_API_BASE_URL,
@@ -50,6 +61,8 @@ from settings import (
     parse_env_file,
     reload_env,
     save_env_file,
+    env_bool,
+    env_int,
 )
 TEMPLATE_RE = re.compile(r'\{\{\s*([a-zA-Z0-9_\.]+)\s*\}\}')
 METRICS_CACHE: Dict[str, Any] = {
@@ -191,6 +204,10 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_BIND_INTERFACE', 'label': 'BingX bind interface (optional, e.g. bingx-egress)', 'section': 'bingx', 'type': 'text'},
     {'key': 'BINGX_SOURCE_KEY', 'label': 'BingX source key', 'section': 'bingx', 'type': 'text', 'default': 'BX-AI-SKILL'},
     {'key': 'BINGX_RECV_WINDOW', 'label': 'BingX recvWindow', 'section': 'bingx', 'type': 'text', 'default': '5000'},
+    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час после сделки = ордер не ставится. Сброс до ×1 при простоя ≥36ч или без истории сделок. Работает только при включённом чекбоксе smart-inc в ячейке (BingX, target-direction).'},
+    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска BingX', 'section': 'bingx', 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) всех открытых позиций BingX. Если риск вырос на 30% и более относительно цели — добавляется isolated margin, чтобы риск вернулся к цели. Цель: riskPct ячейки роутинга, а для позиций без ячейки — «default risk %». Маржа только добавляется, никогда не снимается. Изменения попадают в журнал, kind=risk-sync.'},
+    {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'type': 'int', 'default': '90', 'help': 'Как часто (в секундах) проверять риск открытых позиций BingX. 90 — как основная синхронизация сделок, 20 — как опрос метрик брокеров. Минимум 10. Применяется без перезапуска сервиса.'},
+    {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'type': 'float', 'default': '12', 'help': 'Целевой риск % для открытых позиций BingX, у которых в ячейке роутинга не задан riskPct. 0 = корректируются только позиции с настроенным riskPct в ячейке.'},
     {'key': 'ALOR_CONFIG_PATH', 'label': 'Alor config JSON path', 'section': 'alor', 'type': 'path'},
     {'key': 'ALOR_OAUTH_URL', 'label': 'Alor OAuth URL', 'section': 'alor', 'type': 'text'},
     {'key': 'ALOR_API_BASE_URL', 'label': 'Alor API base URL', 'section': 'alor', 'type': 'text'},
@@ -923,7 +940,31 @@ def _normalize_env_value(field: Dict[str, Any], raw_value: str, root_value: str)
             value = str(field.get('default', 'false')).strip()
         lowered = value.lower()
         return 'true' if lowered in ('1', 'true', 'yes', 'on') else 'false'
+    if field_type == 'int':
+        if not value:
+            return str(field.get('default', '')).strip()
+        try:
+            return str(int(value))
+        except Exception:
+            return str(field.get('default', '')).strip()
+    if field_type == 'float':
+        if not value:
+            return str(field.get('default', '')).strip()
+        try:
+            return str(float(value))
+        except Exception:
+            return str(field.get('default', '')).strip()
     return value
+
+
+def _settings_journal_mask(field: Dict[str, Any], value: str) -> str:
+    """Old/new value for the settings-save journal; secrets are masked."""
+    if not value:
+        return ''
+    key = str(field.get('key') or '').upper()
+    if field.get('type') == 'password' or any(token in key for token in ('SECRET', 'TOKEN', 'PASSWORD')):
+        return '***'
+    return str(value)
 
 
 def _render_env_input(field: Dict[str, Any], env_values: Dict[str, str], root_value: str) -> str:
@@ -938,7 +979,18 @@ def _render_env_input(field: Dict[str, Any], env_values: Dict[str, str], root_va
             value = str(field.get('default', 'false'))
         value = 'true' if str(value).strip().lower() in ('1', 'true', 'yes', 'on') else 'false'
     input_type = 'password' if field_type == 'password' else 'text'
-    return f"<label class='settings-field'><span>{html.escape(label)}</span><input class='mini-input' type='{input_type}' name='env|{html.escape(key)}' value='{html.escape(value)}'></label>"
+    help_html = f"<div class='help'>{html.escape(str(field.get('help')))}</div>" if field.get('help') else ''
+    if field_type == 'bool':
+        # A checkbox posts nothing when unchecked — /settings/save treats a
+        # missing bool key as 'false', so no hidden input is needed.
+        checked = ' checked' if value == 'true' else ''
+        return (
+            f"<label class='settings-field'><span>{html.escape(label)}</span>"
+            f"<span style='display:flex;align-items:center;gap:8px;'>"
+            f"<input type='checkbox' name='env|{html.escape(key)}' value='true'{checked}>"
+            f"</span>{help_html}</label>"
+        )
+    return f"<label class='settings-field'><span>{html.escape(label)}</span><input class='mini-input' type='{input_type}' name='env|{html.escape(key)}' value='{html.escape(value)}'>{help_html}</label>"
 
 
 def _is_admin_authenticated(headers) -> bool:
@@ -1857,7 +1909,7 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
     week_options = ''.join(f"<option value='{html.escape(v)}' {'selected' if week == v else ''}>{html.escape(v)}</option>" for v in week_values)
     broker_options = ''.join(f"<option value='{name}' {'selected' if broker == name else ''}>{name}</option>" for name in ['alor','bybit','bingx','finam','schwab'])
     status_options = ''.join(f"<option value='{name}' {'selected' if status == name else ''}>{name}</option>" for name in ['accepted','placed','executed','execution_error','partial_error','route_not_found','invalid_json','missing_fields','ok','error'])
-    kind_options = ''.join(f"<option value='{name}' {'selected' if kind == name else ''}>{name}</option>" for name in ['webhook','quick-order','settings-save','settings-sync','server-start'])
+    kind_options = ''.join(f"<option value='{name}' {'selected' if kind == name else ''}>{name}</option>" for name in ['webhook','quick-order','settings-save','settings-sync','risk-sync','server-start'])
     prev_link = f"/journal?week={html.escape(week)}&broker={html.escape(broker)}&ticker={html.escape(ticker)}&status={html.escape(status)}&kind={html.escape(kind)}&sort={html.escape(sort)}&page={page-1}" if page > 1 else ''
     next_link = f"/journal?week={html.escape(week)}&broker={html.escape(broker)}&ticker={html.escape(ticker)}&status={html.escape(status)}&kind={html.escape(kind)}&sort={html.escape(sort)}&page={page+1}" if end_idx < total else ''
     download_link = f"/journal/download?week={html.escape(week or _journal_week_key())}"
@@ -2271,6 +2323,8 @@ def _routing_details(route: Dict[str, Any]) -> str:
             piece += f" signalMode={signal_mode}"
         if qty_kind:
             piece += f" qtyKind={qty_kind}"
+        if destination.get('smartInc'):
+            piece += " smartInc"
         parts.append(piece)
     return ' | '.join(parts) if parts else 'no active destinations'
 
@@ -2333,6 +2387,7 @@ def _current_mapping(config: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, An
                     'qty': destination.get('qty', ''),
                     'qtyMultiplier': destination.get('qtyMultiplier', ''),
                     'riskPct': destination.get('riskPct', ''),
+                    'smartInc': bool(destination.get('smartInc')),
                     'limits': copy.deepcopy(destination.get('limits', {})),
                 }
     return mapping
@@ -2422,6 +2477,9 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
                 destination['marginType'] = 'ISOLATED'
         except Exception:
             pass
+
+    if broker_name == 'bingx' and options.get('smartInc'):
+        destination['smartInc'] = True
 
     qty_raw = str(options.get('qty', '')).strip()
     if qty_raw:
@@ -3334,6 +3392,155 @@ def _trade_sync_loop() -> None:
         time.sleep(TRADE_SYNC_INTERVAL_SECONDS)
 
 
+def _bingx_risk_sync_once() -> None:
+    """Check risk of every open BingX position; add margin when it grew ≥30% over target."""
+    config = load_config()
+    bingx_cfg = (config.get('brokers', {}).get('bingx', {}) or {}).get('defaultDestination', {}) or {}
+    if bingx_cfg.get('dryRun'):
+        return
+    targets = bingx_risk_pct_by_symbol(config)
+    default_pct = risk_sync_default_pct()
+    if not targets and default_pct <= 0:
+        return
+    client = BingXBroker(testnet=bool(bingx_cfg.get('testnet', False)))
+    payload = client.get_positions()
+    rows = payload.get('data') or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    needed = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get('symbol') or '').strip()
+        if not symbol or _bingx_position_qty(row) <= 0:
+            continue
+        target_pct = targets.get(symbol.replace('-', '').upper()) or default_pct
+        if target_pct <= 0:
+            continue
+        try:
+            current_rr = float(row.get('riskRate') or 0)
+        except Exception:
+            current_rr = 0.0
+        current_pct = current_rr * 100.0
+        if not risk_sync_should_adjust(current_pct, target_pct):
+            continue
+        needed.append((row, symbol, target_pct, current_rr, current_pct))
+    if not needed:
+        return
+    balance = client.get_balance()
+    available = _bingx_account_available(balance)
+    for row, symbol, target_pct, current_rr, current_pct in needed:
+        position_side = str(row.get('positionSide') or row.get('side') or 'BOTH').upper()
+        isolated = _bingx_position_isolated(row)
+        qty = _bingx_position_qty(row)
+        mark_price = 0.0
+        for key in ('markPrice', 'lastPrice', 'entryPrice'):
+            raw_price = row.get(key)
+            if raw_price in (None, ''):
+                continue
+            try:
+                mark_price = abs(float(raw_price))
+                break
+            except Exception:
+                continue
+        notional = mark_price * qty
+        target_margin = risk_sync_target_isolated(current_rr, isolated, notional, target_pct)
+        delta = target_margin - isolated
+        details = (
+            f"risk {current_pct:.6g}% → target {target_pct:.6g}% (trigger ≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}%)"
+            f" | margin {isolated:.8g} → target {target_margin:.8g} | positionSide={position_side}"
+            f" | notional={notional:.8g} available={available:.8g}"
+        )
+        if target_margin <= 0 or delta <= 1e-8:
+            append_journal({
+                'time': _utcnow_iso(),
+                'kind': 'risk-sync',
+                'ticker': symbol,
+                'side': position_side,
+                'qty': '',
+                'brokers': ['bingx'],
+                'status': 'error',
+                'details': details + ' | skip=target_not_computable',
+            })
+            continue
+        if available <= 1e-8:
+            append_journal({
+                'time': _utcnow_iso(),
+                'kind': 'risk-sync',
+                'ticker': symbol,
+                'side': position_side,
+                'qty': '',
+                'brokers': ['bingx'],
+                'status': 'error',
+                'details': details + ' | skip=insufficient_available_balance',
+            })
+            continue
+        add = min(delta, available)
+        try:
+            resp = client.adjust_isolated_margin(symbol, position_side, add, direction_type=1)
+        except Exception as exc:
+            append_journal({
+                'time': _utcnow_iso(),
+                'kind': 'risk-sync',
+                'ticker': symbol,
+                'side': position_side,
+                'qty': '',
+                'brokers': ['bingx'],
+                'status': 'error',
+                'details': details + f' | add={add:.8g} | error={exc}',
+            })
+            continue
+        ok = _bingx_api_ok(resp)
+        api_code = resp.get('code') if isinstance(resp, dict) else None
+        api_msg = str(resp.get('msg') or '') if isinstance(resp, dict) else str(resp)
+        after_pct = None
+        try:
+            verify = client.get_positions(symbol)
+            vrows = verify.get('data') or []
+            if isinstance(vrows, dict):
+                vrows = [vrows]
+            for v in vrows:
+                if not isinstance(v, dict):
+                    continue
+                if str(v.get('positionSide') or v.get('side') or 'BOTH').upper() != position_side:
+                    continue
+                try:
+                    after_pct = float(v.get('riskRate') or 0) * 100.0
+                except Exception:
+                    after_pct = None
+                break
+        except Exception:
+            after_pct = None
+        append_journal({
+            'time': _utcnow_iso(),
+            'kind': 'risk-sync',
+            'ticker': symbol,
+            'side': position_side,
+            'qty': '',
+            'brokers': ['bingx'],
+            'status': 'ok' if ok else 'error',
+            'details': (
+                details
+                + f' | add={add:.8g} | apiCode={api_code}'
+                + (f' | apiMsg={api_msg}' if not ok and api_msg else '')
+                + (f' | riskAfter={after_pct:.6g}%' if after_pct is not None else '')
+            ),
+        })
+        if ok:
+            available = max(0.0, available - add)
+
+
+def _bingx_risk_sync_loop() -> None:
+    """Periodic risk check for open BingX positions (Settings → BingX)."""
+    while True:
+        if env_bool('RISK_SYNC_ENABLED', True):
+            try:
+                _bingx_risk_sync_once()
+            except Exception:
+                print(f'[bingx-risk-sync] {traceback.format_exc()}', flush=True)
+        time.sleep(max(10, env_int('RISK_SYNC_INTERVAL_SECONDS', 90)))
+
+
 async def _alor_get_access_token(refresh_token: str) -> str:
     import httpx
     base = ALOR_OAUTH_URL.rstrip('/')
@@ -3382,6 +3589,10 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
         bucket['qty'] = bucket.get('qty') or destination.get('qty', '')
         bucket['qtyMultiplier'] = bucket.get('qtyMultiplier') or destination.get('qtyMultiplier', '')
         bucket['riskPct'] = bucket.get('riskPct') or destination.get('riskPct', '')
+        # smartInc is a checkbox: an explicit form value (True/False) always wins,
+        # only a bucket created from a missing form field inherits the previous flag.
+        if 'smartInc' not in bucket:
+            bucket['smartInc'] = bool(destination.get('smartInc'))
         bucket['limits'] = bucket.get('limits') or copy.deepcopy(destination.get('limits', {}))
     return merged
 
@@ -3564,6 +3775,11 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             if limit_parts:
                 margin_hint = ((margin_hint + ' · ') if margin_hint else '') + ', '.join(limit_parts)
             risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name == 'bingx' else ''
+            smart_inc_checked = 'checked' if current.get('smartInc') else ''
+            smart_inc_line = (
+                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label><span class='muted'>qty × часы с последней сделки (сброс &gt;36ч)</span></div>"
+                if broker_name == 'bingx' else ''
+            )
             broker_cells.append(
                 f'<td class="broker-cell" data-broker-cell="{html.escape(broker_name)}" data-broker-symbol="{html.escape(margin_symbol)}">'
                 f"<div class='symbol-line'><label class='checkline-inline'><input type='checkbox' name='map|{html.escape(ticker)}|{html.escape(broker_name)}' {is_checked}></label>"
@@ -3572,6 +3788,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<input autocomplete='off' class='mini-input position-inline {position_qty_class}' type='text' value='{html.escape(position_qty_value)}' placeholder='pos' readonly tabindex='-1'></div>"
                 f"<div class='quick-line'><button type='button' class='quick-btn buy-btn' data-quick-order data-side='buy' data-broker='{html.escape(broker_name)}'>buy</button><input autocomplete='off' class='mini-input quick-qty {order_qty_class}' data-base-qty value='{html.escape(order_qty_value or broker_default_qty or '1')}' type='text' name='qty|{html.escape(ticker)}|{html.escape(broker_name)}' value='{html.escape(order_qty_value or broker_default_qty or '1')}' placeholder='qty'><button type='button' class='quick-btn sell-btn' data-quick-order data-side='sell' data-broker='{html.escape(broker_name)}'>sell</button><button type='button' class='quick-btn book-btn' data-book-view data-broker='{html.escape(broker_name)}'>book</button><span class='cell-subhint'>{html.escape(margin_hint)}</span></div>"
                 f"{risk_line}"
+                f"{smart_inc_line}"
                 f"<input type='hidden' name='qtyMultiplier|{html.escape(ticker)}|{html.escape(broker_name)}' value=''>"
                 '</td>'
             )
@@ -4422,13 +4639,18 @@ def _process_webhook_job(job: Dict[str, Any]) -> None:
             dry_run = bool(dest.get('dryRun') or _result_is_dry_run(result_obj))
             if dry_run:
                 per_statuses.append('dry_run')
+            elif dest.get('skipped'):
+                per_statuses.append('skipped')
             elif err:
                 per_statuses.append('execution_error')
             else:
                 per_statuses.append('placed')
-        if per_statuses and all(status == 'placed' for status in per_statuses):
+        effective_statuses = [status for status in per_statuses if status != 'skipped']
+        if per_statuses and all(status == 'skipped' for status in per_statuses):
+            decision['status'] = 'skipped'
+        elif effective_statuses and all(status == 'placed' for status in effective_statuses):
             decision['status'] = 'placed'
-        elif per_statuses and all(status == 'dry_run' for status in per_statuses):
+        elif effective_statuses and all(status == 'dry_run' for status in effective_statuses):
             decision['status'] = 'dry_run'
         elif per_statuses and any(status == 'execution_error' for status in per_statuses):
             decision['status'] = 'partial_error'
@@ -4771,18 +4993,26 @@ class Handler(BaseHTTPRequestHandler):
             env_values = _ordered_env_values()
             root_input = form.get('env|WEBHOOK_ROUTER_ROOT', [env_values.get('WEBHOOK_ROUTER_ROOT', str(ROOT))])[0]
             changed_keys = []
+            changed_details = []
             for field in SETTINGS_FIELDS:
                 env_key = field['key']
                 section = str(field.get('section') or '')
                 if not _can_access_section(current_user, section):
                     continue
                 form_key = f'env|{env_key}'
-                if form_key not in form:
+                if form_key in form:
+                    raw_value = form.get(form_key, [''])[0]
+                elif field.get('type') == 'bool':
+                    raw_value = 'false'  # checkbox posts nothing when unchecked
+                else:
                     continue
-                raw_value = form.get(form_key, [''])[0]
                 new_value = _normalize_env_value(field, raw_value, root_input)
-                if env_values.get(env_key) != new_value:
+                old_value = env_values.get(env_key, '')
+                if old_value != new_value:
                     changed_keys.append(env_key)
+                    changed_details.append(
+                        f"{env_key}: '{_settings_journal_mask(field, old_value)}' → '{_settings_journal_mask(field, new_value)}'"
+                    )
                 env_values[env_key] = new_value
             save_env_file(env_values, ENV_PATH)
             reload_env()
@@ -4797,19 +5027,23 @@ class Handler(BaseHTTPRequestHandler):
             for field in SETTINGS_FIELDS:
                 env_key = field['key']
                 form_key = f'env|{env_key}'
-                if form_key not in form:
+                # Unchecked bools are absent from the form but still saved as 'false'.
+                if form_key not in form and field.get('type') != 'bool':
                     continue
                 expected = env_values.get(env_key, '')
                 actual = reread_env.get(env_key, '')
                 if actual != expected:
                     failed_keys.append(env_key)
+            details = '; '.join(changed_details)
+            if failed_keys:
+                details = (details + ' | ' if details else '') + f"save_verify_failed: {','.join(failed_keys)}"
             append_journal({
                 'time': _utcnow_iso(),
                 'kind': 'settings-save',
                 'status': 'error' if failed_keys else 'ok',
                 'brokers': [],
                 'changedKeys': changed_keys,
-                'details': '' if not failed_keys else f"save_verify_failed: {','.join(failed_keys)}",
+                'details': details,
                 'reloadApplied': True,
             })
             if failed_keys:
@@ -4914,6 +5148,7 @@ class Handler(BaseHTTPRequestHandler):
                     'qty': '',
                     'qtyMultiplier': '',
                     'riskPct': '',
+                    'smartInc': False,
                     'limits': {},
                 })
                 if field == 'map':
@@ -4928,6 +5163,8 @@ class Handler(BaseHTTPRequestHandler):
                     bucket['qtyMultiplier'] = form.get(key, [''])[0]
                 elif field == 'riskPct':
                     bucket['riskPct'] = form.get(key, [''])[0]
+                elif field == 'smartInc':
+                    bucket['smartInc'] = True
 
             target_ticker = form.get('saveTicker', [''])[0].strip()
             config = load_config()
@@ -5326,6 +5563,7 @@ def main():
         threading.Thread(target=_webhook_worker_loop, name=f'webhook-worker-{idx+1}', daemon=True).start()
     threading.Thread(target=_metrics_sync_loop, name='broker-metrics-sync', daemon=True).start()
     threading.Thread(target=_trade_sync_loop, name='broker-trade-sync', daemon=True).start()
+    threading.Thread(target=_bingx_risk_sync_loop, name='bingx-risk-sync', daemon=True).start()
     build = _build_summary()
     append_journal({
         'time': _utcnow_iso(),

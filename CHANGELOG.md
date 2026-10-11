@@ -1,3 +1,17 @@
+## 2026.10.11-001
+- Periodic BingX risk sync: every RISK_SYNC_INTERVAL_SECONDS (default 90s) check terminal riskRate of all open BingX positions; when risk grew ≥30% over the target, add isolated margin so risk returns to target (cell `riskPct` from routing, else `RISK_SYNC_DEFAULT_PCT`).
+- Margin is only ever added in this loop, never reduced; adjustments are journaled as `kind=risk-sync` (filterable on the Journal page); `dryRun` BingX config skips the loop.
+- New Settings → BingX fields: `RISK_SYNC_ENABLED` (checkbox, default on), `RISK_SYNC_INTERVAL_SECONDS` (default 90, min 10, applied without restart), `RISK_SYNC_DEFAULT_PCT` (default 12, 0 = only positions with a cell riskPct).
+- Settings page: `bool` fields now render as a real checkbox (unchecked saves `false`); settings-save journal records old → new values (secrets masked as `***`).
+
+## 2026.10.06-001
+- Smart-inc mode (BingX only): per-cell checkbox `smartInc` scales order size = cell qty × hours since last fill for that ticker on that exchange.
+- Hours are counted as whole clock-hour buckets: same clock hour after a fill → multiplier 0 → order is skipped entirely (variant 3, no close/open).
+- No fill history or gap ≥ 36h → multiplier 1 (fresh start); multiplier capped by SMART_INC_MAX_MULTIPLIER (Settings → BingX, default 36).
+- Applies to target-direction signals (2long/2short) only; reversal close stays full-size, same-direction adds are scaled too; pre-trade risk/margin checks use the scaled size.
+- Fill age source: `fills(broker,symbol,observed_at)` in trading_analytics.sqlite3; `request.smartInc` block logged for audit.
+- New settings field type `int` + per-field help text on the Settings page.
+
 ## 2026.10.05-001
 - Broker symbol lookup order: symbols already in routing first, then instruments.json catalog, then full exchange list (type-to-filter).
 - Telegram alerts on execution errors (notify was unreachable after main(); now called from job path).

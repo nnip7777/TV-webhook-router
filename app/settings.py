@@ -69,6 +69,16 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value in (None, ''):
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     value = str(os.getenv(name, '')).strip().lower()
     if not value:

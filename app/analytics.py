@@ -1347,6 +1347,36 @@ def _fill_epoch(observed_at: Any) -> int | None:
         return None
 
 
+def hours_since_last_fill(broker: str, symbol: str) -> float | None:
+    """Completed clock-hours between the last fill's hour bucket and now.
+
+    Returns None when there is no fill history at all.
+    Both timestamps are bucketed to whole hours first, so a fill and a signal
+    inside the same clock hour yield 0.0 (smart-inc: same-hour repeat = skip),
+    while the next clock hour yields 1.0 — raw elapsed time (e.g. 0.99h) would
+    wrongly report 0 for an hourly signal arriving right before the next hour.
+    observed_at mixes timezone offsets, so epochs are compared, not strings.
+    """
+    broker = str(broker or '').strip().lower()
+    symbol = str(symbol or '').strip()
+    if not broker or not symbol:
+        return None
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            'SELECT observed_at FROM fills WHERE broker=? AND symbol=?',
+            (broker, symbol),
+        ).fetchall()
+    finally:
+        conn.close()
+    epochs = [epoch for row in rows if (epoch := _fill_epoch(row['observed_at'])) is not None]
+    if not epochs:
+        return None
+    now = datetime.now(tz=LOCAL_TZ).timestamp()
+    last = max(epochs)
+    return float(max(0, int(now // 3600) - int(last // 3600)))
+
+
 def _logical_fill_exists(conn: sqlite3.Connection, fill: Dict[str, Any]) -> bool:
     """True if a twin fill already exists (same broker/symbol/side/qty/price/time ±1s)."""
     epoch = _fill_epoch(fill.get('observed_at'))

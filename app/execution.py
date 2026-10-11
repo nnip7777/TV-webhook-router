@@ -10,11 +10,100 @@ from decimal import Decimal, ROUND_UP
 from typing import Any, Dict, List
 from dataclasses import dataclass, field
 
+from analytics import hours_since_last_fill
 from bingx_adapter import BingXBroker
 from bybit_adapter import BybitBroker
 from finam_adapter import FinamBroker
 from schwab_adapter import SchwabBroker
-from settings import SMART_EXECUTOR_PATH
+from settings import SMART_EXECUTOR_PATH, env_float, env_int
+
+# smart-inc: no fill within this window (or no history at all) = fresh start, multiplier 1.
+SMART_INC_RESTART_HOURS = 36.0
+
+
+def smart_inc_max_multiplier() -> int:
+    """Potolok for the smart-inc multiplier from Settings (BingX section).
+
+    Read per call so a Settings save (reload_env updates os.environ) applies
+    without a server restart. Floor at 1: 0/invalid would mean "never trade".
+    """
+    return max(1, env_int('SMART_INC_MAX_MULTIPLIER', 36))
+
+
+def smart_inc_multiplier(hours: float | None) -> int:
+    """Multipler for smart-inc sizing from completed clock-hours since last fill.
+
+    None (no fill history) or a gap >= SMART_INC_RESTART_HOURS means a fresh
+    start → 1. Otherwise the hour count itself: 0 = another source already
+    traded this ticker in the current clock hour → caller must skip the order.
+    """
+    if hours is None or hours >= SMART_INC_RESTART_HOURS:
+        return 1
+    return min(smart_inc_max_multiplier(), max(0, int(hours)))
+
+
+# Periodic BingX risk sync: correct margin only once terminal risk grew
+# by this relative amount over the target (avoids micro-adjusting every cycle).
+RISK_SYNC_GROWTH_RATIO = 1.30
+
+
+def risk_sync_default_pct() -> float:
+    """Target risk % for open BingX positions without a routing-cell riskPct.
+
+    Read per call so a Settings save applies without restart. Missing key →
+    field default 12; <=0 (explicit 0) → 0.0 = such positions are untouched.
+    """
+    value = env_float('RISK_SYNC_DEFAULT_PCT', 12.0)
+    return value if value > 0 else 0.0
+
+
+def risk_sync_should_adjust(current_risk_pct: float, target_pct: float) -> bool:
+    """True when the terminal Risk field grew to target × RISK_SYNC_GROWTH_RATIO."""
+    if target_pct <= 0 or current_risk_pct <= 0:
+        return False
+    # epsilon: 12.0 * 1.3 == 15.600000000000001, exact-threshold must still fire
+    return current_risk_pct + 1e-9 >= target_pct * RISK_SYNC_GROWTH_RATIO
+
+
+def risk_sync_target_isolated(current_risk_rate: float, current_isolated: float, notional: float, target_pct: float) -> float:
+    """Isolated margin so terminal riskRate == target_pct% (maintenance conserved).
+
+    maintenance ≈ current riskRate × current isolated (verified on live
+    position); fallback 0.3% × notional when riskRate/isolated unavailable.
+    """
+    if target_pct <= 0:
+        return 0.0
+    maintenance = 0.0
+    if current_risk_rate > 0 and current_isolated > 0:
+        maintenance = current_risk_rate * current_isolated
+    elif notional > 0:
+        maintenance = 0.003 * abs(notional)
+    if maintenance <= 0:
+        return 0.0
+    return maintenance / (float(target_pct) / 100.0)
+
+
+def bingx_risk_pct_by_symbol(config: Dict[str, Any]) -> Dict[str, float]:
+    """BingX routing-cell riskPct keyed by normalized exchange symbol."""
+    targets: Dict[str, float] = {}
+    for route in (config or {}).get('routes') or []:
+        if not isinstance(route, dict):
+            continue
+        for dest in route.get('destinations') or []:
+            if not isinstance(dest, dict):
+                continue
+            if str(dest.get('broker') or '').strip().lower() != 'bingx':
+                continue
+            symbol = str(dest.get('symbol') or '').strip()
+            if not symbol:
+                continue
+            try:
+                pct = float(str(dest.get('riskPct') or '').replace('%', '').strip())
+            except Exception:
+                continue
+            if pct > 0:
+                targets[symbol.replace('-', '').upper()] = pct
+    return targets
 
 
 @dataclass
@@ -970,6 +1059,27 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             quantity = payload.get('qty')
         qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'usdt').lower()
     open_qty_kind = str(destination.get('openQtyKind') or qty_kind or 'usdt').lower()
+    smart_inc_applied = None
+    smart_inc_skip = False
+    if destination.get('smartInc') and signal_mode == 'target-direction':
+        try:
+            base_qty = float(quantity)
+        except (TypeError, ValueError):
+            base_qty = None
+        if base_qty is not None:
+            hours = hours_since_last_fill(broker, symbol)
+            multiplier = smart_inc_multiplier(hours)
+            if multiplier == 0:
+                smart_inc_skip = True
+            else:
+                scaled = base_qty * multiplier
+                quantity = int(scaled) if float(scaled).is_integer() else scaled
+            smart_inc_applied = {
+                'baseQty': base_qty,
+                'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                'multiplier': multiplier,
+                'qty': quantity,
+            }
     category = destination.get('category', 'swap')
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
     reduce_only = destination.get('reduceOnly') if 'reduceOnly' in destination else payload.get('reduceOnly')
@@ -1001,6 +1111,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'stage': 'init',
         'stageTrace': ['init'],
     }
+    if smart_inc_applied is not None:
+        request_payload['smartInc'] = smart_inc_applied
     if bingx_hedged_mode is not None:
         request_payload['hedgedMode'] = bingx_hedged_mode
     if reduce_only is not None:
@@ -1018,6 +1130,26 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         trace = request_payload.setdefault('stageTrace', [])
         if not trace or trace[-1] != name:
             trace.append(name)
+
+    if smart_inc_skip:
+        # Same clock hour already traded for this ticker: skip completely —
+        # no close, no open (variant 3). Repeats would only inflate sum
+        # without moving the position's average price; the multiplier is
+        # what pulls the entry price toward the current one now.
+        _set_stage('smart_inc_skip')
+        return {
+            'broker': broker,
+            'symbol': symbol,
+            'category': category,
+            'qty': quantity,
+            'request': request_payload,
+            'skipped': True,
+            'results': {
+                'skipped': True,
+                'reason': 'smart_inc_same_hour',
+                'smartInc': smart_inc_applied,
+            },
+        }
 
     if execution_mode == 'market':
         error = 'Only limit orders are supported by BingX broker'
