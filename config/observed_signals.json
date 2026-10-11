@@ -149,7 +149,7 @@
     "NG2.6BS6@RTSX": {
       "sourceTicker": "NG2.6BS6@RTSX",
       "firstSeen": "2026-06-20T16:21:51.382730Z",
-      "lastSeen": "2026-07-05T08:44:38.912383Z",
+      "lastSeen": "2026-07-28T21:10:58.711154Z",
       "count": 0,
       "sides": [
         "buy"
@@ -157,7 +157,7 @@
       "lastPayload": {
         "sourceTicker": "NG2.6BS6@RTSX",
         "side": "buy",
-        "qty": 4.0,
+        "qty": 0,
         "source": "broker-sync",
         "broker": "finam"
       }
@@ -194,11 +194,12 @@
     "NATURALGASNGUSDT.P": {
       "sourceTicker": "NATURALGASNGUSDT.P",
       "firstSeen": "2026-06-22T00:00:23.058863Z",
-      "lastSeen": "2026-07-03T09:00:11.831719Z",
-      "count": 15,
+      "lastSeen": "2026-10-09T17:38:02.469501Z",
+      "count": 167,
       "sides": [
         "2short",
-        "2long"
+        "2long",
+        "buy"
       ],
       "lastPayload": {
         "sourceTicker": "NATURALGASNGUSDT.P",
@@ -209,22 +210,22 @@
     "NG1!": {
       "sourceTicker": "NG1!",
       "firstSeen": "2026-06-22T01:20:06.143702Z",
-      "lastSeen": "2026-07-03T07:40:09.363327Z",
-      "count": 51,
+      "lastSeen": "2026-10-09T10:00:33.596736Z",
+      "count": 367,
       "sides": [
         "2short",
         "2long"
       ],
       "lastPayload": {
         "sourceTicker": "NG1!",
-        "side": "2short",
+        "side": "2long",
         "qty": 1
       }
     },
     "NG-7.26M280726PA2.6": {
       "sourceTicker": "NG-7.26M280726PA2.6",
       "firstSeen": "2026-06-22T06:59:46.656000Z",
-      "lastSeen": "2026-07-05T08:44:38.912373Z",
+      "lastSeen": "2026-07-28T16:00:15.728779Z",
       "count": 0,
       "sides": [
         "buy"
@@ -240,8 +241,8 @@
     "ES1!": {
       "sourceTicker": "ES1!",
       "firstSeen": "2026-06-23T11:00:05.771564Z",
-      "lastSeen": "2026-07-03T07:00:02.802524Z",
-      "count": 8,
+      "lastSeen": "2026-10-09T19:20:02.673111Z",
+      "count": 128,
       "sides": [
         "2long",
         "2short"
@@ -255,7 +256,7 @@
     "NGN6@RTSX": {
       "sourceTicker": "NGN6@RTSX",
       "firstSeen": "2026-06-23T16:44:20.202686Z",
-      "lastSeen": "2026-07-05T08:44:38.912393Z",
+      "lastSeen": "2026-07-27T21:11:48.563707Z",
       "count": 0,
       "sides": [
         "buy",
@@ -272,7 +273,7 @@
     "NG-7.26": {
       "sourceTicker": "NG-7.26",
       "firstSeen": "2026-06-23T16:45:44.743641Z",
-      "lastSeen": "2026-07-03T15:29:54.023739Z",
+      "lastSeen": "2026-07-22T18:47:10.902268Z",
       "count": 0,
       "sides": [
         "buy",
@@ -280,8 +281,8 @@
       ],
       "lastPayload": {
         "sourceTicker": "NG-7.26",
-        "side": "sell",
-        "qty": 2.0,
+        "side": "buy",
+        "qty": 1.0,
         "source": "broker-sync",
         "broker": "alor"
       }
@@ -289,8 +290,8 @@
     "GC1!": {
       "sourceTicker": "GC1!",
       "firstSeen": "2026-06-23T22:00:09.405652Z",
-      "lastSeen": "2026-07-03T04:00:22.673187Z",
-      "count": 9,
+      "lastSeen": "2026-10-09T18:02:00.944341Z",
+      "count": 80,
       "sides": [
         "2long",
         "2short"
@@ -304,7 +305,7 @@
     "FFN6@RTSX": {
       "sourceTicker": "FFN6@RTSX",
       "firstSeen": "2026-06-29T08:05:21.630920Z",
-      "lastSeen": "2026-07-05T08:44:38.912388Z",
+      "lastSeen": "2026-07-09T21:10:35.636410Z",
       "count": 0,
       "sides": [
         "buy",
@@ -313,7 +314,7 @@
       "lastPayload": {
         "sourceTicker": "FFN6@RTSX",
         "side": "buy",
-        "qty": 2.0,
+        "qty": 0,
         "source": "broker-sync",
         "broker": "finam"
       }
@@ -321,25 +322,26 @@
     "FF1!": {
       "sourceTicker": "FF1!",
       "firstSeen": "2026-06-30T09:00:51.270275Z",
-      "lastSeen": "2026-07-05T08:04:01.631085Z",
-      "count": 7,
+      "lastSeen": "2026-09-14T07:00:25.555040Z",
+      "count": 82,
       "sides": [
         "2short",
         "2long"
       ],
       "lastPayload": {
         "sourceTicker": "FF1!",
-        "side": "2long",
+        "side": "2short",
         "qty": 1
       }
     },
     "GER40": {
       "sourceTicker": "GER40",
       "firstSeen": "2026-07-03T06:00:07.314493Z",
-      "lastSeen": "2026-07-03T15:00:09.568646Z",
-      "count": 2,
+      "lastSeen": "2026-10-09T19:03:09.312896Z",
+      "count": 81,
       "sides": [
-        "2short"
+        "2short",
+        "2long"
       ],
       "lastPayload": {
         "sourceTicker": "GER40",
@@ -350,7 +352,7 @@
     "DXU6@RTSX": {
       "sourceTicker": "DXU6@RTSX",
       "firstSeen": "2026-07-03T08:23:00.861808Z",
-      "lastSeen": "2026-07-05T08:44:38.912397Z",
+      "lastSeen": "2026-09-10T21:12:11.977220Z",
       "count": 0,
       "sides": [
         "buy",
@@ -358,10 +360,273 @@
       ],
       "lastPayload": {
         "sourceTicker": "DXU6@RTSX",
+        "side": "buy",
+        "qty": 0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "TTF-7.26": {
+      "sourceTicker": "TTF-7.26",
+      "firstSeen": "2026-07-06T15:00:54.627263Z",
+      "lastSeen": "2026-07-13T06:05:59.290792Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "TTF-7.26",
+        "side": "sell",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "DAX-9.26": {
+      "sourceTicker": "DAX-9.26",
+      "firstSeen": "2026-07-06T19:48:37.870699Z",
+      "lastSeen": "2026-09-10T12:03:21.037238Z",
+      "count": 0,
+      "sides": [
+        "sell",
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "DAX-9.26",
+        "side": "sell",
+        "qty": 6.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "FFQ6@RTSX": {
+      "sourceTicker": "FFQ6@RTSX",
+      "firstSeen": "2026-07-22T18:55:38.507536Z",
+      "lastSeen": "2026-07-31T21:12:19.230949Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "FFQ6@RTSX",
+        "side": "buy",
+        "qty": 0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "TTF-8.26": {
+      "sourceTicker": "TTF-8.26",
+      "firstSeen": "2026-07-23T08:44:18.545118Z",
+      "lastSeen": "2026-07-31T05:01:17.105065Z",
+      "count": 0,
+      "sides": [
+        "sell",
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "TTF-8.26",
+        "side": "sell",
+        "qty": 2.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "NCCO7241NATGAS2USD-USDT": {
+      "sourceTicker": "NCCO7241NATGAS2USD-USDT",
+      "firstSeen": "2026-08-12T12:59:02.965626Z",
+      "lastSeen": "2026-10-11T09:53:28.654172Z",
+      "count": 0,
+      "sides": [
+        "sell",
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NCCO7241NATGAS2USD-USDT",
+        "side": "sell",
+        "qty": 67.343,
+        "source": "broker-sync",
+        "broker": "bingx"
+      }
+    },
+    "DXZ6@RTSX": {
+      "sourceTicker": "DXZ6@RTSX",
+      "firstSeen": "2026-09-10T12:07:52.720618Z",
+      "lastSeen": "2026-09-30T21:14:21.353106Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "DXZ6@RTSX",
+        "side": "buy",
+        "qty": 0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "FFV6@RTSX": {
+      "sourceTicker": "FFV6@RTSX",
+      "firstSeen": "2026-09-10T15:34:30.205339Z",
+      "lastSeen": "2026-09-28T21:15:14.602200Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "FFV6@RTSX",
+        "side": "buy",
+        "qty": 0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "TTF-10.26": {
+      "sourceTicker": "TTF-10.26",
+      "firstSeen": "2026-09-15T05:35:29.237351Z",
+      "lastSeen": "2026-09-25T09:01:16.578693Z",
+      "count": 0,
+      "sides": [
+        "sell",
+        "buy"
+      ],
+      "lastPayload": {
+        "sourceTicker": "TTF-10.26",
+        "side": "sell",
+        "qty": 1.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "FF2!": {
+      "sourceTicker": "FF2!",
+      "firstSeen": "2026-09-16T04:47:33.651524Z",
+      "lastSeen": "2026-10-09T15:02:49.859675Z",
+      "count": 27,
+      "sides": [
+        "buy",
+        "2long",
+        "2short"
+      ],
+      "lastPayload": {
+        "sourceTicker": "FF2!",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "DAX-12.26": {
+      "sourceTicker": "DAX-12.26",
+      "firstSeen": "2026-09-17T04:10:04.264567Z",
+      "lastSeen": "2026-09-30T15:04:16.433340Z",
+      "count": 0,
+      "sides": [
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "DAX-12.26",
+        "side": "sell",
+        "qty": 8.0,
+        "source": "broker-sync",
+        "broker": "alor"
+      }
+    },
+    "NATGASUSDT.P": {
+      "sourceTicker": "NATGASUSDT.P",
+      "firstSeen": "2026-09-21T12:00:34.355833Z",
+      "lastSeen": "2026-10-02T20:00:38.852704Z",
+      "count": 19,
+      "sides": [
+        "2long",
+        "buy",
+        "2short"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NATGASUSDT.P",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "GER40USDT.P": {
+      "sourceTicker": "GER40USDT.P",
+      "firstSeen": "2026-09-23T12:00:18.183077Z",
+      "lastSeen": "2026-10-08T08:00:38.329849Z",
+      "count": 4,
+      "sides": [
+        "2long"
+      ],
+      "lastPayload": {
+        "sourceTicker": "GER40USDT.P",
+        "side": "2long",
+        "qty": 1
+      }
+    },
+    "XAUTUSDT.P": {
+      "sourceTicker": "XAUTUSDT.P",
+      "firstSeen": "2026-09-28T04:00:18.404741Z",
+      "lastSeen": "2026-10-09T19:01:05.110923Z",
+      "count": 22,
+      "sides": [
+        "2long",
+        "2short"
+      ],
+      "lastPayload": {
+        "sourceTicker": "XAUTUSDT.P",
+        "side": "2short",
+        "qty": 1
+      }
+    },
+    "NCCOGOLD2USD-USDT": {
+      "sourceTicker": "NCCOGOLD2USD-USDT",
+      "firstSeen": "2026-09-28T06:17:32.878965Z",
+      "lastSeen": "2026-09-30T02:13:55.456686Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NCCOGOLD2USD-USDT",
+        "side": "sell",
+        "qty": 0.0119,
+        "source": "broker-sync",
+        "broker": "bingx"
+      }
+    },
+    "FFX6@RTSX": {
+      "sourceTicker": "FFX6@RTSX",
+      "firstSeen": "2026-09-30T15:10:18.150070Z",
+      "lastSeen": "2026-10-11T09:53:28.654180Z",
+      "count": 0,
+      "sides": [
+        "buy",
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "FFX6@RTSX",
+        "side": "sell",
+        "qty": 12.0,
+        "source": "broker-sync",
+        "broker": "finam"
+      }
+    },
+    "TTF-11.26": {
+      "sourceTicker": "TTF-11.26",
+      "firstSeen": "2026-09-30T15:12:49.519843Z",
+      "lastSeen": "2026-10-11T09:53:28.654160Z",
+      "count": 0,
+      "sides": [
+        "sell"
+      ],
+      "lastPayload": {
+        "sourceTicker": "TTF-11.26",
         "side": "sell",
         "qty": 5.0,
         "source": "broker-sync",
-        "broker": "finam"
+        "broker": "alor"
       }
     }
   }
