@@ -175,6 +175,9 @@ class BybitBroker:
     def get_api_info(self) -> Dict[str, Any]:
         return self._request('GET', '/v5/user/query-api')
 
+    def get_wallet_balance(self, account_type: str = 'UNIFIED') -> Dict[str, Any]:
+        return self._request('GET', '/v5/account/wallet-balance', params={'accountType': account_type})
+
     def get_positions(self, category: str = 'linear', symbol: Optional[str] = None, settle_coin: Optional[str] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {'category': category}
         if symbol:
@@ -182,6 +185,27 @@ class BybitBroker:
         elif settle_coin:
             params['settleCoin'] = settle_coin
         return self._request('GET', '/v5/position/list', params=params)
+
+    def add_margin(self, symbol: str, margin: Any, category: str = 'linear', position_idx: Optional[int] = None) -> Dict[str, Any]:
+        """Add isolated margin (POST /v5/position/add-margin). margin > 0 only."""
+        body: Dict[str, Any] = {
+            'category': category,
+            'symbol': symbol,
+            'margin': str(margin),
+        }
+        if position_idx is not None:
+            body['positionIdx'] = int(position_idx)
+        return self._request('POST', '/v5/position/add-margin', body=body)
+
+    def set_margin_mode(self, symbol: str, trade_mode: int = 1, position_idx: Optional[int] = None) -> Dict[str, Any]:
+        """trade_mode: 0=cross, 1=isolated (Bybit linear)."""
+        body: Dict[str, Any] = {
+            'symbol': symbol,
+            'tradeMode': int(trade_mode),
+        }
+        if position_idx is not None:
+            body['positionIdx'] = int(position_idx)
+        return self._request('POST', '/v5/position/set-margin-mode', body=body)
 
     def place_order(
         self,

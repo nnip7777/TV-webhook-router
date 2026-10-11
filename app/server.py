@@ -204,10 +204,10 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_BIND_INTERFACE', 'label': 'BingX bind interface (optional, e.g. bingx-egress)', 'section': 'bingx', 'type': 'text'},
     {'key': 'BINGX_SOURCE_KEY', 'label': 'BingX source key', 'section': 'bingx', 'type': 'text', 'default': 'BX-AI-SKILL'},
     {'key': 'BINGX_RECV_WINDOW', 'label': 'BingX recvWindow', 'section': 'bingx', 'type': 'text', 'default': '5000'},
-    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час после сделки = ордер не ставится. Сброс до ×1 при простоя ≥36ч или без истории сделок. Работает только при включённом чекбоксе smart-inc в ячейке (BingX, target-direction).'},
-    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска BingX', 'section': 'bingx', 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) всех открытых позиций BingX. Если риск вырос на 30% и более относительно цели — добавляется isolated margin, чтобы риск вернулся к цели. Цель: riskPct ячейки роутинга, а для позиций без ячейки — «default risk %». Маржа только добавляется, никогда не снимается. Изменения попадают в журнал, kind=risk-sync.'},
-    {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'type': 'int', 'default': '90', 'help': 'Как часто (в секундах) проверять риск открытых позиций BingX. 90 — как основная синхронизация сделок, 20 — как опрос метрик брокеров. Минимум 10. Применяется без перезапуска сервиса.'},
-    {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'type': 'float', 'default': '12', 'help': 'Целевой риск % для открытых позиций BingX, у которых в ячейке роутинга не задан riskPct. 0 = корректируются только позиции с настроенным riskPct в ячейке.'},
+    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час после сделки = ордер не ставится. Сброс до ×1 при простоя ≥36ч или без истории сделок. Работает при включённом чекбоксе smart-inc в ячейке (BingX и Bybit, target-direction).'},
+    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска BingX/Bybit', 'section': 'bingx', 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) открытых позиций BingX и Bybit. Если риск вырос на 30% и более относительно цели — добавляется isolated margin. Цель: riskPct ячейки роутинга, иначе «default risk %». Маржа только добавляется. Журнал kind=risk-sync.'},
+    {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск открытых позиций BingX/Bybit. Минимум 10. Применяется без перезапуска сервиса.'},
+    {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'type': 'float', 'default': '12', 'help': 'Целевой риск % для позиций BingX/Bybit без riskPct в ячейке. 0 = только позиции с настроенным riskPct.'},
     {'key': 'ALOR_CONFIG_PATH', 'label': 'Alor config JSON path', 'section': 'alor', 'type': 'path'},
     {'key': 'ALOR_OAUTH_URL', 'label': 'Alor OAuth URL', 'section': 'alor', 'type': 'text'},
     {'key': 'ALOR_API_BASE_URL', 'label': 'Alor API base URL', 'section': 'alor', 'type': 'text'},
@@ -3409,6 +3409,120 @@ def _trade_sync_loop() -> None:
         time.sleep(TRADE_SYNC_INTERVAL_SECONDS)
 
 
+def _bybit_risk_sync_once() -> None:
+    """Periodic risk check for open Bybit positions (add margin when risk ≥ target×1.3)."""
+    config = load_config()
+    bybit_cfg = (config.get('brokers', {}).get('bybit', {}) or {}).get('defaultDestination', {}) or {}
+    if bybit_cfg.get('dryRun'):
+        return
+    from execution import (
+        bingx_risk_pct_by_symbol,
+        risk_sync_default_pct,
+        risk_sync_should_adjust,
+        risk_sync_target_isolated,
+        _bybit_account_available,
+        _bybit_position_isolated,
+        _bybit_position_qty,
+        _bybit_position_risk_rate,
+        _bybit_position_notional,
+        _bybit_position_rows,
+    )
+    targets = bingx_risk_pct_by_symbol(config, broker='bybit')
+    default_pct = risk_sync_default_pct()
+    if not targets and default_pct <= 0:
+        return
+    client = BybitBroker(testnet=bool(bybit_cfg.get('testnet', False)))
+    payload = client.get_positions(category='linear', settle_coin='USDT')
+    needed = []
+    for row in _bybit_position_rows(payload):
+        symbol = str(row.get('symbol') or '').strip()
+        qty = _bybit_position_qty(row)
+        if not symbol or qty <= 0:
+            continue
+        target_pct = targets.get(symbol.replace('-', '').upper()) or default_pct
+        if target_pct <= 0:
+            continue
+        current_rr = _bybit_position_risk_rate(row)
+        current_pct = current_rr * 100.0
+        if not risk_sync_should_adjust(current_pct, target_pct):
+            continue
+        needed.append((row, symbol, target_pct, current_rr, current_pct, qty))
+    if not needed:
+        return
+    wallet = client.get_wallet_balance()
+    available = _bybit_account_available(wallet)
+    for row, symbol, target_pct, current_rr, current_pct, qty in needed:
+        position_side = str(row.get('side') or 'BOTH')
+        try:
+            position_idx = int(row.get('positionIdx') or 0)
+        except Exception:
+            position_idx = 0
+        isolated = _bybit_position_isolated(row)
+        notional = _bybit_position_notional(row)
+        target_margin = risk_sync_target_isolated(current_rr, isolated, notional, target_pct)
+        delta = target_margin - isolated
+        details = (
+            f"risk {current_pct:.6g}% → target {target_pct:.6g}% (trigger ≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}%)"
+            f" | margin {isolated:.8g} → target {target_margin:.8g} | positionSide={position_side}"
+            f" | notional={notional:.8g} available={available:.8g}"
+        )
+        if target_margin <= 0 or delta <= 1e-8:
+            append_journal({
+                'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
+                'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
+                'details': details + ' | skip=target_not_computable',
+            })
+            continue
+        if available <= 1e-8:
+            append_journal({
+                'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
+                'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
+                'details': details + ' | skip=insufficient_available_balance',
+            })
+            continue
+        add = min(delta, available)
+        try:
+            resp = client.add_margin(
+                symbol, add, category='linear',
+                position_idx=position_idx if position_idx else None,
+            )
+        except Exception as exc:
+            append_journal({
+                'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
+                'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
+                'details': details + f' | add={add:.8g} | error={exc}',
+            })
+            continue
+        ret = (resp or {}).get('retCode') if isinstance(resp, dict) else None
+        ok = ret in (None, 0, '0')
+        api_msg = str((resp or {}).get('retMsg') or '') if isinstance(resp, dict) else str(resp)
+        after_pct = None
+        try:
+            verify = client.get_positions(category='linear', symbol=symbol)
+            for v in _bybit_position_rows(verify):
+                if str(v.get('symbol') or '').upper() != symbol.upper():
+                    continue
+                if position_side in ('Buy', 'Sell', 'buy', 'sell') and str(v.get('side') or '').title() != position_side.title():
+                    continue
+                after_pct = _bybit_position_risk_rate(v) * 100.0
+                break
+        except Exception:
+            after_pct = None
+        append_journal({
+            'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
+            'side': position_side, 'qty': '', 'brokers': ['bybit'],
+            'status': 'ok' if ok else 'error',
+            'details': (
+                details
+                + f' | add={add:.8g} | apiCode={ret}'
+                + (f' | apiMsg={api_msg}' if not ok and api_msg else '')
+                + (f' | riskAfter={after_pct:.6g}%' if after_pct is not None else '')
+            ),
+        })
+        if ok:
+            available = max(0.0, available - add)
+
+
 def _bingx_risk_sync_once() -> None:
     """Check risk of every open BingX position; add margin when it grew ≥30% over target."""
     config = load_config()
@@ -3548,13 +3662,17 @@ def _bingx_risk_sync_once() -> None:
 
 
 def _bingx_risk_sync_loop() -> None:
-    """Periodic risk check for open BingX positions (Settings → BingX)."""
+    """Periodic risk check for open BingX + Bybit positions."""
     while True:
         if env_bool('RISK_SYNC_ENABLED', True):
             try:
                 _bingx_risk_sync_once()
             except Exception:
                 print(f'[bingx-risk-sync] {traceback.format_exc()}', flush=True)
+            try:
+                _bybit_risk_sync_once()
+            except Exception:
+                print(f'[bybit-risk-sync] {traceback.format_exc()}', flush=True)
         time.sleep(max(10, env_int('RISK_SYNC_INTERVAL_SECONDS', 90)))
 
 
@@ -3791,11 +3909,11 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 limit_parts.append(f"pxStep {limits.get('priceStep')}")
             if limit_parts:
                 margin_hint = ((margin_hint + ' · ') if margin_hint else '') + ', '.join(limit_parts)
-            risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name == 'bingx' else ''
+            risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name in ('bingx', 'bybit') else ''
             smart_inc_checked = 'checked' if current.get('smartInc') else ''
             smart_inc_line = (
                 f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label><span class='muted'>qty × часы с последней сделки (сброс &gt;36ч)</span></div>"
-                if broker_name == 'bingx' else ''
+                if broker_name in ('bingx', 'bybit') else ''
             )
             broker_cells.append(
                 f'<td class="broker-cell" data-broker-cell="{html.escape(broker_name)}" data-broker-symbol="{html.escape(margin_symbol)}">'
@@ -4606,27 +4724,60 @@ def _notify_telegram(text: str) -> None:
 
 
 def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -> None:
+    """Telegram informer for routing/execution failures (all brokers)."""
     status = str(decision.get('status') or '')
-    if status not in ('execution_error', 'partial_error', 'worker_error'):
+    error_statuses = (
+        'execution_error', 'partial_error', 'worker_error',
+        'route_not_found', 'invalid_json', 'missing_fields', 'error',
+    )
+    if status not in error_statuses:
         return
-    ticker = str(payload.get('sourceTicker') or '?')
+    ticker = str(payload.get('sourceTicker') or payload.get('ticker') or '?')
     side = str(payload.get('side') or '?')
     qty = payload.get('qty', '')
+    source = str(payload.get('source') or '')
     error = str(decision.get('error') or '')
     destinations = (decision.get('executionResult') or {}).get('destinations') or []
     details = []
+    brokers = set()
     for dest in destinations:
         err = str(dest.get('error') or _result_error_text(dest.get('results') or {}) or '')
         broker = str(dest.get('broker') or '?')
+        if broker and broker != '?':
+            brokers.add(broker)
         symbol = str(dest.get('symbol') or '')
-        if err:
+        if err and not str(dest.get('skipReason') or ''):
             details.append(f'{broker}:{symbol} — {err[:120]}')
+    if status == 'route_not_found':
+        lines = [
+            '🚫 <b>Route not found</b>',
+            f'{ticker} {side} qty={qty}' + (f' · src={source}' if source else ''),
+            'Нет настроенного роутинга для этого тикера — сигнал проигнорирован.',
+        ]
+        _notify_telegram('\n'.join(lines))
+        return
+    if status == 'invalid_json':
+        _notify_telegram(
+            '🚫 <b>Invalid JSON webhook</b>\n'
+            + str(decision.get('error') or decision.get('details') or '')[:200]
+        )
+        return
+    if status == 'missing_fields':
+        _notify_telegram(
+            '🚫 <b>Missing webhook fields</b>\n'
+            f'{ticker} {side} qty={qty}\n'
+            + str(decision.get('error') or decision.get('details') or '')[:200]
+        )
+        return
     if not error and not details and status != 'worker_error':
         return
+    title = 'Execution error' if status != 'worker_error' else 'Worker error'
     lines = [
-        '⚠️ <b>Execution error</b>',
-        f'{ticker} {side} qty={qty}',
+        f'⚠️ <b>{title}</b> ({status})',
+        f'{ticker} {side} qty={qty}' + (f' · src={source}' if source else ''),
     ]
+    if brokers:
+        lines.append('brokers: ' + ', '.join(sorted(brokers)))
     if error:
         lines.append(f'Error: {error[:200]}')
     if details:
@@ -5532,6 +5683,10 @@ class Handler(BaseHTTPRequestHandler):
                 'status': 'invalid_json',
                 'details': f"{str(e)} | raw={_short_text(raw_text)}",
             })
+            try:
+                _notify_telegram(f'🚫 <b>Invalid JSON webhook</b>\n{str(e)[:200]}\nraw={_short_text(raw_text, 180)}')
+            except Exception:
+                pass
             return self._json(400, {'error': 'invalid_json', 'details': str(e)})
 
         missing = [k for k in ['sourceTicker', 'side', 'qty'] if k not in payload]
@@ -5547,6 +5702,14 @@ class Handler(BaseHTTPRequestHandler):
                 'status': 'missing_fields',
                 'details': f"missing={','.join(missing)} | payload={_short_json(payload)}",
             })
+            try:
+                _notify_telegram(
+                    '🚫 <b>Missing webhook fields</b>\n'
+                    f"missing: {','.join(missing)}\n"
+                    f"payload={_short_json(payload, 180)}"
+                )
+            except Exception:
+                pass
             return self._json(400, {'error': 'missing_fields', 'missing': missing})
 
         register_observed_signal(payload)
@@ -5564,6 +5727,14 @@ class Handler(BaseHTTPRequestHandler):
                 'status': 'route_not_found',
                 'details': f"payload={_short_json(payload)}",
             })
+            try:
+                _notify_execution_error(payload, {
+                    'status': 'route_not_found',
+                    'error': 'no matching route',
+                    'payload': payload,
+                })
+            except Exception:
+                pass
             return self._json(404, {'error': 'route_not_found', 'message': 'Ticker observed and added to admin UI'})
 
         materialized = materialize_route(payload, route, config)
@@ -5582,7 +5753,7 @@ def main():
         threading.Thread(target=_webhook_worker_loop, name=f'webhook-worker-{idx+1}', daemon=True).start()
     threading.Thread(target=_metrics_sync_loop, name='broker-metrics-sync', daemon=True).start()
     threading.Thread(target=_trade_sync_loop, name='broker-trade-sync', daemon=True).start()
-    threading.Thread(target=_bingx_risk_sync_loop, name='bingx-risk-sync', daemon=True).start()
+    threading.Thread(target=_bingx_risk_sync_loop, name='risk-sync-bingx-bybit', daemon=True).start()
     build = _build_summary()
     append_journal({
         'time': _utcnow_iso(),

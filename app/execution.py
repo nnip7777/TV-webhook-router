@@ -83,8 +83,9 @@ def risk_sync_target_isolated(current_risk_rate: float, current_isolated: float,
     return maintenance / (float(target_pct) / 100.0)
 
 
-def bingx_risk_pct_by_symbol(config: Dict[str, Any]) -> Dict[str, float]:
-    """BingX routing-cell riskPct keyed by normalized exchange symbol."""
+def bingx_risk_pct_by_symbol(config: Dict[str, Any], broker: str = 'bingx') -> Dict[str, float]:
+    """Routing-cell riskPct for one broker, keyed by normalized exchange symbol."""
+    broker_l = str(broker or '').strip().lower()
     targets: Dict[str, float] = {}
     for route in (config or {}).get('routes') or []:
         if not isinstance(route, dict):
@@ -92,7 +93,7 @@ def bingx_risk_pct_by_symbol(config: Dict[str, Any]) -> Dict[str, float]:
         for dest in route.get('destinations') or []:
             if not isinstance(dest, dict):
                 continue
-            if str(dest.get('broker') or '').strip().lower() != 'bingx':
+            if str(dest.get('broker') or '').strip().lower() != broker_l:
                 continue
             symbol = str(dest.get('symbol') or '').strip()
             if not symbol:
@@ -243,10 +244,47 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
     quantity = destination.get('qty', payload.get('qty'))
     qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'contracts').lower()
+    if signal_mode == 'target-direction':
+        if quantity in (None, '') and payload.get('qty') not in (None, ''):
+            quantity = payload.get('qty')
+        qty_kind = str(destination.get('qtyKind') or payload.get('qtyKind') or 'usdt').lower()
     category = destination.get('category', 'linear')
     execution_mode = destination.get('executionMode', destination.get('mode', 'market'))
     reduce_only = bool(destination.get('reduceOnly', False))
     dry_run = bool(destination.get('dryRun', False) or payload.get('dryRun', False))
+
+    # smart-inc (same as BingX): qty × completed clock-hours since last fill.
+    smart_inc_applied = None
+    smart_inc_skip = False
+    if destination.get('smartInc') and signal_mode == 'target-direction':
+        try:
+            base_qty = float(quantity)
+        except (TypeError, ValueError):
+            base_qty = None
+        if base_qty is not None:
+            hours = hours_since_last_fill(broker, symbol)
+            multiplier = smart_inc_multiplier(hours)
+            if multiplier == 0:
+                smart_inc_skip = True
+            else:
+                scaled = base_qty * multiplier
+                quantity = int(scaled) if float(scaled).is_integer() else scaled
+            smart_inc_applied = {
+                'baseQty': base_qty,
+                'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                'multiplier': multiplier,
+                'qty': quantity,
+            }
+
+    risk_pct_raw = destination.get('riskPct') if 'riskPct' in destination else payload.get('riskPct')
+    risk_pct = None
+    try:
+        if risk_pct_raw not in (None, ''):
+            risk_pct = float(str(risk_pct_raw).replace('%', '').strip())
+    except Exception:
+        risk_pct = None
+    risk_control_enabled = bool(risk_pct is not None and risk_pct > 0)
+
     request_payload = {
         'broker': broker,
         'symbol': symbol,
@@ -259,6 +297,26 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'signalMode': signal_mode,
         'targetDirection': target_direction,
     }
+    if smart_inc_applied is not None:
+        request_payload['smartInc'] = smart_inc_applied
+    if risk_control_enabled:
+        request_payload['riskPct'] = risk_pct
+
+    if smart_inc_skip:
+        return {
+            'broker': broker,
+            'symbol': symbol,
+            'category': category,
+            'qty': quantity,
+            'request': request_payload,
+            'skipped': True,
+            'skipReason': 'smart_inc_same_hour',
+            'results': {
+                'skipped': True,
+                'reason': 'smart_inc_same_hour',
+                'smartInc': smart_inc_applied,
+            },
+        }
 
     if dry_run:
         return {
@@ -364,10 +422,76 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     position_idx = (1 if desired_side == 'buy' else 2) if hedged_mode_detected else None
                 request_payload['openPositionIdx'] = None if position_idx in (None, '') else int(position_idx)
 
+            # Pre-trade risk: ensure isolated margin so riskRate ≈ riskPct%
+            # (same intent as BingX; Bybit fields: positionMM / positionBalance).
+            margin_idx = None if position_idx in (None, '') else int(position_idx)
+            if risk_control_enabled and not reduce_only and str(side).lower() in ('buy', 'sell'):
+                wallet = client.get_wallet_balance()
+                equity = _bybit_account_equity(wallet)
+                available = _bybit_account_available(wallet)
+                positions_before = client.get_positions(category=category, symbol=symbol)
+                before_pos = _bybit_pick_position(positions_before, symbol, target_direction or side)
+                before_iso = _bybit_position_isolated(before_pos)
+                before_rr = _bybit_position_risk_rate(before_pos)
+                before_qty = _bybit_position_qty(before_pos)
+                mark_price = 0.0
+                for key in ('markPrice', 'entryPrice', 'avgPrice'):
+                    try:
+                        mark_price = abs(float(before_pos.get(key) or 0))
+                        if mark_price > 0:
+                            break
+                    except Exception:
+                        pass
+                try:
+                    incoming_qty = abs(float(quantity or 0))
+                except Exception:
+                    incoming_qty = 0.0
+                expected_final_qty = max(0.0, before_qty + incoming_qty)
+                expected_notional = mark_price * expected_final_qty
+                unrealized = 0.0
+                try:
+                    unrealized = float(before_pos.get('unrealisedPnl') or before_pos.get('unrealisedPnl') or 0)
+                except Exception:
+                    unrealized = 0.0
+                allowed_loss = max(0.0, equity * (risk_pct / 100.0))
+                target_isolated_pre = max(0.0, allowed_loss + unrealized)
+                target_margin_pre = min(expected_notional, target_isolated_pre) if expected_notional > 0 else target_isolated_pre
+                request_payload['riskControl'] = {
+                    'mode': 'bybit',
+                    'equity': equity,
+                    'available': available,
+                    'allowedLoss': allowed_loss,
+                    'beforeIsolated': before_iso,
+                    'beforeRiskRate': before_rr,
+                    'beforeQty': before_qty,
+                    'incomingQty': incoming_qty,
+                    'expectedFinalQty': expected_final_qty,
+                    'expectedNotional': expected_notional,
+                    'targetIsolatedPre': target_margin_pre,
+                }
+                add = target_margin_pre - before_iso
+                if add > 1e-8:
+                    if before_iso <= 1e-8 and before_qty <= 0:
+                        # opening new isolated position: set isolated mode first
+                        client.set_margin_mode(symbol, trade_mode=1, position_idx=margin_idx)
+                    add = min(add, max(0.0, available))
+                    if add > 1e-8:
+                        request_payload['riskControl']['preTradeAddMargin'] = add
+                        add_resp = client.add_margin(symbol, add, category=category, position_idx=margin_idx)
+                        request_payload['riskControl']['preTradeAddMarginResult'] = add_resp
+                        ret = (add_resp or {}).get('retCode')
+                        if ret not in (None, 0, '0'):
+                            msg = str((add_resp or {}).get('retMsg') or '')
+                            return {
+                                **{k: request_payload[k] for k in ('broker', 'symbol', 'side', 'qty') if k in request_payload},
+                                'error': f'pre_trade_margin_failed: {msg or ret}',
+                                'results': add_resp,
+                            }
+
             if str(execution_mode).lower() == 'limit':
                 price = destination.get('price') or payload.get('price')
                 request_payload['price'] = price
-                return client.place_order(
+                order_result = client.place_order(
                     symbol=symbol,
                     side=side,
                     qty=quantity,
@@ -375,17 +499,54 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     order_type='Limit',
                     price=price,
                     reduce_only=reduce_only,
-                    position_idx=None if position_idx in (None, '') else int(position_idx),
+                    position_idx=margin_idx,
                 )
-            return client.place_order(
-                symbol=symbol,
-                side=side,
-                qty=quantity,
-                category=category,
-                order_type='Market',
-                reduce_only=reduce_only,
-                position_idx=None if position_idx in (None, '') else int(position_idx),
-            )
+            else:
+                order_result = client.place_order(
+                    symbol=symbol,
+                    side=side,
+                    qty=quantity,
+                    category=category,
+                    order_type='Market',
+                    reduce_only=reduce_only,
+                    position_idx=margin_idx,
+                )
+
+            # Post-trade: if position already open and risk above target, top-up margin.
+            if risk_control_enabled and not reduce_only:
+                try:
+                    time.sleep(0.25)
+                    wallet2 = client.get_wallet_balance()
+                    positions_after = client.get_positions(category=category, symbol=symbol)
+                    after_pos = _bybit_pick_position(positions_after, symbol, target_direction or side)
+                    after_iso = _bybit_position_isolated(after_pos)
+                    after_rr = _bybit_position_risk_rate(after_pos)
+                    after_mm = _bybit_position_maintenance(after_pos)
+                    if after_rr > 0 and risk_pct > 0:
+                        target_iso = risk_sync_target_isolated(after_rr, after_iso, _bybit_position_notional(after_pos), risk_pct)
+                        delta = target_iso - after_iso
+                        available2 = _bybit_account_available(wallet2)
+                        request_payload['riskControl']['postTrade'] = {
+                            'riskRate': after_rr,
+                            'isolated': after_iso,
+                            'targetIsolated': target_iso,
+                            'delta': delta,
+                        }
+                        if delta > 1e-8 and available2 > 1e-8:
+                            add2 = min(delta, available2)
+                            post = client.add_margin(symbol, add2, category=category, position_idx=margin_idx)
+                            request_payload['riskControl']['postTradeAddMargin'] = add2
+                            request_payload['riskControl']['postTradeAddMarginResult'] = post
+                            try:
+                                verify = client.get_positions(category=category, symbol=symbol)
+                                vpos = _bybit_pick_position(verify, symbol, target_direction or side)
+                                request_payload['riskControl']['riskRateAfterAdjust'] = _bybit_position_risk_rate(vpos)
+                            except Exception:
+                                pass
+                except Exception as exc:
+                    request_payload['riskControl']['postTradeError'] = str(exc)
+
+            return order_result
 
         result = await asyncio.to_thread(_run)
 
@@ -407,6 +568,149 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
             'error': str(e),
             'results': {'error': str(e)},
         }
+
+
+def _bybit_account_equity(wallet: Dict[str, Any]) -> float:
+    rows = ((wallet or {}).get('result') or {}).get('list') or []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ('totalEquity', 'walletBalance', 'totalWalletBalance'):
+            value = row.get(key)
+            if value not in (None, ''):
+                try:
+                    return abs(float(value))
+                except Exception:
+                    pass
+    return 0.0
+
+
+def _bybit_account_available(wallet: Dict[str, Any]) -> float:
+    rows = ((wallet or {}).get('result') or {}).get('list') or []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ('totalAvailableBalance', 'availableBalance', 'availableToWithdraw'):
+            value = row.get(key)
+            if value not in (None, ''):
+                try:
+                    return abs(float(value))
+                except Exception:
+                    pass
+    return 0.0
+
+
+def _bybit_position_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = ((payload or {}).get('result') or {}).get('list') or []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _bybit_pick_position(payload: Dict[str, Any], symbol: str, prefer: str = '') -> Dict[str, Any]:
+    """First open position for symbol; prefer long/short when given."""
+    sym = str(symbol or '').upper()
+    prefer_l = str(prefer or '').strip().lower()
+    candidates = []
+    for row in _bybit_position_rows(payload):
+        if str(row.get('symbol') or '').upper() != sym:
+            continue
+        try:
+            size = abs(float(row.get('size') or 0))
+        except Exception:
+            size = 0.0
+        if size <= 0:
+            continue
+        candidates.append(row)
+    if not candidates:
+        # empty row with symbol (open new)
+        for row in _bybit_position_rows(payload):
+            if str(row.get('symbol') or '').upper() == sym:
+                return row
+        return {}
+    want = 'buy' if prefer_l == 'long' else ('sell' if prefer_l == 'short' else '')
+    if want:
+        for row in candidates:
+            if str(row.get('side') or '').strip().lower() == want:
+                return row
+    return candidates[0]
+
+
+def _bybit_position_qty(row: Dict[str, Any]) -> float:
+    try:
+        return abs(float((row or {}).get('size') or 0))
+    except Exception:
+        return 0.0
+
+
+def _bybit_position_isolated(row: Dict[str, Any]) -> float:
+    for key in ('positionBalance', 'isolated', 'positionIM'):
+        value = (row or {}).get(key)
+        if value in (None, ''):
+            continue
+        try:
+            v = abs(float(value))
+            if v > 0:
+                return v
+        except Exception:
+            pass
+    return 0.0
+
+
+def _bybit_position_maintenance(row: Dict[str, Any]) -> float:
+    for key in ('positionMM', 'mm'):
+        value = (row or {}).get(key)
+        if value in (None, ''):
+            continue
+        try:
+            v = abs(float(value))
+            if v > 0:
+                return v
+        except Exception:
+            pass
+    return 0.0
+
+
+def _bybit_position_notional(row: Dict[str, Any]) -> float:
+    for key in ('positionValue', 'notional'):
+        value = (row or {}).get(key)
+        if value in (None, ''):
+            continue
+        try:
+            v = abs(float(value))
+            if v > 0:
+                return v
+        except Exception:
+            pass
+    try:
+        return abs(float((row or {}).get('size') or 0)) * abs(float((row or {}).get('avgPrice') or 0))
+    except Exception:
+        return 0.0
+
+
+def _bybit_position_risk_rate(row: Dict[str, Any]) -> float:
+    """riskRate ≈ positionMM / isolated (positionBalance). 0 if unknown."""
+    if not row:
+        return 0.0
+    # explicit field if present
+    for key in ('riskRate', 'positionIM_rate', 'im_rate'):
+        value = row.get(key)
+        if value in (None, ''):
+            continue
+        try:
+            v = float(value)
+            if v > 0:
+                # BingX-style riskRate is already a fraction (0.12 = 12%)
+                return v if v < 1.0 else v / 100.0
+        except Exception:
+            pass
+    mm = _bybit_position_maintenance(row)
+    iso = _bybit_position_isolated(row)
+    if mm > 0 and iso > 0:
+        return mm / iso
+    # fallback: 0.5% of notional / isolated (common linear MM rate ballpark)
+    notional = _bybit_position_notional(row)
+    if notional > 0 and iso > 0:
+        return (0.005 * notional) / iso
+    return 0.0
 
 
 def _bingx_account_equity(balance_payload: Dict[str, Any]) -> float:
