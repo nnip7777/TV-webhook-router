@@ -757,6 +757,22 @@ def _is_protected_path(path: str) -> bool:
     return path.startswith('/admin') or path == '/' or path.startswith('/settings') or path.startswith('/api/')
 
 
+# Cross-service links → RT-trade (port 8082). Host is taken in the browser
+# via location.hostname so the same HTML works for LAN IP / localhost / domain.
+RT_TRADE_NAV_HTML = (
+    "<span class='svc-nav' style='display:inline-flex;gap:8px;align-items:center;margin:0 4px;'>"
+    "<span style='color:#6b7280;font-size:11px;'>RTT</span>"
+    "<a href='#' data-rt='/' title='RT-trade chart'>chart</a>"
+    "<a href='#' data-rt='/monitor' title='RT-trade monitor'>monitor</a>"
+    "<a href='#' data-rt='/strategy' title='Pine strategy editor'>strategy</a>"
+    "<a href='#' data-rt='/settings' title='RT-trade settings'>rt-settings</a>"
+    "</span>"
+    "<script>(function(){var h=location.hostname||'127.0.0.1';"
+    "document.querySelectorAll('a[data-rt]').forEach(function(a){"
+    "a.href='http://'+h+':8082'+a.getAttribute('data-rt');});})();</script>"
+)
+
+
 def _parse_cookie(header_value: str) -> Dict[str, str]:
     cookies: Dict[str, str] = {}
     for part in (header_value or '').split(';'):
@@ -1151,7 +1167,7 @@ def _render_settings_page(saved: bool = False, error: str = '', message: str = '
         <div class='help' style='margin-top:6px;'>Webhook URL для TradingView: <code>{html.escape((env_values.get('WEBHOOK_ROUTER_PUBLIC_BASE_URL') or f'http://{env_values.get("WEBHOOK_ROUTER_HOST","127.0.0.1")}:{env_values.get("WEBHOOK_ROUTER_PORT","8787")}').rstrip('/') + '/webhook')}</code></div>
         <div class='help'>build {html.escape(_build_summary().get('version','unknown'))} / server.py {html.escape(_build_summary().get('serverHash',''))}</div>
       </div>
-      <div class='navlinks'><a href='/'>admin</a><a href='/effectiveness'>effectiveness</a><a href='/journal'>journal</a><a href='/logout'>logout</a></div>
+      <div class='navlinks'><a href='/'>admin</a><a href='/effectiveness'>effectiveness</a><a href='/journal'>journal</a>{RT_TRADE_NAV_HTML}<a href='/logout'>logout</a></div>
     </div>
     {flash}
     <div class='section' style='margin-bottom:14px;'>
@@ -1383,6 +1399,7 @@ def _quick_order_response_summary(result: Dict[str, Any]) -> str:
 
 
 def _render_effectiveness_page() -> str:
+    # Plain triple-quoted HTML (CSS braces) — inject nav via replace, not f-string.
     return """<!doctype html><html lang='ru'><head><meta charset='utf-8'><title>Effectiveness</title><style>
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:16px;background:#111827;color:#f3f4f6}
 a{color:#93c5fd;text-decoration:none}
@@ -1399,7 +1416,7 @@ button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:8px 12px
 button[disabled]{opacity:.65;cursor:wait}
 .ok{color:#86efac}.bad{color:#fca5a5}
 </style></head><body>
-<div class='panel'><div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/journal'>journal</a><a href='/logout'>logout</a></div><h2 style='margin-bottom:6px;'>Эффективность сделок</h2><div class='muted'>Страница читает только готовые данные из SQLite, без пересчёта истории на старте сервера и без rebuild аналитики при открытии. Все времена на этой странице показаны в MSK.</div></div>
+<div class='panel'><div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/journal'>journal</a>{RT_TRADE_NAV_HTML}<a href='/logout'>logout</a></div><h2 style='margin-bottom:6px;'>Эффективность сделок</h2><div class='muted'>Страница читает только готовые данные из SQLite, без пересчёта истории на старте сервера и без rebuild аналитики при открытии. Все времена на этой странице показаны в MSK.</div></div>
 <div class='panel'><div style='display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;'><div id='status' class='muted'>Загрузка…</div><div style='display:flex;flex-direction:column;align-items:flex-end;gap:6px;'><div style='display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;'><button id='rebuildTodayBtn' type='button' onclick='rebuildTodayAnalytics()'>Rebuild today only</button><button id='rebuildBtn' type='button' onclick='rebuildAnalytics()'>Rebuild all analytics</button></div><div id='rebuildStatus' class='muted'>Today-only rebuild честно восстанавливает стартовый state до 00:00 MSK и затем пересчитывает текущий день. Full rebuild пересобирает всю производную аналитику.</div></div></div><div id='meta' class='grid' style='margin-top:12px;'></div></div>
 <div class='panel'><h3 style='margin-top:0;'>Полная статистика</h3><div class='muted' style='margin-bottom:8px;'>Доходность, винрейт и профит-фактор по закрытым round-trips. <b>Alor/Finam</b> — cash = пункты × cash_step = <b>RUB</b>; <b>BingX</b> — <b>USDT</b>. Валюты не смешиваются. Итоговая атрибуция P&amp;L — по <b>инструменту</b> (symbol); канал tv / manual / quick — отдельно.</div>
 <div style='display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:8px;'><span class='muted'>Брокеры:</span>
@@ -1656,7 +1673,7 @@ async function load(){
   loadPerformance();
 }
 load();
-</script></body></html>"""
+</script></body></html>""".replace("{RT_TRADE_NAV_HTML}", RT_TRADE_NAV_HTML)
 
 
 def _extract_bingx_risk_details(destination: Dict[str, Any]) -> str:
@@ -1937,7 +1954,7 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
 </head>
 <body>
   <div class='panel'>
-    <div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/journal'>journal</a><a href='/logout'>logout</a></div>
+    <div class='nav'><a href='/'>admin</a><a href='/settings'>settings</a><a href='/journal'>journal</a>{RT_TRADE_NAV_HTML}<a href='/logout'>logout</a></div>
     <h2 style='margin-bottom:4px;'>Journal</h2>
     <div class='muted'>Журнал по неделям. Новая неделя → новый файл. Старые недели автоматически сжимаются в .gz и удаляются по лимиту недель хранения.</div>
     <form method='get' action='/journal' style='margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;'>
@@ -4435,11 +4452,13 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             <div id='flash-status' class='flash-status'></div>
           </div>
         </div>
-        <div style='display:flex; gap:10px; align-items:center;'>
+        <div style='display:flex; gap:10px; align-items:center; flex-wrap:wrap;'>
           <a href='/settings' style='color:#93c5fd;text-decoration:none;'>Settings</a>
           <a href='/effectiveness' style='color:#93c5fd;text-decoration:none;'>Effectiveness</a>
           <a href='/journal' style='color:#93c5fd;text-decoration:none;'>Journal</a>
           {"<a href='/users' style='color:#93c5fd;text-decoration:none;'>Users</a>" if can_manage_users else ""}
+          <span style='color:#4b5563;'>|</span>
+          {RT_TRADE_NAV_HTML}
           <button type='button' disabled>Save all позже</button>
           <a href='/logout' style='color:#fca5a5;text-decoration:none;'>Logout</a>
         </div>
@@ -4906,7 +4925,7 @@ class Handler(BaseHTTPRequestHandler):
             roles_options = ''.join(f"<option value='{html.escape(name)}'>{html.escape((payload.get('label') or name))}</option>" for name, payload in roles.items())
             broker_checks = ''.join(f"<label style='margin-right:8px;'><input type='checkbox' name='brokers' value='{html.escape(name)}'> {html.escape(name)}</label>" for name in brokers)
             section_checks = ''.join(f"<label style='margin-right:8px;'><input type='checkbox' name='settingsSections' value='{html.escape(name)}'> {html.escape(name)}</label>" for name in sections)
-            page = f"""<!doctype html><html lang='ru'><head><meta charset='utf-8'><title>Users</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:16px;background:#111827;color:#f3f4f6}}table{{width:100%;border-collapse:collapse;background:#1f2937}}th,td{{border:1px solid #374151;padding:8px}}.panel{{background:#1f2937;padding:12px;border-radius:10px;margin-bottom:12px}}.mini-input{{padding:6px 8px;border-radius:8px;border:1px solid #4b5563;background:#17191d;color:#eceff3}}button{{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:8px 12px}}a{{color:#93c5fd;text-decoration:none}}</style></head><body><div class='panel'><div style='display:flex;justify-content:space-between;align-items:center;'><h2 style='margin:0;'>Users</h2><div><a href='/'>Admin</a> · <a href='/settings'>Settings</a></div></div></div><div class='panel'><form method='post' action='/users/create'><div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center;'><input class='mini-input' type='text' name='username' placeholder='username' required><input class='mini-input' type='password' name='password' placeholder='password' required><select class='mini-input' name='role'>{roles_options}</select></div><div style='margin-top:10px;'><div style='margin-bottom:4px;'>Brokers</div>{broker_checks}</div><div style='margin-top:10px;'><div style='margin-bottom:4px;'>Settings sections</div>{section_checks}</div><div style='margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;'><label><input type='checkbox' name='canAddTickers' value='1'> can add tickers</label><label><input type='checkbox' name='canAssign' value='1'> can assign</label><label><input type='checkbox' name='canManageBackups' value='1'> can manage backups</label><label><input type='checkbox' name='canDownloadBackups' value='1'> can download backups</label><label><input type='checkbox' name='canEditMappings' value='1'> can edit mappings</label><label><input type='checkbox' name='canQuickOrder' value='1'> can quick order</label></div><div style='margin-top:12px;'><button type='submit'>Add user</button></div></form></div><table><thead><tr><th>Username</th><th>Role</th><th>Brokers</th><th>Sections</th><th>Add tickers</th><th>Backups</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="6">No users</td></tr>'}</tbody></table></body></html>"""
+            page = f"""<!doctype html><html lang='ru'><head><meta charset='utf-8'><title>Users</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:16px;background:#111827;color:#f3f4f6}}table{{width:100%;border-collapse:collapse;background:#1f2937}}th,td{{border:1px solid #374151;padding:8px}}.panel{{background:#1f2937;padding:12px;border-radius:10px;margin-bottom:12px}}.mini-input{{padding:6px 8px;border-radius:8px;border:1px solid #4b5563;background:#17191d;color:#eceff3}}button{{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:8px 12px}}a{{color:#93c5fd;text-decoration:none}}</style></head><body><div class='panel'><div style='display:flex;justify-content:space-between;align-items:center;'><h2 style='margin:0;'>Users</h2><div><a href='/'>Admin</a> · <a href='/settings'>Settings</a> · {RT_TRADE_NAV_HTML}</div></div></div><div class='panel'><form method='post' action='/users/create'><div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center;'><input class='mini-input' type='text' name='username' placeholder='username' required><input class='mini-input' type='password' name='password' placeholder='password' required><select class='mini-input' name='role'>{roles_options}</select></div><div style='margin-top:10px;'><div style='margin-bottom:4px;'>Brokers</div>{broker_checks}</div><div style='margin-top:10px;'><div style='margin-bottom:4px;'>Settings sections</div>{section_checks}</div><div style='margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;'><label><input type='checkbox' name='canAddTickers' value='1'> can add tickers</label><label><input type='checkbox' name='canAssign' value='1'> can assign</label><label><input type='checkbox' name='canManageBackups' value='1'> can manage backups</label><label><input type='checkbox' name='canDownloadBackups' value='1'> can download backups</label><label><input type='checkbox' name='canEditMappings' value='1'> can edit mappings</label><label><input type='checkbox' name='canQuickOrder' value='1'> can quick order</label></div><div style='margin-top:12px;'><button type='submit'>Add user</button></div></form></div><table><thead><tr><th>Username</th><th>Role</th><th>Brokers</th><th>Sections</th><th>Add tickers</th><th>Backups</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="6">No users</td></tr>'}</tbody></table></body></html>"""
             return self._html(200, page)
         return self._json(404, {'error': 'not_found'})
 
