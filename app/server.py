@@ -2486,7 +2486,8 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
         destination['limits'] = copy.deepcopy(symbol_limits)
 
     risk_pct_raw = str(options.get('riskPct', '')).strip().replace('%', '')
-    if broker_name == 'bingx' and risk_pct_raw:
+    # riskPct/smartInc are supported for BingX and Bybit (cell UI + execution).
+    if broker_name in ('bingx', 'bybit') and risk_pct_raw:
         try:
             risk_pct_value = float(risk_pct_raw)
             if risk_pct_value > 0:
@@ -2495,7 +2496,7 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
         except Exception:
             pass
 
-    if broker_name == 'bingx' and options.get('smartInc'):
+    if broker_name in ('bingx', 'bybit') and options.get('smartInc'):
         destination['smartInc'] = True
 
     qty_raw = str(options.get('qty', '')).strip()
