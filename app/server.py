@@ -204,10 +204,10 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_BIND_INTERFACE', 'label': 'BingX bind interface (optional, e.g. bingx-egress)', 'section': 'bingx', 'type': 'text'},
     {'key': 'BINGX_SOURCE_KEY', 'label': 'BingX source key', 'section': 'bingx', 'type': 'text', 'default': 'BX-AI-SKILL'},
     {'key': 'BINGX_RECV_WINDOW', 'label': 'BingX recvWindow', 'section': 'bingx', 'type': 'text', 'default': '5000'},
-    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час после сделки = ордер не ставится. Сброс до ×1 при простоя ≥36ч или без истории сделок. Работает при включённом чекбоксе smart-inc в ячейке (BingX и Bybit, target-direction).'},
-    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска BingX/Bybit', 'section': 'bingx', 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) открытых позиций BingX и Bybit. Если риск вырос на 30% и более относительно цели — добавляется isolated margin. Цель: riskPct ячейки роутинга, иначе «default risk %». Маржа только добавляется. Журнал kind=risk-sync.'},
-    {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск открытых позиций BingX/Bybit. Минимум 10. Применяется без перезапуска сервиса.'},
-    {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'type': 'float', 'default': '12', 'help': 'Целевой риск % для позиций BingX/Bybit без riskPct в ячейке. 0 = только позиции с настроенным riskPct.'},
+    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час после сделки = ордер не ставится. Сброс до ×1 при простоя ≥36ч или без истории сделок. Работает при включённом чекбоксе smart-inc в ячейке (BingX и Bybit, target-direction). Общая настройка для обеих бирж.'},
+    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска (BingX/Bybit)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) открытых позиций BingX и Bybit. Если риск вырос на 30% и более относительно цели — добавляется isolated margin. Цель: riskPct ячейки роутинга, иначе «default risk %». Маржа только добавляется. Журнал kind=risk-sync. Общая настройка для обеих бирж.'},
+    {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск открытых позиций BingX/Bybit. Минимум 10. Применяется без перезапуска сервиса. Общая настройка для обеих бирж.'},
+    {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'float', 'default': '12', 'help': 'Целевой риск % для позиций BingX/Bybit без riskPct в ячейке. 0 = только позиции с настроенным riskPct. Общая настройка для обеих бирж.'},
     {'key': 'ALOR_CONFIG_PATH', 'label': 'Alor config JSON path', 'section': 'alor', 'type': 'path'},
     {'key': 'ALOR_OAUTH_URL', 'label': 'Alor OAuth URL', 'section': 'alor', 'type': 'text'},
     {'key': 'ALOR_API_BASE_URL', 'label': 'Alor API base URL', 'section': 'alor', 'type': 'text'},
@@ -1110,7 +1110,22 @@ def _render_settings_page(saved: bool = False, error: str = '', message: str = '
         </div>
     """
 
-    section_fields = lambda section: ''.join(_render_env_input(field, env_values, root_value) for field in SETTINGS_FIELDS if field.get('section') == section and _can_access_section(user, str(field.get('section') or '')))
+    def section_fields(section: str) -> str:
+        """Render env inputs for a settings panel.
+
+        `alsoIn` lets shared keys (smart-inc / risk-sync) appear under Bybit
+        as well as their home section (BingX) without duplicating FIELD_MAP.
+        """
+        parts = []
+        for field in SETTINGS_FIELDS:
+            home = str(field.get('section') or '')
+            also = [str(x) for x in (field.get('alsoIn') or [])]
+            if home != section and section not in also:
+                continue
+            if not (_can_access_section(user, home) or _can_access_section(user, section)):
+                continue
+            parts.append(_render_env_input(field, env_values, root_value))
+        return ''.join(parts)
     webhook_url = (env_values.get('WEBHOOK_ROUTER_PUBLIC_BASE_URL') or f'http://{env_values.get("WEBHOOK_ROUTER_HOST","127.0.0.1")}:{env_values.get("WEBHOOK_ROUTER_PORT","8787")}').rstrip('/') + '/webhook'
     webhook_examples = [
         ('1) адрес hook сервера', webhook_url),
