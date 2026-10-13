@@ -2513,6 +2513,16 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
 
     if broker_name in ('bingx', 'bybit') and options.get('smartInc'):
         destination['smartInc'] = True
+        # Optional avg-price tolerance for add-to-position (absolute price units).
+        # e.g. gas 0.01, gold XAU 10. Empty = hours-multiplier only.
+        tol_raw = str(options.get('smartIncTol', '')).strip().replace('%', '')
+        if tol_raw:
+            try:
+                tol_val = float(tol_raw)
+                if tol_val > 0:
+                    destination['smartIncTol'] = tol_val
+            except Exception:
+                pass
 
     qty_raw = str(options.get('qty', '')).strip()
     if qty_raw:
@@ -3431,12 +3441,17 @@ def _bybit_risk_sync_once() -> None:
     bybit_cfg = (config.get('brokers', {}).get('bybit', {}) or {}).get('defaultDestination', {}) or {}
     if bybit_cfg.get('dryRun'):
         return
+    # Rate-limit identical skip-errors: max 1 journal line / 10 min / symbol.
+    global _BYBIT_RISK_ERR_AT
+    if '_BYBIT_RISK_ERR_AT' not in globals():
+        _BYBIT_RISK_ERR_AT = {}
     from execution import (
         bingx_risk_pct_by_symbol,
         risk_sync_default_pct,
         risk_sync_should_adjust,
         risk_sync_target_isolated,
         _bybit_account_available,
+        _bybit_account_equity,
         _bybit_position_isolated,
         _bybit_position_qty,
         _bybit_position_risk_rate,
@@ -3467,6 +3482,7 @@ def _bybit_risk_sync_once() -> None:
         return
     wallet = client.get_wallet_balance()
     available = _bybit_account_available(wallet)
+    equity = _bybit_account_equity(wallet)
     for row, symbol, target_pct, current_rr, current_pct, qty in needed:
         position_side = str(row.get('side') or 'BOTH')
         try:
@@ -3480,21 +3496,26 @@ def _bybit_risk_sync_once() -> None:
         details = (
             f"risk {current_pct:.6g}% → target {target_pct:.6g}% (trigger ≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}%)"
             f" | margin {isolated:.8g} → target {target_margin:.8g} | positionSide={position_side}"
-            f" | notional={notional:.8g} available={available:.8g}"
+            f" | notional={notional:.8g} available={available:.8g} equity={equity:.8g}"
         )
-        if target_margin <= 0 or delta <= 1e-8:
+
+        def _log_err(reason: str) -> None:
+            last = _BYBIT_RISK_ERR_AT.get(f'{symbol}:{reason}', 0.0)
+            now = time.time()
+            if now - last < 600.0:
+                return
+            _BYBIT_RISK_ERR_AT[f'{symbol}:{reason}'] = now
             append_journal({
                 'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
                 'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
-                'details': details + ' | skip=target_not_computable',
+                'details': details + ' | skip=' + reason,
             })
+
+        if target_margin <= 0 or delta <= 1e-8:
+            _log_err('target_not_computable')
             continue
         if available <= 1e-8:
-            append_journal({
-                'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
-                'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
-                'details': details + ' | skip=insufficient_available_balance',
-            })
+            _log_err('insufficient_available_balance')
             continue
         add = min(delta, available)
         try:
@@ -3744,6 +3765,8 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
         # only a bucket created from a missing form field inherits the previous flag.
         if 'smartInc' not in bucket:
             bucket['smartInc'] = bool(destination.get('smartInc'))
+        if 'smartIncTol' not in bucket:
+            bucket['smartIncTol'] = destination.get('smartIncTol', '')
         bucket['limits'] = bucket.get('limits') or copy.deepcopy(destination.get('limits', {}))
     return merged
 
@@ -3927,8 +3950,13 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 margin_hint = ((margin_hint + ' · ') if margin_hint else '') + ', '.join(limit_parts)
             risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name in ('bingx', 'bybit') else ''
             smart_inc_checked = 'checked' if current.get('smartInc') else ''
+            smart_inc_tol_value = html.escape(str(current.get('smartIncTol') or ''))
             smart_inc_line = (
-                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label><span class='muted'>qty × часы с последней сделки (сброс &gt;36ч)</span></div>"
+                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label>"
+                f"<span class='muted'>×часы</span>"
+                f"<span class='muted' style='margin-left:4px;'>tol</span>"
+                f"<input autocomplete='off' class='mini-input quick-qty' type='text' name='smartIncTol|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_tol_value}' placeholder='—' style='width:48px;'>"
+                f"<span class='muted'>avg±</span></div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
             broker_cells.append(
@@ -5335,6 +5363,7 @@ class Handler(BaseHTTPRequestHandler):
                     'qtyMultiplier': '',
                     'riskPct': '',
                     'smartInc': False,
+                    'smartIncTol': '',
                     'limits': {},
                 })
                 if field == 'map':
@@ -5351,6 +5380,8 @@ class Handler(BaseHTTPRequestHandler):
                     bucket['riskPct'] = form.get(key, [''])[0]
                 elif field == 'smartInc':
                     bucket['smartInc'] = True
+                elif field == 'smartIncTol':
+                    bucket['smartIncTol'] = form.get(key, [''])[0]
 
             target_ticker = form.get('saveTicker', [''])[0].strip()
             config = load_config()

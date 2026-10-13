@@ -42,6 +42,71 @@ def smart_inc_multiplier(hours: float | None) -> int:
     return min(smart_inc_max_multiplier(), max(0, int(hours)))
 
 
+def smart_inc_avg_tol(destination: Dict[str, Any]) -> float | None:
+    """Price tolerance (absolute) for smart-inc add-to-position, from routing cell.
+
+    Empty/missing → None = avg-add mode off (keep hours multiplier).
+    """
+    raw = destination.get('smartIncTol')
+    if raw in (None, ''):
+        return None
+    try:
+        v = float(str(raw).replace('%', '').strip())
+    except Exception:
+        return None
+    return v if v > 0 else None
+
+
+def smart_inc_required_add_qty(
+    base_qty: float,
+    avg_price: float,
+    mark_price: float,
+    direction: str,
+    tol: float,
+    max_hours: int | None = None,
+) -> float | None:
+    """Qty to add so position avg is within `tol` of mark.
+
+    LONG:  skip if A ≤ P+tol; else q ≥ Q*(A−P−tol)/tol  → new_avg ≤ P+tol
+    SHORT: skip if A ≥ P−tol; else q ≥ Q*(P−tol−A)/tol  → new_avg ≥ P−tol
+    Returns 0.0 if already in range (caller should skip), None on bad inputs.
+    """
+    if tol is None or tol <= 0:
+        return None
+    try:
+        q0 = abs(float(base_qty))
+        a = float(avg_price)
+        p = float(mark_price)
+    except (TypeError, ValueError):
+        return None
+    if q0 <= 0 or a <= 0 or p <= 0:
+        return None
+    d = str(direction or '').lower()
+    if d == 'long':
+        if a <= p + tol:
+            return 0.0
+        need = q0 * (a - p - tol) / tol
+    elif d == 'short':
+        if a >= p - tol:
+            return 0.0
+        need = q0 * (p - tol - a) / tol
+    else:
+        return None
+    if need <= 0:
+        return 0.0
+    # Cap by hours-multiplier path if configured (same potolok).
+    if max_hours is not None and max_hours > 0:
+        need = min(need, float(q0) * float(max_hours))
+    return need
+
+
+def smart_inc_apply_qty(quantity: Any, scaled: float) -> Any:
+    """Normalize scaled qty back to int when the base was integer contracts."""
+    if float(scaled).is_integer() and (isinstance(quantity, int) or (isinstance(quantity, float) and float(quantity).is_integer())):
+        return int(scaled)
+    return scaled
+
+
 # Periodic BingX risk sync: correct margin only once terminal risk grew
 # by this relative amount over the target (avoids micro-adjusting every cycle).
 RISK_SYNC_GROWTH_RATIO = 1.30
@@ -253,28 +318,108 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
     reduce_only = bool(destination.get('reduceOnly', False))
     dry_run = bool(destination.get('dryRun', False) or payload.get('dryRun', False))
 
-    # smart-inc (same as BingX): qty × completed clock-hours since last fill.
+    # smart-inc: qty × hours since last fill (new open / reverse).
+    # If smartIncTol is set and we are ADDING to an existing same-direction
+    # position, switch to avg-price tolerance sizing (skip if already in range).
     smart_inc_applied = None
     smart_inc_skip = False
+    smart_inc_tol = smart_inc_avg_tol(destination)
     if destination.get('smartInc') and signal_mode == 'target-direction':
         try:
             base_qty = float(quantity)
         except (TypeError, ValueError):
             base_qty = None
         if base_qty is not None:
-            hours = hours_since_last_fill(broker, symbol)
-            multiplier = smart_inc_multiplier(hours)
-            if multiplier == 0:
-                smart_inc_skip = True
-            else:
-                scaled = base_qty * multiplier
-                quantity = int(scaled) if float(scaled).is_integer() else scaled
-            smart_inc_applied = {
-                'baseQty': base_qty,
-                'hoursSinceLastFill': None if hours is None else round(hours, 3),
-                'multiplier': multiplier,
-                'qty': quantity,
-            }
+            # Detect add-to-position early when tol mode is on.
+            add_mode = False
+            pos_qty = 0.0
+            pos_avg = 0.0
+            pos_mark = 0.0
+            if smart_inc_tol is not None:
+                try:
+                    _probe = BybitBroker(testnet=bool(destination.get('testnet', False)))
+                    _prows = (((_probe.get_positions(category=category, symbol=symbol) or {}).get('result') or {}).get('list') or [])
+                    for _row in _prows:
+                        if not isinstance(_row, dict):
+                            continue
+                        if str(_row.get('symbol') or '').upper() != str(symbol).upper():
+                            continue
+                        _side = str(_row.get('side') or '').strip().lower()
+                        _sz = abs(float(_row.get('size') or 0) or 0)
+                        if _sz <= 0:
+                            continue
+                        _want = 'buy' if target_direction == 'long' else 'sell'
+                        if _side == _want:
+                            add_mode = True
+                            pos_qty = _sz
+                            for _k in ('avgPrice', 'entryPrice'):
+                                try:
+                                    pos_avg = abs(float(_row.get(_k) or 0) or 0)
+                                    if pos_avg > 0:
+                                        break
+                                except Exception:
+                                    pass
+                            for _k in ('markPrice', 'markIV'):
+                                try:
+                                    pos_mark = abs(float(_row.get(_k) or 0) or 0)
+                                    if pos_mark > 0:
+                                        break
+                                except Exception:
+                                    pass
+                            if not pos_mark:
+                                pos_mark = pos_avg
+                            break
+                except Exception:
+                    add_mode = False
+            if add_mode and pos_qty > 0 and smart_inc_tol is not None:
+                need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
+                if need is not None and need <= 1e-12:
+                    smart_inc_skip = True
+                    smart_inc_applied = {
+                        'mode': 'avg_tol',
+                        'tol': smart_inc_tol,
+                        'posQty': pos_qty,
+                        'avgPrice': pos_avg,
+                        'markPrice': pos_mark,
+                        'requiredAddQty': 0.0,
+                        'reason': 'avg_already_in_range',
+                        'qty': quantity,
+                    }
+                elif need is not None:
+                    # need is in contracts (same units as position size).
+                    if str(qty_kind).lower() == 'usdt':
+                        quantity = need * (pos_mark or pos_avg)
+                    else:
+                        quantity = smart_inc_apply_qty(quantity, need)
+                    smart_inc_applied = {
+                        'mode': 'avg_tol',
+                        'tol': smart_inc_tol,
+                        'posQty': pos_qty,
+                        'avgPrice': pos_avg,
+                        'markPrice': pos_mark,
+                        'requiredAddQty': need,
+                        'qty': quantity,
+                    }
+                else:
+                    # avg/mark unavailable → fall back to hours
+                    add_mode = False
+            if not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
+                hours = hours_since_last_fill(broker, symbol)
+                multiplier = smart_inc_multiplier(hours)
+                if multiplier == 0:
+                    smart_inc_skip = True
+                else:
+                    scaled = base_qty * multiplier
+                    quantity = int(scaled) if float(scaled).is_integer() else scaled
+                if smart_inc_applied is None:
+                    smart_inc_applied = {}
+                smart_inc_applied.update({
+                    'mode': 'hours',
+                    'baseQty': base_qty,
+                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                    'multiplier': multiplier,
+                    'qty': quantity,
+                })
 
     risk_pct_raw = destination.get('riskPct') if 'riskPct' in destination else payload.get('riskPct')
     risk_pct = None
@@ -303,6 +448,9 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         request_payload['riskPct'] = risk_pct
 
     if smart_inc_skip:
+        _reason = 'smart_inc_avg_in_range'
+        if smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
+            _reason = 'smart_inc_same_hour'
         return {
             'broker': broker,
             'symbol': symbol,
@@ -310,10 +458,10 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
             'qty': quantity,
             'request': request_payload,
             'skipped': True,
-            'skipReason': 'smart_inc_same_hour',
+            'skipReason': _reason,
             'results': {
                 'skipped': True,
-                'reason': 'smart_inc_same_hour',
+                'reason': _reason,
                 'smartInc': smart_inc_applied,
             },
         }
@@ -587,6 +735,7 @@ def _bybit_account_equity(wallet: Dict[str, Any]) -> float:
 
 def _bybit_account_available(wallet: Dict[str, Any]) -> float:
     rows = ((wallet or {}).get('result') or {}).get('list') or []
+    best = 0.0
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -594,10 +743,32 @@ def _bybit_account_available(wallet: Dict[str, Any]) -> float:
             value = row.get(key)
             if value not in (None, ''):
                 try:
-                    return abs(float(value))
+                    best = max(best, abs(float(value)))
                 except Exception:
                     pass
-    return 0.0
+        # UNIFIED: per-coin free balance (USDT first, then any positive)
+        coins = row.get('coin') or []
+        if isinstance(coins, list):
+            usdt_free = 0.0
+            any_free = 0.0
+            for coin in coins:
+                if not isinstance(coin, dict):
+                    continue
+                for key in ('availableToWithdraw', 'availableBalance', 'availableToTransfer', 'equity'):
+                    value = coin.get(key)
+                    if value in (None, ''):
+                        continue
+                    try:
+                        v = abs(float(value))
+                    except Exception:
+                        continue
+                    coin_name = str(coin.get('coin') or '').upper()
+                    if coin_name == 'USDT':
+                        usdt_free = max(usdt_free, v)
+                    any_free = max(any_free, v)
+                    break
+            best = max(best, usdt_free, any_free)
+    return best
 
 
 def _bybit_position_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1365,25 +1536,97 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
     open_qty_kind = str(destination.get('openQtyKind') or qty_kind or 'usdt').lower()
     smart_inc_applied = None
     smart_inc_skip = False
+    smart_inc_tol = smart_inc_avg_tol(destination)
     if destination.get('smartInc') and signal_mode == 'target-direction':
         try:
             base_qty = float(quantity)
         except (TypeError, ValueError):
             base_qty = None
         if base_qty is not None:
-            hours = hours_since_last_fill(broker, symbol)
-            multiplier = smart_inc_multiplier(hours)
-            if multiplier == 0:
-                smart_inc_skip = True
-            else:
-                scaled = base_qty * multiplier
-                quantity = int(scaled) if float(scaled).is_integer() else scaled
-            smart_inc_applied = {
-                'baseQty': base_qty,
-                'hoursSinceLastFill': None if hours is None else round(hours, 3),
-                'multiplier': multiplier,
-                'qty': quantity,
-            }
+            # Detect add-to-position when avg-tol mode is on (same as Bybit).
+            add_mode = False
+            pos_qty = 0.0
+            pos_avg = 0.0
+            pos_mark = 0.0
+            if smart_inc_tol is not None:
+                try:
+                    _probe = BingXBroker()
+                    _prows = _bingx_position_rows(_probe.get_positions(symbol), symbol)
+                    _want = 'LONG' if target_direction == 'long' else 'SHORT'
+                    for _row in _prows:
+                        _rs = str(_row.get('positionSide') or _row.get('side') or '').upper()
+                        _sz = _bingx_position_qty(_row)
+                        if _sz <= 0:
+                            continue
+                        if _rs == _want:
+                            add_mode = True
+                            pos_qty = _sz
+                            for _k in ('avgPrice', 'entryPrice', 'priceAvg', 'positionX'):
+                                try:
+                                    pos_avg = abs(float(_row.get(_k) or 0) or 0)
+                                    if pos_avg > 0:
+                                        break
+                                except Exception:
+                                    pass
+                            for _k in ('markPrice', 'mark'):
+                                try:
+                                    pos_mark = abs(float(_row.get(_k) or 0) or 0)
+                                    if pos_mark > 0:
+                                        break
+                                except Exception:
+                                    pass
+                            if not pos_mark:
+                                pos_mark = pos_avg
+                            break
+                except Exception:
+                    add_mode = False
+            if add_mode and pos_qty > 0 and smart_inc_tol is not None:
+                need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
+                if need is not None and need <= 1e-12:
+                    smart_inc_skip = True
+                    smart_inc_applied = {
+                        'mode': 'avg_tol',
+                        'tol': smart_inc_tol,
+                        'posQty': pos_qty,
+                        'avgPrice': pos_avg,
+                        'markPrice': pos_mark,
+                        'requiredAddQty': 0.0,
+                        'reason': 'avg_already_in_range',
+                        'qty': quantity,
+                    }
+                elif need is not None:
+                    if str(qty_kind).lower() == 'usdt':
+                        quantity = need * (pos_mark or pos_avg)
+                    else:
+                        quantity = smart_inc_apply_qty(quantity, need)
+                    smart_inc_applied = {
+                        'mode': 'avg_tol',
+                        'tol': smart_inc_tol,
+                        'posQty': pos_qty,
+                        'avgPrice': pos_avg,
+                        'markPrice': pos_mark,
+                        'requiredAddQty': need,
+                        'qty': quantity,
+                    }
+                else:
+                    add_mode = False
+            if not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
+                hours = hours_since_last_fill(broker, symbol)
+                multiplier = smart_inc_multiplier(hours)
+                if multiplier == 0:
+                    smart_inc_skip = True
+                else:
+                    scaled = base_qty * multiplier
+                    quantity = int(scaled) if float(scaled).is_integer() else scaled
+                if smart_inc_applied is None:
+                    smart_inc_applied = {}
+                smart_inc_applied.update({
+                    'mode': 'hours',
+                    'baseQty': base_qty,
+                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                    'multiplier': multiplier,
+                    'qty': quantity,
+                })
     category = destination.get('category', 'swap')
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
     reduce_only = destination.get('reduceOnly') if 'reduceOnly' in destination else payload.get('reduceOnly')
@@ -1436,10 +1679,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             trace.append(name)
 
     if smart_inc_skip:
-        # Same clock hour already traded for this ticker: skip completely —
-        # no close, no open (variant 3). Repeats would only inflate sum
-        # without moving the position's average price; the multiplier is
-        # what pulls the entry price toward the current one now.
+        _reason = 'smart_inc_avg_in_range'
+        if smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
+            _reason = 'smart_inc_same_hour'
         _set_stage('smart_inc_skip')
         return {
             'broker': broker,
@@ -1450,7 +1692,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             'skipped': True,
             'results': {
                 'skipped': True,
-                'reason': 'smart_inc_same_hour',
+                'reason': _reason,
                 'smartInc': smart_inc_applied,
             },
         }

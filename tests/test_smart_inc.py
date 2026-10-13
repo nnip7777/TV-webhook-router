@@ -18,7 +18,59 @@ sys.path.insert(0, str(ROOT / 'app'))
 
 import analytics  # noqa: E402
 import execution  # noqa: E402
-from execution import smart_inc_max_multiplier, smart_inc_multiplier  # noqa: E402
+from execution import smart_inc_max_multiplier, smart_inc_multiplier, smart_inc_avg_tol, smart_inc_required_add_qty  # noqa: E402
+
+
+class SmartIncAvgTolTest(unittest.TestCase):
+    def test_empty_is_none(self):
+        self.assertIsNone(smart_inc_avg_tol({}))
+        self.assertIsNone(smart_inc_avg_tol({'smartIncTol': ''}))
+        self.assertIsNone(smart_inc_avg_tol({'smartIncTol': None}))
+
+    def test_positive_float(self):
+        self.assertEqual(smart_inc_avg_tol({'smartIncTol': '0.01'}), 0.01)
+        self.assertEqual(smart_inc_avg_tol({'smartIncTol': '10'}), 10.0)
+        self.assertEqual(smart_inc_avg_tol({'smartIncTol': '10%'}), 10.0)
+
+    def test_zero_or_invalid(self):
+        self.assertIsNone(smart_inc_avg_tol({'smartIncTol': '0'}))
+        self.assertIsNone(smart_inc_avg_tol({'smartIncTol': 'abc'}))
+
+
+class SmartIncRequiredAddQtyTest(unittest.TestCase):
+    """Gas example: P=3.528, tol=0.01 → LONG skip if A≤3.538; SHORT skip if A≥3.518."""
+
+    def test_long_already_in_range_skips(self):
+        # A=3.53, P=3.528, tol=0.01 → A ≤ P+tol → 0
+        self.assertEqual(
+            smart_inc_required_add_qty(10, 3.53, 3.528, 'long', 0.01), 0.0)
+
+    def test_long_needs_add(self):
+        # A=3.60, P=3.528, tol=0.01 → need = 10*(3.60-3.528-0.01)/0.01 = 62
+        need = smart_inc_required_add_qty(10, 3.60, 3.528, 'long', 0.01)
+        self.assertAlmostEqual(need, 62.0, places=6)
+
+    def test_short_already_in_range_skips(self):
+        # A=3.52, P=3.528, tol=0.01 → A ≥ P-tol → 0
+        self.assertEqual(
+            smart_inc_required_add_qty(10, 3.52, 3.528, 'short', 0.01), 0.0)
+
+    def test_short_needs_add(self):
+        # A=3.40, P=3.528, tol=0.01 → need = 10*(3.528-0.01-3.40)/0.01 = 118
+        need = smart_inc_required_add_qty(10, 3.40, 3.528, 'short', 0.01)
+        self.assertAlmostEqual(need, 118.0, places=6)
+
+    def test_gold_tol_10(self):
+        # XAU: P=3800, A=3850, tol=10 → need = Q*(3850-3800-10)/10 = 4*Q
+        need = smart_inc_required_add_qty(10, 3850, 3800, 'long', 10.0)
+        self.assertAlmostEqual(need, 40.0, places=6)
+
+    def test_bad_inputs(self):
+        self.assertIsNone(smart_inc_required_add_qty(0, 3.5, 3.528, 'long', 0.01))
+        self.assertIsNone(smart_inc_required_add_qty(10, 0, 3.528, 'long', 0.01))
+        self.assertIsNone(smart_inc_required_add_qty(10, 3.5, 0, 'long', 0.01))
+        self.assertIsNone(smart_inc_required_add_qty(10, 3.5, 3.528, '', 0.01))
+        self.assertIsNone(smart_inc_required_add_qty(10, 3.5, 3.528, 'long', None))
 
 
 class SmartIncMultiplierTest(unittest.TestCase):
