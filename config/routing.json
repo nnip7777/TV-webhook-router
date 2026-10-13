@@ -332537,7 +332537,10 @@
         "sourceTicker": [
           "XAUTUSDT.P"
         ],
-        "side": "*"
+        "side": "*",
+        "source": [
+          "TV"
+        ]
       },
       "destinations": [
         {
@@ -332558,7 +332561,7 @@
         }
       ],
       "uiCreatedAt": "2026-10-11T22:39:01.940672Z",
-      "uiUpdatedAt": "2026-10-13T19:04:41.016261Z"
+      "uiUpdatedAt": "2026-10-13T19:53:45.434828Z"
     },
     {
       "id": "ui-gc1",
@@ -332569,7 +332572,10 @@
         "sourceTicker": [
           "GC1!"
         ],
-        "side": "*"
+        "side": "*",
+        "source": [
+          "TV"
+        ]
       },
       "destinations": [
         {
@@ -332590,7 +332596,7 @@
         }
       ],
       "uiCreatedAt": "2026-10-11T23:01:37.585906Z",
-      "uiUpdatedAt": "2026-10-13T19:04:47.179705Z"
+      "uiUpdatedAt": "2026-10-13T19:53:36.309966Z"
     },
     {
       "id": "ui-ng1",
@@ -332601,7 +332607,10 @@
         "sourceTicker": [
           "NG1!"
         ],
-        "side": "*"
+        "side": "*",
+        "source": [
+          "TV"
+        ]
       },
       "destinations": [
         {
@@ -332675,13 +332684,111 @@
           },
           "riskPct": 12.0,
           "marginType": "ISOLATED",
+          "smartInc": true,
+          "smartIncTol": 0.02,
           "qty": 50,
           "qtyKind": "contracts",
           "sideMode": "sign"
         }
       ],
       "uiCreatedAt": "2026-10-13T19:08:07.492419Z",
-      "uiUpdatedAt": "2026-10-13T19:08:07.492444Z"
+      "uiUpdatedAt": "2026-10-13T20:18:17.852608Z"
+    },
+    {
+      "id": "ui-naturalgasngusdt-p",
+      "name": "UI mapping for NATURALGASNGUSDT.P",
+      "enabled": true,
+      "uiManaged": true,
+      "match": {
+        "sourceTicker": [
+          "NATURALGASNGUSDT.P"
+        ],
+        "side": "*",
+        "source": [
+          "TV"
+        ]
+      },
+      "destinations": [
+        {
+          "account": "swap",
+          "category": "swap",
+          "executionMode": "maker",
+          "qtyMode": "fixed",
+          "positionSide": "BOTH",
+          "testnet": false,
+          "broker": "bingx",
+          "symbol": "NCCO7241NATGAS2USD-USDT",
+          "limits": {
+            "minQty": 0.595,
+            "minUsdt": 2,
+            "qtyStep": "0.001",
+            "priceStep": 0.001,
+            "quantityPrecision": 3,
+            "pricePrecision": 3,
+            "raw": {
+              "symbol": {
+                "contractId": "102476",
+                "symbol": "NCCO7241NATGAS2USD-USDT",
+                "size": "0.001",
+                "quantityPrecision": 3,
+                "pricePrecision": 3,
+                "feeRate": 0.0005,
+                "makerFeeRate": 0.0002,
+                "takerFeeRate": 0.0005,
+                "tradeMinLimit": 0,
+                "tradeMinQuantity": 0.595,
+                "tradeMinUSDT": 2,
+                "currency": "USDT",
+                "asset": "NCCO7241NATGAS2USD",
+                "status": 1,
+                "apiStateOpen": "true",
+                "apiStateClose": "true",
+                "ensureTrigger": false,
+                "triggerFeeRate": "0.00200000",
+                "brokerState": false,
+                "launchTime": 1776330000000,
+                "maintainTime": 0,
+                "offTime": 0,
+                "displayName": "Natural Gas(NG)-USDT"
+              },
+              "contract": {
+                "contractId": "102476",
+                "symbol": "NCCO7241NATGAS2USD-USDT",
+                "size": "0.001",
+                "quantityPrecision": 3,
+                "pricePrecision": 3,
+                "feeRate": 0.0005,
+                "makerFeeRate": 0.0002,
+                "takerFeeRate": 0.0005,
+                "tradeMinLimit": 0,
+                "tradeMinQuantity": 0.595,
+                "tradeMinUSDT": 2,
+                "currency": "USDT",
+                "asset": "NCCO7241NATGAS2USD",
+                "status": 1,
+                "apiStateOpen": "true",
+                "apiStateClose": "true",
+                "ensureTrigger": false,
+                "triggerFeeRate": "0.00200000",
+                "brokerState": false,
+                "launchTime": 1776330000000,
+                "maintainTime": 0,
+                "offTime": 0,
+                "displayName": "Natural Gas(NG)-USDT"
+              }
+            }
+          },
+          "riskPct": 12.0,
+          "marginType": "ISOLATED",
+          "smartInc": true,
+          "smartIncTol": 0.02,
+          "qty": 50,
+          "qtyKind": "contracts",
+          "sideMode": "sign"
+        }
+      ],
+      "uiCreatedAt": "2026-10-13T19:54:35.742270Z",
+      "uiUpdatedAt": "2026-10-13T20:49:46.450436Z"
     }
   ]
 }

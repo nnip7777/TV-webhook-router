@@ -604,6 +604,7 @@ class BingXBroker:
         if client_order_id:
             params['clientOrderId'] = str(client_order_id)
         if reduce_only is not None:
+            # Hedge mode rejects the field entirely — only send when explicitly needed.
             params['reduceOnly'] = 'true' if bool(reduce_only) else 'false'
         return self._request('POST', '/openApi/swap/v2/trade/order', params=params)
 
