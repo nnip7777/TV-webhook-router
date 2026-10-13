@@ -187,11 +187,23 @@ class BybitBroker:
         return self._request('GET', '/v5/position/list', params=params)
 
     def add_margin(self, symbol: str, margin: Any, category: str = 'linear', position_idx: Optional[int] = None) -> Dict[str, Any]:
-        """Add isolated margin (POST /v5/position/add-margin). margin > 0 only."""
+        """Add isolated margin (POST /v5/position/add-margin). margin > 0 only.
+
+        Bybit rejects more than 4 decimal places (retCode 10001 'margin only
+        supports 4 decimal places').
+        """
+        from decimal import Decimal, ROUND_HALF_UP
+        try:
+            q = Decimal(str(margin)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+            margin_text = format(q, 'f').rstrip('0').rstrip('.') if q == q.to_integral() else format(q.normalize(), 'f')
+            if not margin_text or Decimal(margin_text) <= 0:
+                margin_text = '0.0001'
+        except Exception:
+            margin_text = str(margin)
         body: Dict[str, Any] = {
             'category': category,
             'symbol': symbol,
-            'margin': str(margin),
+            'margin': margin_text,
         }
         if position_idx is not None:
             body['positionIdx'] = int(position_idx)

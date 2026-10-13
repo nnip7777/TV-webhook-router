@@ -100,6 +100,20 @@ def smart_inc_required_add_qty(
     return need
 
 
+def smart_inc_need_ok(need: float, destination: Dict[str, Any]) -> bool:
+    """False when need is positive but below the instrument minQty."""
+    if need is None or need <= 0:
+        return False
+    limits = (destination or {}).get('limits') or {}
+    try:
+        min_qty = float(limits.get('minQty') or 0)
+    except Exception:
+        min_qty = 0.0
+    if min_qty > 0 and need < min_qty:
+        return False
+    return True
+
+
 def smart_inc_apply_qty(quantity: Any, scaled: float) -> Any:
     """Normalize scaled qty back to int when the base was integer contracts."""
     if float(scaled).is_integer() and (isinstance(quantity, int) or (isinstance(quantity, float) and float(quantity).is_integer())):
@@ -386,20 +400,41 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'qty': quantity,
                     }
                 elif need is not None:
-                    # need is in contracts (same units as position size).
-                    if str(qty_kind).lower() == 'usdt':
+                    if not smart_inc_need_ok(need, destination):
+                        # Tiny residual add below exchange minQty — skip.
+                        smart_inc_skip = True
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'reason': 'need_below_min_qty',
+                            'qty': quantity,
+                        }
+                    elif str(qty_kind).lower() == 'usdt':
                         quantity = need * (pos_mark or pos_avg)
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'qty': quantity,
+                        }
                     else:
                         quantity = smart_inc_apply_qty(quantity, need)
-                    smart_inc_applied = {
-                        'mode': 'avg_tol',
-                        'tol': smart_inc_tol,
-                        'posQty': pos_qty,
-                        'avgPrice': pos_avg,
-                        'markPrice': pos_mark,
-                        'requiredAddQty': need,
-                        'qty': quantity,
-                    }
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'qty': quantity,
+                        }
                 else:
                     # avg/mark unavailable → fall back to hours
                     add_mode = False
@@ -453,7 +488,9 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
     if smart_inc_skip:
         _reason = 'smart_inc_avg_in_range'
-        if smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
+        if smart_inc_applied and smart_inc_applied.get('reason') == 'need_below_min_qty':
+            _reason = 'smart_inc_need_below_min_qty'
+        elif smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
             _reason = 'smart_inc_same_hour'
         return {
             'broker': broker,
@@ -1599,19 +1636,40 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'qty': quantity,
                     }
                 elif need is not None:
-                    if str(qty_kind).lower() == 'usdt':
+                    if not smart_inc_need_ok(need, destination):
+                        smart_inc_skip = True
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'reason': 'need_below_min_qty',
+                            'qty': quantity,
+                        }
+                    elif str(qty_kind).lower() == 'usdt':
                         quantity = need * (pos_mark or pos_avg)
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'qty': quantity,
+                        }
                     else:
                         quantity = smart_inc_apply_qty(quantity, need)
-                    smart_inc_applied = {
-                        'mode': 'avg_tol',
-                        'tol': smart_inc_tol,
-                        'posQty': pos_qty,
-                        'avgPrice': pos_avg,
-                        'markPrice': pos_mark,
-                        'requiredAddQty': need,
-                        'qty': quantity,
-                    }
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'qty': quantity,
+                        }
                 else:
                     add_mode = False
             if not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
@@ -1689,7 +1747,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
     if smart_inc_skip:
         _reason = 'smart_inc_avg_in_range'
-        if smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
+        if smart_inc_applied and smart_inc_applied.get('reason') == 'need_below_min_qty':
+            _reason = 'smart_inc_need_below_min_qty'
+        elif smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
             _reason = 'smart_inc_same_hour'
         _set_stage('smart_inc_skip')
         return {
