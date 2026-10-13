@@ -83,7 +83,7 @@
     "XAUTUSDT": {
       "sourceTicker": "XAUTUSDT",
       "firstSeen": "2026-04-13T05:13:00Z",
-      "lastSeen": "2026-04-14T18:01:00.055726Z",
+      "lastSeen": "2026-10-13T19:49:02.892318Z",
       "count": 2,
       "sides": [
         "sell",
@@ -91,11 +91,15 @@
       ],
       "lastPayload": {
         "sourceTicker": "XAUTUSDT",
-        "side": "sell",
-        "qty": 0.04,
+        "side": "buy",
+        "qty": 0.01,
         "source": "broker-sync",
         "broker": "bybit"
-      }
+      },
+      "sources": [
+        "broker-sync"
+      ],
+      "lastSource": "broker-sync"
     },
     "ED-6.26": {
       "sourceTicker": "ED-6.26",
@@ -194,8 +198,8 @@
     "NATURALGASNGUSDT.P": {
       "sourceTicker": "NATURALGASNGUSDT.P",
       "firstSeen": "2026-06-22T00:00:23.058863Z",
-      "lastSeen": "2026-10-09T17:38:02.469501Z",
-      "count": 167,
+      "lastSeen": "2026-10-13T18:59:01.095250Z",
+      "count": 291,
       "sides": [
         "2short",
         "2long",
@@ -204,23 +208,29 @@
       "lastPayload": {
         "sourceTicker": "NATURALGASNGUSDT.P",
         "side": "2short",
-        "qty": 1
-      }
+        "qty": 1,
+        "source": "RTT"
+      },
+      "sources": [
+        "RTT"
+      ],
+      "lastSource": "RTT"
     },
     "NG1!": {
       "sourceTicker": "NG1!",
       "firstSeen": "2026-06-22T01:20:06.143702Z",
-      "lastSeen": "2026-10-09T10:00:33.596736Z",
-      "count": 367,
+      "lastSeen": "2026-10-13T18:45:37.081715Z",
+      "count": 378,
       "sides": [
         "2short",
         "2long"
       ],
       "lastPayload": {
         "sourceTicker": "NG1!",
-        "side": "2long",
+        "side": "2short",
         "qty": 1
-      }
+      },
+      "sources": []
     },
     "NG-7.26M280726PA2.6": {
       "sourceTicker": "NG-7.26M280726PA2.6",
@@ -241,15 +251,15 @@
     "ES1!": {
       "sourceTicker": "ES1!",
       "firstSeen": "2026-06-23T11:00:05.771564Z",
-      "lastSeen": "2026-10-09T19:20:02.673111Z",
-      "count": 128,
+      "lastSeen": "2026-10-13T15:27:02.072888Z",
+      "count": 135,
       "sides": [
         "2long",
         "2short"
       ],
       "lastPayload": {
         "sourceTicker": "ES1!",
-        "side": "2short",
+        "side": "2long",
         "qty": 1
       }
     },
@@ -290,15 +300,15 @@
     "GC1!": {
       "sourceTicker": "GC1!",
       "firstSeen": "2026-06-23T22:00:09.405652Z",
-      "lastSeen": "2026-10-09T18:02:00.944341Z",
-      "count": 80,
+      "lastSeen": "2026-10-13T17:52:47.749566Z",
+      "count": 89,
       "sides": [
         "2long",
         "2short"
       ],
       "lastPayload": {
         "sourceTicker": "GC1!",
-        "side": "2short",
+        "side": "2long",
         "qty": 1
       }
     },
@@ -337,8 +347,8 @@
     "GER40": {
       "sourceTicker": "GER40",
       "firstSeen": "2026-07-03T06:00:07.314493Z",
-      "lastSeen": "2026-10-09T19:03:09.312896Z",
-      "count": 81,
+      "lastSeen": "2026-10-13T09:17:07.003601Z",
+      "count": 88,
       "sides": [
         "2short",
         "2long"
@@ -437,7 +447,7 @@
     "NCCO7241NATGAS2USD-USDT": {
       "sourceTicker": "NCCO7241NATGAS2USD-USDT",
       "firstSeen": "2026-08-12T12:59:02.965626Z",
-      "lastSeen": "2026-10-11T09:53:28.654172Z",
+      "lastSeen": "2026-10-13T19:49:02.892330Z",
       "count": 0,
       "sides": [
         "sell",
@@ -446,10 +456,14 @@
       "lastPayload": {
         "sourceTicker": "NCCO7241NATGAS2USD-USDT",
         "side": "sell",
-        "qty": 67.343,
+        "qty": 160.734,
         "source": "broker-sync",
         "broker": "bingx"
-      }
+      },
+      "sources": [
+        "broker-sync"
+      ],
+      "lastSource": "broker-sync"
     },
     "DXZ6@RTSX": {
       "sourceTicker": "DXZ6@RTSX",
@@ -505,8 +519,8 @@
     "FF2!": {
       "sourceTicker": "FF2!",
       "firstSeen": "2026-09-16T04:47:33.651524Z",
-      "lastSeen": "2026-10-09T15:02:49.859675Z",
-      "count": 27,
+      "lastSeen": "2026-10-13T15:01:48.726534Z",
+      "count": 41,
       "sides": [
         "buy",
         "2long",
@@ -553,29 +567,30 @@
     "GER40USDT.P": {
       "sourceTicker": "GER40USDT.P",
       "firstSeen": "2026-09-23T12:00:18.183077Z",
-      "lastSeen": "2026-10-08T08:00:38.329849Z",
-      "count": 4,
+      "lastSeen": "2026-10-13T07:21:21.928764Z",
+      "count": 5,
       "sides": [
-        "2long"
+        "2long",
+        "2short"
       ],
       "lastPayload": {
         "sourceTicker": "GER40USDT.P",
-        "side": "2long",
+        "side": "2short",
         "qty": 1
       }
     },
     "XAUTUSDT.P": {
       "sourceTicker": "XAUTUSDT.P",
       "firstSeen": "2026-09-28T04:00:18.404741Z",
-      "lastSeen": "2026-10-09T19:01:05.110923Z",
-      "count": 22,
+      "lastSeen": "2026-10-13T17:53:01.300244Z",
+      "count": 39,
       "sides": [
         "2long",
         "2short"
       ],
       "lastPayload": {
         "sourceTicker": "XAUTUSDT.P",
-        "side": "2short",
+        "side": "2long",
         "qty": 1
       }
     },
@@ -599,7 +614,7 @@
     "FFX6@RTSX": {
       "sourceTicker": "FFX6@RTSX",
       "firstSeen": "2026-09-30T15:10:18.150070Z",
-      "lastSeen": "2026-10-11T09:53:28.654180Z",
+      "lastSeen": "2026-10-13T19:49:02.892342Z",
       "count": 0,
       "sides": [
         "buy",
@@ -611,12 +626,16 @@
         "qty": 12.0,
         "source": "broker-sync",
         "broker": "finam"
-      }
+      },
+      "sources": [
+        "broker-sync"
+      ],
+      "lastSource": "broker-sync"
     },
     "TTF-11.26": {
       "sourceTicker": "TTF-11.26",
       "firstSeen": "2026-09-30T15:12:49.519843Z",
-      "lastSeen": "2026-10-11T09:53:28.654160Z",
+      "lastSeen": "2026-10-13T19:49:02.892303Z",
       "count": 0,
       "sides": [
         "sell"
@@ -627,6 +646,24 @@
         "qty": 5.0,
         "source": "broker-sync",
         "broker": "alor"
+      },
+      "sources": [
+        "broker-sync"
+      ],
+      "lastSource": "broker-sync"
+    },
+    "NG": {
+      "sourceTicker": "NG",
+      "firstSeen": "2026-10-11T13:43:17.632604Z",
+      "lastSeen": "2026-10-11T13:43:17.632622Z",
+      "count": 1,
+      "sides": [
+        "2long"
+      ],
+      "lastPayload": {
+        "sourceTicker": "NG",
+        "side": "2long",
+        "qty": 1
       }
     }
   }

@@ -1800,9 +1800,17 @@ def _extract_bingx_risk_details(destination: Dict[str, Any]) -> str:
     return ' | '.join(parts)
 
 
+def _payload_src_raw(payload: Dict[str, Any]) -> str:
+    """Sender marker: strategy/webhook field `src` (TV/RTT) or legacy `source`."""
+    raw = str(payload.get('src') or '').strip()
+    if not raw:
+        raw = str(payload.get('source') or '').strip()
+    return raw
+
+
 def _payload_signal_source(payload: Dict[str, Any]) -> str:
-    """Normalize payload.source for journal/admin: RTT / TV / broker-sync / ''."""
-    raw = str(payload.get('source') or '').strip()
+    """Normalize payload src/source for journal/admin: RTT / TV / broker-sync / ''."""
+    raw = _payload_src_raw(payload)
     if not raw:
         return ''
     low = raw.lower()
@@ -2149,9 +2157,10 @@ def route_matches(payload: Dict[str, Any], route: Dict[str, Any]) -> bool:
         'side': route.get('side', '*'),
     }
     # Source-aware matching: UI routes (no explicit match.source) execute TV
-    # (payload without source or source=TV). RTT / broker-sync / custom sources
+    # (payload without src or src=TV). RTT / broker-sync / custom sources
     # only match routes that explicitly list them in match.source.
-    payload_src = str(payload.get('source') or '').strip()
+    # Marker field: `src` (user strategy) or legacy `source` (runner/broker-sync).
+    payload_src = _payload_src_raw(payload)
     payload_src_l = payload_src.lower()
     match_src = match.get('source')
     if match_src in (None, '', '*'):
@@ -2463,6 +2472,7 @@ def _current_mapping(config: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, An
                     'qtyMultiplier': destination.get('qtyMultiplier', ''),
                     'riskPct': destination.get('riskPct', ''),
                     'smartInc': bool(destination.get('smartInc')),
+                    'smartIncTol': destination.get('smartIncTol', ''),
                     'limits': copy.deepcopy(destination.get('limits', {})),
                 }
     return mapping
@@ -2485,7 +2495,7 @@ def _current_destination(config: Dict[str, Any], ticker: str, broker_name: str) 
 def _all_known_tickers(config: Dict[str, Any], observed: Dict[str, Any]) -> List[str]:
     tickers = set()
     for ticker, data in observed.get('tickers', {}).items():
-        source = str((data or {}).get('lastPayload', {}).get('source') or 'webhook')
+        source = str((data or {}).get('lastPayload', {}).get('source') or (data or {}).get('lastPayload', {}).get('src') or 'webhook')
         if source in ('broker-sync',):
             continue
         tickers.add(ticker)
@@ -2794,7 +2804,7 @@ def _catalog_symbols_for_broker(broker_name: str, instruments: Dict[str, Any]) -
 
 
 def _broker_lookup_symbols_ordered(config: Dict[str, Any], broker_name: str, instruments: Dict[str, Any]) -> List[str]:
-    """Order: routing-used → catalog instruments → rest of exchange list."""
+    """Order: open positions → routing-used → catalog instruments → rest of exchange list."""
     parts: List[str] = []
     seen = set()
 
@@ -2804,6 +2814,7 @@ def _broker_lookup_symbols_ordered(config: Dict[str, Any], broker_name: str, ins
                 seen.add(text)
                 parts.append(text)
 
+    _extend(_open_position_symbols(broker_name))
     _extend(_routing_used_symbols(config, broker_name))
     _extend(_catalog_symbols_for_broker(broker_name, instruments))
     _extend(_broker_lookup_symbols(config, broker_name, instruments))
@@ -2945,7 +2956,7 @@ def _route_atomic_qty(route: Dict[str, Any]) -> str:
 
 def _observed_signal_qty(observed_entry: Dict[str, Any]) -> str:
     payload = (observed_entry or {}).get('lastPayload') or {}
-    if str(payload.get('source') or '').strip().lower() == 'broker-sync':
+    if _payload_signal_source(payload).lower() == 'broker-sync':
         return ''
     try:
         qty = abs(float(payload.get('qty')))
@@ -2958,7 +2969,7 @@ def _observed_signal_qty(observed_entry: Dict[str, Any]) -> str:
 
 def _observed_broker_sync_qty(observed_entry: Dict[str, Any]) -> str:
     payload = (observed_entry or {}).get('lastPayload') or {}
-    if str(payload.get('source') or '').strip().lower() != 'broker-sync':
+    if _payload_signal_source(payload).lower() != 'broker-sync':
         return ''
     try:
         qty = abs(float(payload.get('qty')))
@@ -3022,6 +3033,22 @@ def _live_symbol_qty_text(broker_name: str, *symbols: str) -> str:
                 if qty not in (None, ''):
                     return _fmt_qty_text(qty)
     return ''
+
+
+def _open_position_symbols(broker_name: str) -> List[str]:
+    """Exchange symbols with non-zero live position qty (for lookup top)."""
+    if not broker_name:
+        return []
+    broker_payload = (METRICS_CACHE.get('data') or {}).get(broker_name) or {}
+    out: List[str] = []
+    for symbol, symbol_payload in (broker_payload.get('symbols') or {}).items():
+        try:
+            qty_num = float(symbol_payload.get('qty'))
+        except (TypeError, ValueError):
+            continue
+        if qty_num:
+            out.append(str(symbol))
+    return out
 
 
 def _bingx_contract_lookup_options() -> List[str]:
@@ -3814,7 +3841,7 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
     return merged
 
 
-def _build_ui_route(config: Dict[str, Any], ticker: str, broker_options: Dict[str, Dict[str, Any]], atomic_qty: str = '', previous_route: Dict[str, Any] = None) -> Dict[str, Any]:
+def _build_ui_route(config: Dict[str, Any], ticker: str, broker_options: Dict[str, Dict[str, Any]], atomic_qty: str = '', previous_route: Dict[str, Any] = None, route_src: str = None) -> Dict[str, Any]:
     previous_route = previous_route or {}
     merged_options = _merge_previous_broker_options(previous_route, broker_options)
     enabled_brokers = [
@@ -3830,15 +3857,30 @@ def _build_ui_route(config: Dict[str, Any], ticker: str, broker_options: Dict[st
         for broker_name in enabled_brokers
     ]
     prev = previous_route or {}
+    match: Dict[str, Any] = {
+        'sourceTicker': [ticker],
+        'side': '*',
+    }
+    # Signal source filter for this UI route: '' / TV (default) = TV only;
+    # RTT / TV,RTT = explicit allow-list (route_matches).
+    if route_src is None:
+        prev_src = (prev.get('match') or {}).get('source')
+        src_raw = ''
+        if isinstance(prev_src, list):
+            src_raw = ','.join(str(x).strip() for x in prev_src if str(x).strip())
+        elif prev_src not in (None, ''):
+            src_raw = str(prev_src).strip()
+    else:
+        src_raw = str(route_src or '').strip()
+    src_items = [s.strip() for s in re.split(r'[,;/\s]+', src_raw) if s.strip()]
+    if src_items and src_items != ['']:
+        match['source'] = src_items
     route = {
         'id': _safe_route_id(ticker),
         'name': f'UI mapping for {ticker}',
         'enabled': True,
         'uiManaged': True,
-        'match': {
-            'sourceTicker': [ticker],
-            'side': '*'
-        },
+        'match': match,
         'destinations': destinations,
         'uiCreatedAt': prev.get('uiCreatedAt') or _utcnow_iso(),
         'uiUpdatedAt': _utcnow_iso(),
@@ -3853,12 +3895,13 @@ def _build_ui_route(config: Dict[str, Any], ticker: str, broker_options: Dict[st
     return route
 
 
-def save_mappings(config: Dict[str, Any], selections: Dict[str, Dict[str, Dict[str, Any]]], atomic_by_ticker: Dict[str, str]) -> Dict[str, Any]:
+def save_mappings(config: Dict[str, Any], selections: Dict[str, Dict[str, Dict[str, Any]]], atomic_by_ticker: Dict[str, str], src_by_ticker: Dict[str, str] = None) -> Dict[str, Any]:
     preserved_routes = [route for route in config.get('routes', []) if not route.get('uiManaged')]
     ui_routes = []
+    src_by_ticker = src_by_ticker or {}
 
     for ticker, broker_options in sorted(selections.items()):
-        route = _build_ui_route(config, ticker, broker_options, atomic_by_ticker.get(ticker, ''))
+        route = _build_ui_route(config, ticker, broker_options, atomic_by_ticker.get(ticker, ''), route_src=src_by_ticker.get(ticker))
         if route:
             ui_routes.append(route)
 
@@ -3867,13 +3910,13 @@ def save_mappings(config: Dict[str, Any], selections: Dict[str, Dict[str, Dict[s
     return config
 
 
-def save_single_ticker_mapping(config: Dict[str, Any], ticker: str, broker_options: Dict[str, Dict[str, Any]], atomic_qty: str = '') -> Dict[str, Any]:
+def save_single_ticker_mapping(config: Dict[str, Any], ticker: str, broker_options: Dict[str, Dict[str, Any]], atomic_qty: str = '', route_src: str = None) -> Dict[str, Any]:
     routes = []
     replaced = False
     route_id = _safe_route_id(ticker)
     previous_route = _get_ui_route_for_ticker(config, ticker)
     merged_broker_options = _merge_previous_broker_options(previous_route, broker_options)
-    new_route = _build_ui_route(config, ticker, merged_broker_options, atomic_qty, previous_route=previous_route)
+    new_route = _build_ui_route(config, ticker, merged_broker_options, atomic_qty, previous_route=previous_route, route_src=route_src)
 
     for route in config.get('routes', []):
         if route.get('id') == route_id and route.get('uiManaged'):
@@ -4036,10 +4079,35 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             meta_parts.append(pretty_last_seen)
         meta_text = ' · '.join(meta_parts)
 
+        # Configurable signal-source filter for this UI route (match.source).
+        # Empty / TV = execute TV only; RTT / TV,RTT = allow-list.
+        route_obj = _get_ui_route_for_ticker(config, ticker) or {}
+        match_src = (route_obj.get('match') or {}).get('source')
+        if isinstance(match_src, list):
+            route_src_value = ','.join(str(x).strip() for x in match_src if str(x).strip())
+        elif match_src not in (None, ''):
+            route_src_value = str(match_src).strip()
+        else:
+            route_src_value = ''
+        route_src_html = html.escape(route_src_value)
+        observed_sources = [str(s) for s in (obs.get('sources') or []) if str(s)]
+        if last_src and last_src not in observed_sources:
+            observed_sources.append(last_src)
+        src_datalist_id = f"lookup-src-{html.escape(ticker)}"
+        src_options = ''.join(
+            f"<option value='{html.escape(s)}'></option>"
+            for s in _dedupe_keep_order(['TV', 'RTT'] + observed_sources)
+        )
+
         rows.append(
             '<tr class="mapping-row" data-ticker="' + html.escape(ticker) + '">'
             f"<td class='save-cell'><button type='submit' class='row-save row-save-inline' data-row-save disabled>Save</button></td>"
-            f"<td class='ticker-cell'><input type='hidden' name='ticker' value='{html.escape(ticker)}'><div class='ticker-line'><code>{html.escape(ticker)}</code></div><div class='muted'>{html.escape(meta_text)}</div><div class='muted'>{html.escape(instrument_group)}</div></td>"            f"{''.join(broker_cells)}"
+            f"<td class='ticker-cell'><input type='hidden' name='ticker' value='{html.escape(ticker)}'>"
+            f"<div class='ticker-line'><code>{html.escape(ticker)}</code>"
+            f"<input list='{src_datalist_id}' autocomplete='off' class='mini-input route-src-input' type='text' name='src|{html.escape(ticker)}' value='{route_src_html}' placeholder='src' title='Источник: пусто/TV = TV; RTT или TV,RTT = allow-list'>"
+            f"<datalist id='{src_datalist_id}'>{src_options}</datalist></div>"
+            f"<div class='muted'>{html.escape(meta_text)}</div><div class='muted'>{html.escape(instrument_group)}</div></td>"
+            f"{''.join(broker_cells)}"
             '</tr>'
         )
 
@@ -4077,6 +4145,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
     .save-cell {{ width: 72px; }}
     .ticker-cell {{ width: 220px; }}
     .ticker-line {{ display:flex; align-items:center; gap:8px; margin-bottom: 4px; }}
+    .route-src-input {{ width:52px; min-width:52px; flex:0 0 auto; padding:3px 4px; font-size:11px; }}
     .broker-head {{ font-size: 12px; }}
     .broker-title {{ display:flex; align-items:center; justify-content:center; gap:6px; }}
     .broker-summary-line {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:2px; }}
@@ -4832,7 +4901,7 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
     ticker = str(payload.get('sourceTicker') or payload.get('ticker') or '?')
     side = str(payload.get('side') or '?')
     qty = payload.get('qty', '')
-    source = str(payload.get('source') or '')
+    source = _payload_signal_source(payload)
     error = str(decision.get('error') or '')
     destinations = (decision.get('executionResult') or {}).get('destinations') or []
     details = []
@@ -5400,11 +5469,15 @@ class Handler(BaseHTTPRequestHandler):
 
             tickers = form.get('ticker', [])
             selections: Dict[str, Dict[str, Dict[str, Any]]] = {ticker: {} for ticker in tickers}
+            src_by_ticker: Dict[str, str] = {}
             for key in form.keys():
                 if '|' not in key:
                     continue
                 parts = key.split('|')
                 field = parts[0]
+                if len(parts) == 2 and field == 'src':
+                    src_by_ticker[parts[1]] = form.get(key, [''])[0]
+                    continue
                 if len(parts) != 3:
                     continue
                 _, ticker, broker = parts
@@ -5439,10 +5512,13 @@ class Handler(BaseHTTPRequestHandler):
             target_ticker = form.get('saveTicker', [''])[0].strip()
             config = load_config()
             if target_ticker:
-                config = save_single_ticker_mapping(config, target_ticker, selections.get(target_ticker, {}), '')
+                config = save_single_ticker_mapping(
+                    config, target_ticker, selections.get(target_ticker, {}), '',
+                    route_src=src_by_ticker.get(target_ticker),
+                )
                 return self._json(200, {'status': 'ok', 'savedTicker': target_ticker, 'routes': len(config.get('routes', []))})
 
-            config = save_mappings(config, selections, {})
+            config = save_mappings(config, selections, {}, src_by_ticker=src_by_ticker)
             return self._json(200, {'status': 'ok', 'savedTickers': len(selections), 'routes': len(config.get('routes', []))})
 
         if self.path == '/admin/add-ticker':
