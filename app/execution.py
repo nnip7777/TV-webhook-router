@@ -421,6 +421,10 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'qty': quantity,
                 })
 
+    # avg_tol add must fill at ~current mark; maker limit may fill late/partial/wrong price.
+    if smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol':
+        execution_mode = 'market'
+
     risk_pct_raw = destination.get('riskPct') if 'riskPct' in destination else payload.get('riskPct')
     risk_pct = None
     try:
@@ -1644,6 +1648,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             risk_pct = float(str(risk_pct_raw).replace('%', '').strip())
     except Exception:
         risk_pct = None
+    # avg_tol add: BingX path has no market orders — pin limit at mark so it fills now.
+    if smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol':
+        execution_mode = 'limit'
+        if price in (None, '') and smart_inc_applied.get('markPrice'):
+            price = smart_inc_applied['markPrice']
     request_payload = {
         'broker': broker,
         'symbol': symbol,

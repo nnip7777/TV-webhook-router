@@ -1800,8 +1800,24 @@ def _extract_bingx_risk_details(destination: Dict[str, Any]) -> str:
     return ' | '.join(parts)
 
 
+def _payload_signal_source(payload: Dict[str, Any]) -> str:
+    """Normalize payload.source for journal/admin: RTT / TV / broker-sync / ''."""
+    raw = str(payload.get('source') or '').strip()
+    if not raw:
+        return ''
+    low = raw.lower()
+    if low == 'rtt':
+        return 'RTT'
+    if low in ('tv', 'tradingview'):
+        return 'TV'
+    if low == 'broker-sync':
+        return 'broker-sync'
+    return raw
+
+
 def _append_multi_destination_journal(status: str, received_at: str, payload: Dict[str, Any], materialized: Any, details_builder) -> None:
     destinations = _route_destinations(materialized)
+    signal_source = _payload_signal_source(payload)
     if len(destinations) <= 1:
         destination = destinations[0] if destinations else {}
         append_journal({
@@ -1815,6 +1831,7 @@ def _append_multi_destination_journal(status: str, received_at: str, payload: Di
             'symbol': destination.get('symbol', ''),
             'venue': destination.get('category') or destination.get('exchange') or destination.get('account') or '',
             'status': status,
+            'source': signal_source,
             'details': details_builder(destination),
         })
         return
@@ -1831,6 +1848,7 @@ def _append_multi_destination_journal(status: str, received_at: str, payload: Di
             'symbol': destination.get('symbol', ''),
             'venue': destination.get('category') or destination.get('exchange') or destination.get('account') or '',
             'status': status,
+            'source': signal_source,
             'details': details_builder(destination),
         })
 
@@ -1908,6 +1926,7 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
         qty_label = html.escape(_qty_with_unit(qty_value, qty_unit))
         brokers_label = html.escape(', '.join(item.get('brokers') or []))
         status_label = html.escape(item_status_raw)
+        source_label = html.escape(str(item.get('source') or ''))
         version = str(item.get('version') or '')
         server_hash = str(item.get('serverHash') or '')
         details_raw = str(item.get('details') or item.get('changedKeys') or '')
@@ -1929,9 +1948,9 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
         details = html.escape(details_raw).replace('\n', '<br>')
         source_file = html.escape(str(item.get('_file') or ''))
         rows.append(
-            f"<tr class='{' '.join(row_classes)}'><td>{ts}</td><td>{kind_label}</td><td>{ticker_label}</td><td>{side_label}</td><td>{qty_label}</td><td>{brokers_label}</td><td>{status_label}</td><td class='details-cell'>{details}</td><td>{source_file}</td></tr>"
+            f"<tr class='{' '.join(row_classes)}'><td>{ts}</td><td>{kind_label}</td><td>{ticker_label}</td><td>{source_label}</td><td>{side_label}</td><td>{qty_label}</td><td>{brokers_label}</td><td>{status_label}</td><td class='details-cell'>{details}</td><td>{source_file}</td></tr>"
         )
-    body_rows = ''.join(rows) or "<tr><td colspan='9'>Журнал пока пуст</td></tr>"
+    body_rows = ''.join(rows) or "<tr><td colspan='10'>Журнал пока пуст</td></tr>"
     file_list = ''.join(f"<li>{html.escape(p.name)}</li>" for p in files) or '<li>пока нет файлов</li>'
     week_values = []
     for p in files:
@@ -1987,7 +2006,7 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
     <ul>{file_list}</ul>
     <div class='muted' style='margin-top:8px;'>Всего записей: {total}. Страница: {page}.</div>
     <table>
-      <thead><tr><th>time</th><th>kind</th><th>ticker</th><th>side</th><th>qty</th><th>brokers</th><th>status</th><th>details</th><th>file</th></tr></thead>
+      <thead><tr><th>time</th><th>kind</th><th>ticker</th><th>source</th><th>side</th><th>qty</th><th>brokers</th><th>status</th><th>details</th><th>file</th></tr></thead>
       <tbody>{body_rows}</tbody>
     </table>
     <div style='margin-top:10px; display:flex; gap:12px;'>
@@ -2034,12 +2053,22 @@ def _upsert_observed_signal(observed: Dict[str, Any], payload: Dict[str, Any], i
         'lastSeen': None,
         'count': 0,
         'sides': [],
+        'sources': [],
+        'lastSource': '',
         'lastPayload': {},
     })
 
     side = payload.get('side')
     if side and side not in entry['sides']:
         entry['sides'].append(side)
+
+    src = _payload_signal_source(payload)
+    if 'sources' not in entry:
+        entry['sources'] = []
+    if src and src not in entry['sources']:
+        entry['sources'].append(src)
+    if src:
+        entry['lastSource'] = src
 
     entry['lastSeen'] = datetime.utcnow().isoformat() + 'Z'
     if increment_count:
@@ -2119,7 +2148,21 @@ def route_matches(payload: Dict[str, Any], route: Dict[str, Any]) -> bool:
         'sourceTicker': route.get('sourceTicker'),
         'side': route.get('side', '*'),
     }
+    # Source-aware matching: UI routes (no explicit match.source) execute TV
+    # (payload without source or source=TV). RTT / broker-sync / custom sources
+    # only match routes that explicitly list them in match.source.
+    payload_src = str(payload.get('source') or '').strip()
+    payload_src_l = payload_src.lower()
+    match_src = match.get('source')
+    if match_src in (None, '', '*'):
+        if payload_src_l and payload_src_l not in ('tv', 'tradingview'):
+            return False
+    else:
+        if not _matches_value(payload_src or 'TV', match_src):
+            return False
     for key, expected in match.items():
+        if key == 'source':
+            continue
         if not _matches_value(payload.get(key), expected):
             return False
     return True
@@ -3973,6 +4016,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             )
 
         side_text = ', '.join(obs.get('sides', [])) if obs.get('sides') else ''
+        last_src = str(obs.get('lastSource') or '')
         last_seen = obs.get('lastSeen', '')
         pretty_last_seen = last_seen
         if last_seen and 'T' in last_seen:
@@ -3983,7 +4027,14 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 pretty_last_seen = f"{dd}-{mm}-{yyyy} {hhmmss}"
             except Exception:
                 pretty_last_seen = last_seen
-        meta_text = ' · '.join([part for part in [side_text, pretty_last_seen] if part])
+        meta_parts = []
+        if last_src:
+            meta_parts.append(f"src={last_src}")
+        if side_text:
+            meta_parts.append(side_text)
+        if pretty_last_seen:
+            meta_parts.append(pretty_last_seen)
+        meta_text = ' · '.join(meta_parts)
 
         rows.append(
             '<tr class="mapping-row" data-ticker="' + html.escape(ticker) + '">'
@@ -4724,6 +4775,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             'time': decision.get('receivedAt'),
             'kind': destination_kind,
             'ticker': payload.get('sourceTicker'),
+            'source': _payload_signal_source(payload),
             'side': payload.get('side'),
             'qty': payload.get('qty'),
             'qtyUnit': _payload_qty_unit(payload),
@@ -4742,6 +4794,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             'time': decision.get('receivedAt'),
             'kind': summary_kind,
             'ticker': payload.get('sourceTicker'),
+            'source': _payload_signal_source(payload),
             'side': payload.get('side'),
             'qty': payload.get('qty'),
             'qtyUnit': _payload_qty_unit(payload),
