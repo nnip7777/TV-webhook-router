@@ -121,6 +121,25 @@ def smart_inc_apply_qty(quantity: Any, scaled: float) -> Any:
     return scaled
 
 
+def smart_inc_open_qty(need_contracts: float, mark_price: float, open_qty_kind: str) -> float:
+    """Convert avg_tol need (contracts) into the open/add order unit.
+
+    BingX open path uses quoteOrderQty (USDT) when openQtyKind=usdt — passing
+    the contract count as notional fills ~1/price of intended size and the
+    average barely moves. Close/reduce stays in contracts (caller unchanged).
+    """
+    kind = str(open_qty_kind or '').lower()
+    if kind in ('usdt', 'quote', 'quote_usdt', 'notional'):
+        try:
+            price = abs(float(mark_price or 0) or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            return float(need_contracts)
+        return float(need_contracts) * price
+    return float(need_contracts)
+
+
 # Periodic BingX risk sync: correct margin only once terminal risk grew
 # by this relative amount over the target (avoids micro-adjusting every cycle).
 RISK_SYNC_GROWTH_RATIO = 1.30
@@ -344,12 +363,25 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         except (TypeError, ValueError):
             base_qty = None
         if base_qty is not None:
+            # Same-hour dedup on exchange symbol (NG1! + NATURAL… → one fill).
+            hours = hours_since_last_fill(broker, symbol)
+            multiplier = smart_inc_multiplier(hours)
+            if multiplier == 0:
+                smart_inc_skip = True
+                smart_inc_applied = {
+                    'mode': 'hours',
+                    'baseQty': base_qty,
+                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                    'multiplier': 0,
+                    'qty': quantity,
+                }
             # Detect add-to-position early when tol mode is on.
+            # Same-hour skip already set → do not size further.
             add_mode = False
             pos_qty = 0.0
             pos_avg = 0.0
             pos_mark = 0.0
-            if smart_inc_tol is not None:
+            if smart_inc_tol is not None and not smart_inc_skip:
                 try:
                     _probe = BybitBroker(testnet=bool(destination.get('testnet', False)))
                     _prows = (((_probe.get_positions(category=category, symbol=symbol) or {}).get('result') or {}).get('list') or [])
@@ -385,7 +417,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             break
                 except Exception:
                     add_mode = False
-            if add_mode and pos_qty > 0 and smart_inc_tol is not None:
+            if add_mode and pos_qty > 0 and smart_inc_tol is not None and not smart_inc_skip:
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
                     smart_inc_skip = True
@@ -413,19 +445,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             'reason': 'need_below_min_qty',
                             'qty': quantity,
                         }
-                    elif str(qty_kind).lower() == 'usdt':
-                        quantity = need * (pos_mark or pos_avg)
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'qty': quantity,
-                        }
                     else:
-                        quantity = smart_inc_apply_qty(quantity, need)
+                        quantity = smart_inc_open_qty(need, pos_mark or pos_avg, qty_kind)
                         smart_inc_applied = {
                             'mode': 'avg_tol',
                             'tol': smart_inc_tol,
@@ -438,14 +459,9 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 else:
                     # avg/mark unavailable → fall back to hours
                     add_mode = False
-            if not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
-                hours = hours_since_last_fill(broker, symbol)
-                multiplier = smart_inc_multiplier(hours)
-                if multiplier == 0:
-                    smart_inc_skip = True
-                else:
-                    scaled = base_qty * multiplier
-                    quantity = int(scaled) if float(scaled).is_integer() else scaled
+            if not smart_inc_skip and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
+                scaled = base_qty * multiplier
+                quantity = int(scaled) if float(scaled).is_integer() else scaled
                 if smart_inc_applied is None:
                     smart_inc_applied = {}
                 smart_inc_applied.update({
@@ -1584,12 +1600,24 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         except (TypeError, ValueError):
             base_qty = None
         if base_qty is not None:
+            # Same-hour dedup on exchange symbol (NG1! + NATURAL… → one fill).
+            hours = hours_since_last_fill(broker, symbol)
+            multiplier = smart_inc_multiplier(hours)
+            if multiplier == 0:
+                smart_inc_skip = True
+                smart_inc_applied = {
+                    'mode': 'hours',
+                    'baseQty': base_qty,
+                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                    'multiplier': 0,
+                    'qty': quantity,
+                }
             # Detect add-to-position when avg-tol mode is on (same as Bybit).
             add_mode = False
             pos_qty = 0.0
             pos_avg = 0.0
             pos_mark = 0.0
-            if smart_inc_tol is not None:
+            if smart_inc_tol is not None and not smart_inc_skip:
                 try:
                     _probe = BingXBroker()
                     _prows = _bingx_position_rows(_probe.get_positions(symbol), symbol)
@@ -1621,7 +1649,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             break
                 except Exception:
                     add_mode = False
-            if add_mode and pos_qty > 0 and smart_inc_tol is not None:
+            if add_mode and pos_qty > 0 and smart_inc_tol is not None and not smart_inc_skip:
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
                     smart_inc_skip = True
@@ -1648,19 +1676,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             'reason': 'need_below_min_qty',
                             'qty': quantity,
                         }
-                    elif str(qty_kind).lower() == 'usdt':
-                        quantity = need * (pos_mark or pos_avg)
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'qty': quantity,
-                        }
                     else:
-                        quantity = smart_inc_apply_qty(quantity, need)
+                        # need is contracts; open path uses quoteOrderQty when openQtyKind=usdt.
+                        quantity = smart_inc_open_qty(need, pos_mark or pos_avg, open_qty_kind)
                         smart_inc_applied = {
                             'mode': 'avg_tol',
                             'tol': smart_inc_tol,
@@ -1669,17 +1687,13 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             'markPrice': pos_mark,
                             'requiredAddQty': need,
                             'qty': quantity,
+                            'qtyKind': open_qty_kind,
                         }
                 else:
                     add_mode = False
-            if not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
-                hours = hours_since_last_fill(broker, symbol)
-                multiplier = smart_inc_multiplier(hours)
-                if multiplier == 0:
-                    smart_inc_skip = True
-                else:
-                    scaled = base_qty * multiplier
-                    quantity = int(scaled) if float(scaled).is_integer() else scaled
+            if not smart_inc_skip and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
+                scaled = base_qty * multiplier
+                quantity = int(scaled) if float(scaled).is_integer() else scaled
                 if smart_inc_applied is None:
                     smart_inc_applied = {}
                 smart_inc_applied.update({

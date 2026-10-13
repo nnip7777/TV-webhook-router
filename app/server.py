@@ -4072,7 +4072,8 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 pretty_last_seen = last_seen
         meta_parts = []
         if last_src:
-            meta_parts.append(f"src={last_src}")
+            # Last observed signal origin — not the route match.source filter.
+            meta_parts.append(f"lastSignal={last_src}")
         if side_text:
             meta_parts.append(side_text)
         if pretty_last_seen:

@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / 'app'))
 
 import analytics  # noqa: E402
 import execution  # noqa: E402
-from execution import smart_inc_max_multiplier, smart_inc_multiplier, smart_inc_avg_tol, smart_inc_required_add_qty  # noqa: E402
+from execution import smart_inc_max_multiplier, smart_inc_multiplier, smart_inc_avg_tol, smart_inc_required_add_qty, smart_inc_open_qty  # noqa: E402
 
 
 class SmartIncAvgTolTest(unittest.TestCase):
@@ -71,6 +71,33 @@ class SmartIncRequiredAddQtyTest(unittest.TestCase):
         self.assertIsNone(smart_inc_required_add_qty(10, 3.5, 0, 'long', 0.01))
         self.assertIsNone(smart_inc_required_add_qty(10, 3.5, 3.528, '', 0.01))
         self.assertIsNone(smart_inc_required_add_qty(10, 3.5, 3.528, 'long', None))
+
+
+class SmartIncOpenQtyTest(unittest.TestCase):
+    """need is always contracts; open/add order may be USDT notional."""
+
+    def test_usdt_open_multiplies_by_mark(self):
+        # 199.906 contracts @ 3.575 → ~714.66 USDT (bug was quoteOrderQty=199.9)
+        self.assertAlmostEqual(smart_inc_open_qty(199.906, 3.575, 'usdt'), 199.906 * 3.575, places=6)
+
+    def test_contracts_open_passthrough(self):
+        self.assertEqual(smart_inc_open_qty(199.906, 3.575, 'contracts'), 199.906)
+
+    def test_quote_aliases(self):
+        self.assertAlmostEqual(smart_inc_open_qty(10, 2.0, 'quote'), 20.0)
+        self.assertAlmostEqual(smart_inc_open_qty(10, 2.0, 'notional'), 20.0)
+
+    def test_zero_mark_falls_back_to_contracts(self):
+        self.assertEqual(smart_inc_open_qty(50, 0, 'usdt'), 50.0)
+
+    def test_user_halving_example(self):
+        # M=400 USDT, gap=0.04, tol=0.02 → need_contracts * mark = M*(gap/tol-1)=400
+        # Q=110.2 contracts @3.63, A=P-0.04, P=3.63, tol=0.02
+        Q, P, tol = 110.2, 3.63, 0.02
+        A = P - 0.04
+        need = smart_inc_required_add_qty(Q, A, P, 'short', tol)
+        usdt = smart_inc_open_qty(need, P, 'usdt')
+        self.assertAlmostEqual(usdt, 400.0, delta=5.0)
 
 
 class SmartIncMultiplierTest(unittest.TestCase):
