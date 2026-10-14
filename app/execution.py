@@ -735,18 +735,22 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
             # Open/add must be USDT (user rule). Adapter converts USDT → contracts
             # with lotSizeFilter step; close/reduce stays in contracts.
-            if not reduce_only and str(qty_kind).lower() != 'usdt':
+            # NOTE: qty_kind is closed over from _execute_bybit — do NOT assign
+            # here or it becomes a local UnboundLocalError in this nested _run.
+            order_qty_kind = qty_kind
+            order_qty = quantity
+            if not reduce_only and str(order_qty_kind).lower() != 'usdt':
                 try:
                     tick = client._request('GET', '/v5/market/tickers', params={'category': category, 'symbol': symbol})
                     row = (((tick.get('result') or {}).get('list') or [None]) or [None])[0] or {}
                     mark = row.get('markPrice') or row.get('lastPrice') or 0
                     if mark:
-                        quantity = float(quantity) * float(mark)
-                        qty_kind = 'usdt'
-                        request_payload['qty'] = quantity
+                        order_qty = float(order_qty) * float(mark)
+                        order_qty_kind = 'usdt'
+                        request_payload['qty'] = order_qty
                         request_payload['qtyKind'] = 'usdt'
                         if smart_inc_applied is not None:
-                            smart_inc_applied['qty'] = quantity
+                            smart_inc_applied['qty'] = order_qty
                             smart_inc_applied['qtyKind'] = 'usdt'
                 except Exception:
                     pass
@@ -757,24 +761,24 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 order_result = client.place_order(
                     symbol=symbol,
                     side=side,
-                    qty=quantity,
+                    qty=order_qty,
                     category=category,
                     order_type='Limit',
                     price=price,
                     reduce_only=reduce_only,
                     position_idx=margin_idx,
-                    qty_kind=qty_kind,
+                    qty_kind=order_qty_kind,
                 )
             else:
                 order_result = client.place_order(
                     symbol=symbol,
                     side=side,
-                    qty=quantity,
+                    qty=order_qty,
                     category=category,
                     order_type='Market',
                     reduce_only=reduce_only,
                     position_idx=margin_idx,
-                    qty_kind=qty_kind,
+                    qty_kind=order_qty_kind,
                 )
 
             # Post-trade: if position already open and risk above target, top-up margin.
