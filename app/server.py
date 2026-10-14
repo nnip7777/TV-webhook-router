@@ -1387,6 +1387,31 @@ def _result_is_dry_run(result_obj: Any) -> bool:
     return False
 
 
+_SKIP_REASON_TEXT = {
+    'smart_inc_same_hour': 'skip: уже был ордер по этому символу в текущем часе',
+    'smart_inc_avg_in_range': 'skip: средняя цена уже в диапазоне tol',
+    'smart_inc_need_below_min': 'skip: объём add меньше минимума биржи',
+    'smart_inc_need_below_min_qty': 'skip: объём add меньше minQty',
+    'smart_inc_need_below_min_usdt': 'skip: объём add меньше minUsdt',
+}
+
+
+def _skip_reason_text(dest: Dict[str, Any]) -> str:
+    """Human-readable skip reason for journal details (empty if not skipped)."""
+    if not isinstance(dest, dict) or not dest.get('skipped'):
+        return ''
+    reason = str(dest.get('skipReason') or '')
+    if not reason:
+        result_obj = dest.get('results') or {}
+        if isinstance(result_obj, dict):
+            reason = str(result_obj.get('reason') or result_obj.get('skipReason') or '')
+            if not reason:
+                si = result_obj.get('smartInc')
+                if isinstance(si, dict):
+                    reason = str(si.get('reason') or '')
+    return _SKIP_REASON_TEXT.get(reason, f'skip: {reason}' if reason else 'skip')
+
+
 def _safe_append_journal(entry: Dict[str, Any]) -> None:
     try:
         append_journal(entry)
@@ -4855,6 +4880,23 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             piece += f" err={err[:220]}"
         destination_debug.append(piece)
 
+        skip_txt = _skip_reason_text(dest)
+        if dest.get('skipped'):
+            broker_status = 'skipped'
+        detail_parts = []
+        if skip_txt:
+            detail_parts.append(skip_txt)
+        if units_hint:
+            detail_parts.append(units_hint)
+        detail_parts.append(f"payload={_short_json(payload)}")
+        if req:
+            detail_parts.append(f"request={_short_json(req, 260)}")
+        if risk_details:
+            detail_parts.append(f"risk={risk_details}")
+        if result_obj and not dest.get('skipped'):
+            detail_parts.append(f"result={_short_json(result_obj, 260)}")
+        if err:
+            detail_parts.append(f"error={err[:260]}")
         append_journal({
             'time': decision.get('receivedAt'),
             'kind': destination_kind,
@@ -4867,13 +4909,33 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             'status': broker_status,
             'symbol': symbol,
             'venue': venue,
-            'details': (_journal_units_hint(req, symbol) + (" | " if _journal_units_hint(req, symbol) else '')) + f"payload={_short_json(payload)}" + (f" | request={_short_json(req, 260)}" if req else '') + (f" | risk={risk_details}" if risk_details else '') + (f" | result={_short_json(result_obj, 260)}" if result_obj else '') + (f" | error={err[:260]}" if err else ''),
+            'details': ' | '.join(detail_parts),
         })
 
     summary_needed = bool(decision.get('error')) or len(destinations) <= 1
     if summary_needed:
         route_destinations = _route_destinations(materialized)
         single_destination = route_destinations[:1]
+        skip_txt = ''
+        for dest in destinations:
+            skip_txt = _skip_reason_text(dest)
+            if skip_txt:
+                break
+        if not skip_txt and decision.get('status') == 'skipped':
+            skip_txt = 'skip'
+        summary_detail_parts = []
+        if skip_txt:
+            summary_detail_parts.append(skip_txt)
+        units_hint = _journal_units_hint(single_destination[0] if single_destination else {}, str((single_destination[0] if single_destination else {}).get('symbol') or ''))
+        if units_hint:
+            summary_detail_parts.append(units_hint)
+        summary_detail_parts.append(f"payload={_short_json(payload)}")
+        if materialized:
+            summary_detail_parts.append(f"route={_short_json(materialized, 280)}")
+        if destination_debug:
+            summary_detail_parts.append(f"exec={' || '.join(destination_debug)}")
+        if decision.get('error'):
+            summary_detail_parts.append(f"error={decision.get('error')}")
         append_journal({
             'time': decision.get('receivedAt'),
             'kind': summary_kind,
@@ -4884,7 +4946,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             'qtyUnit': _payload_qty_unit(payload),
             'brokers': [d.get('broker') for d in single_destination if d.get('broker')],
             'status': decision.get('status'),
-            'details': (_journal_units_hint(single_destination[0] if single_destination else {}, str((single_destination[0] if single_destination else {}).get('symbol') or '')) + (" | " if single_destination else '')) + f"payload={_short_json(payload)}" + (f" | route={_short_json(materialized, 280)}" if materialized else '') + (f" | exec={' || '.join(destination_debug)}" if destination_debug else '') + (f" | error={decision.get('error')}" if decision.get('error') else ''),
+            'details': ' | '.join(summary_detail_parts),
         })
 
 
