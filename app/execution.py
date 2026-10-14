@@ -1780,11 +1780,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             risk_pct = float(str(risk_pct_raw).replace('%', '').strip())
     except Exception:
         risk_pct = None
-    # avg_tol add: BingX path has no market orders — pin limit at mark so it fills now.
-    if smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol':
-        execution_mode = 'limit'
-        if price in (None, '') and smart_inc_applied.get('markPrice'):
-            price = smart_inc_applied['markPrice']
+    # avg_tol add on BingX: keep cell execution mode (maker/limit) and leave price
+    # empty so prepare_limit_order uses smart depth placement (get_best_depth_price).
+    # Do NOT pin to mark — that bypasses the book and causes cancel/repost churn.
     # avg_tol / open path orders are placed in USDT when openQtyKind=usdt.
     request_qty_kind = open_qty_kind if (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol') else qty_kind
     request_payload = {
