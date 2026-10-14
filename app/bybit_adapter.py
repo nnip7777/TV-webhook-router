@@ -186,6 +186,33 @@ class BybitBroker:
             params['settleCoin'] = settle_coin
         return self._request('GET', '/v5/position/list', params=params)
 
+    def get_nearest_price(self, symbol: str, side: str, category: str = 'linear') -> Optional[str]:
+        """Nearest book level: best ask for buy / best bid for sell."""
+        try:
+            resp = self._request('GET', '/v5/market/orderbook', params={'category': category, 'symbol': symbol, 'limit': 50})
+            data = (resp.get('result') or {})
+            asks = data.get('a') or data.get('asks') or []
+            bids = data.get('b') or data.get('bids') or []
+            # Bybit returns a/b for orderbook; also accepts asks/bids
+            if not asks and not bids:
+                resp2 = self._request('GET', '/v5/market/orderbook', params={'category': category, 'symbol': symbol, 'limit': 50})
+                data = (resp2.get('result') or {})
+                asks = data.get('asks') or data.get('a') or []
+                bids = data.get('bids') or data.get('b') or []
+            side_n = str(side or '').strip().lower()
+            levels = asks if side_n == 'buy' else bids
+            if levels and isinstance(levels[0], (list, tuple)) and levels[0]:
+                return str(levels[0][0])
+            if levels and isinstance(levels[0], dict):
+                return str(levels[0].get('price') or '')
+        except Exception:
+            return None
+        return None
+
+    def get_order_status(self, symbol: str, order_id: str, category: str = 'linear') -> Dict[str, Any]:
+        return self._request('GET', '/v5/order/realtime', params={'category': category, 'symbol': symbol, 'orderId': order_id})
+
+
     def add_margin(self, symbol: str, margin: Any, category: str = 'linear', position_idx: Optional[int] = None) -> Dict[str, Any]:
         """Add isolated margin (POST /v5/position/add-margin). margin > 0 only.
 
@@ -303,7 +330,7 @@ class BybitBroker:
             if price is None:
                 raise ValueError('Limit order requires price')
             body['price'] = str(price)
-            body['timeInForce'] = 'GTC'
+            body['timeInForce'] = 'IOC'
         else:
             body['timeInForce'] = 'IOC'
 

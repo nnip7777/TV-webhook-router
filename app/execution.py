@@ -582,6 +582,96 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
             target_mode_close_then_open = False
             close_order_result: Dict[str, Any] | None = None
 
+            # Nearest book level + IOC + repost remainder (same as BingX, all brokers).
+            def _bybit_walk_ioc(side_str: str, qty_val: Any, kind: str, reduce_only_flag: bool, pos_idx: Any) -> Dict[str, Any]:
+                remaining = qty_val
+                kind_cur = kind
+                order_result: Dict[str, Any] = {}
+                attempts: List[Dict[str, Any]] = []
+                request_payload['iocAttempts'] = attempts
+                for attempt in range(6):
+                    nearest = client.get_nearest_price(symbol, side_str, category)
+                    if nearest in (None, '', '0', '0.0'):
+                        # Fallback: market (immediate, no wait).
+                        order_result = client.place_order(
+                            symbol=symbol, side=side_str, qty=remaining, category=category,
+                            order_type='Market', reduce_only=reduce_only_flag,
+                            position_idx=pos_idx, qty_kind=kind_cur,
+                        )
+                        attempts.append({'attempt': attempt + 1, 'fallback': 'market', 'result': order_result})
+                        break
+                    order_result = client.place_order(
+                        symbol=symbol, side=side_str, qty=remaining, category=category,
+                        order_type='Limit', price=nearest, reduce_only=reduce_only_flag,
+                        position_idx=pos_idx, qty_kind=kind_cur,
+                    )
+                    ret = (order_result or {}).get('retCode')
+                    order_id = (((order_result or {}).get('result') or {}) or {}).get('orderId')
+                    att = {
+                        'attempt': attempt + 1,
+                        'price': nearest,
+                        'qty': remaining,
+                        'qtyKind': kind_cur,
+                        'orderId': order_id,
+                        'result': order_result,
+                    }
+                    attempts.append(att)
+                    if ret not in (None, 0, '0') or not order_id:
+                        break
+                    # Poll fill briefly.
+                    status = 'NEW'
+                    executed = Decimal('0')
+                    for wait in (0.15, 0.3, 0.5):
+                        time.sleep(wait)
+                        st = client.get_order_status(symbol, str(order_id), category=category)
+                        row = (((st or {}).get('result') or {}).get('list') or [None] or [None])[0] or {}
+                        status = str(row.get('orderStatus') or row.get('status') or '').upper()
+                        try:
+                            executed = Decimal(str(row.get('cumExecQty') or row.get('executedQty') or '0'))
+                        except Exception:
+                            executed = Decimal('0')
+                        if status in ('FILLED', 'CANCELLED', 'CANCELED', 'PARTIALLY_FILLED', 'DEALTH', 'REJECTED'):
+                            break
+                    att['finalStatus'] = status
+                    att['executedQty'] = str(executed)
+                    if status == 'FILLED':
+                        att['remainingQty'] = '0'
+                        break
+                    # Remaining: qty minus executed (contracts). For usdt, convert executed→usdt.
+                    try:
+                        qty_dec = Decimal(str(remaining))
+                    except Exception:
+                        qty_dec = Decimal('0')
+                    if str(kind_cur).lower() in ('usdt', 'quote', 'quote_usdt', 'notional'):
+                        try:
+                            px_dec = Decimal(str(nearest))
+                            exec_usdt = executed * px_dec if px_dec > 0 else Decimal('0')
+                        except Exception:
+                            exec_usdt = Decimal('0')
+                        rem = qty_dec - exec_usdt
+                    else:
+                        rem = qty_dec - executed
+                    if rem <= 0:
+                        att['remainingQty'] = '0'
+                        break
+                    # Round remaining up to instrument step for next IOC.
+                    try:
+                        rules = client.get_qty_rules(symbol, category)
+                        step = Decimal(str(rules.get('qtyStep') or '0.001'))
+                        if str(kind_cur).lower() not in ('usdt', 'quote', 'quote_usdt', 'notional'):
+                            from decimal import ROUND_UP as _RU
+                            rem = rem.quantize(step, rounding=_RU) if rem > 0 else Decimal('0')
+                    except Exception:
+                        pass
+                    if rem <= 0:
+                        att['remainingQty'] = '0'
+                        break
+                    remaining = float(rem) if str(kind_cur).lower() not in ('usdt', 'quote', 'quote_usdt', 'notional') else format(rem, 'f').rstrip('0').rstrip('.')
+                    att['remainingQty'] = str(remaining)
+                    att['repost'] = True
+                return order_result
+
+
             if signal_mode == 'target-direction':
                 positions = client.get_positions(category=category, symbol=symbol)
                 request_payload['positionListRaw'] = positions
@@ -647,14 +737,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'qty': close_qty,
                         'positionIdx': close_position_idx,
                     }
-                    close_order_result = client.place_order(
-                        symbol=symbol,
-                        side=close_side,
-                        qty=close_qty,
-                        category=category,
-                        order_type='Market',
-                        reduce_only=True,
-                        position_idx=close_position_idx,
+                    close_order_result = _bybit_walk_ioc(
+                        close_side, close_qty, 'contracts', True, close_position_idx,
                     )
                     request_payload['closeOppositeResult'] = close_order_result
                     close_ret = (close_order_result or {}).get('retCode')
@@ -760,28 +844,23 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
             if str(execution_mode).lower() == 'limit':
                 price = destination.get('price') or payload.get('price')
                 request_payload['price'] = price
-                order_result = client.place_order(
-                    symbol=symbol,
-                    side=side,
-                    qty=order_qty,
-                    category=category,
-                    order_type='Limit',
-                    price=price,
-                    reduce_only=reduce_only,
-                    position_idx=margin_idx,
-                    qty_kind=order_qty_kind,
-                )
+                if price not in (None, ''):
+                    order_result = client.place_order(
+                        symbol=symbol,
+                        side=side,
+                        qty=order_qty,
+                        category=category,
+                        order_type='Limit',
+                        price=price,
+                        reduce_only=reduce_only,
+                        position_idx=margin_idx,
+                        qty_kind=order_qty_kind,
+                    )
+                else:
+                    order_result = _bybit_walk_ioc(side, order_qty, order_qty_kind, reduce_only, margin_idx)
             else:
-                order_result = client.place_order(
-                    symbol=symbol,
-                    side=side,
-                    qty=order_qty,
-                    category=category,
-                    order_type='Market',
-                    reduce_only=reduce_only,
-                    position_idx=margin_idx,
-                    qty_kind=order_qty_kind,
-                )
+                # Market path still walks nearest+IOC when possible (no GTC wait).
+                order_result = _bybit_walk_ioc(side, order_qty, order_qty_kind, reduce_only, margin_idx)
 
             # Post-trade: if position already open and risk above target, top-up margin.
             if risk_control_enabled and not reduce_only:
