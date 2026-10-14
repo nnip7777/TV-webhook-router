@@ -4887,8 +4887,11 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
         if dest.get('skipped'):
             broker_status = 'skipped'
         detail_parts = []
+        # Reason first — journal UI shows a long details line; bury it after JSON = invisible.
         if skip_txt:
             detail_parts.append(skip_txt)
+        elif err:
+            detail_parts.append(f'error: {err[:240]}')
         if units_hint:
             detail_parts.append(units_hint)
         detail_parts.append(f"payload={_short_json(payload)}")
@@ -4896,9 +4899,9 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             detail_parts.append(f"request={_short_json(req, 260)}")
         if risk_details:
             detail_parts.append(f"risk={risk_details}")
-        if result_obj and not dest.get('skipped'):
+        if result_obj and not dest.get('skipped') and not err:
             detail_parts.append(f"result={_short_json(result_obj, 260)}")
-        if err:
+        if err and skip_txt:
             detail_parts.append(f"error={err[:260]}")
         append_journal({
             'time': decision.get('receivedAt'),
@@ -4920,15 +4923,22 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
         route_destinations = _route_destinations(materialized)
         single_destination = route_destinations[:1]
         skip_txt = ''
+        dest_err = ''
         for dest in destinations:
-            skip_txt = _skip_reason_text(dest)
-            if skip_txt:
-                break
+            if not skip_txt:
+                skip_txt = _skip_reason_text(dest)
+            if not dest_err:
+                dest_err = str(dest.get('error') or _result_error_text(dest.get('results') or {}) or '')
         if not skip_txt and decision.get('status') == 'skipped':
             skip_txt = 'skip'
+        if not dest_err:
+            dest_err = str(decision.get('error') or '')
         summary_detail_parts = []
         if skip_txt:
             summary_detail_parts.append(skip_txt)
+        # Summary error first too (webhook row when single destination).
+        if not skip_txt and dest_err:
+            summary_detail_parts.append(f'error: {dest_err[:240]}')
         units_hint = _journal_units_hint(single_destination[0] if single_destination else {}, str((single_destination[0] if single_destination else {}).get('symbol') or ''))
         if units_hint:
             summary_detail_parts.append(units_hint)
@@ -4937,8 +4947,8 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             summary_detail_parts.append(f"route={_short_json(materialized, 280)}")
         if destination_debug:
             summary_detail_parts.append(f"exec={' || '.join(destination_debug)}")
-        if decision.get('error'):
-            summary_detail_parts.append(f"error={decision.get('error')}")
+        if dest_err and not skip_txt:
+            summary_detail_parts.append(f"error={dest_err}")
         append_journal({
             'time': decision.get('receivedAt'),
             'kind': summary_kind,
