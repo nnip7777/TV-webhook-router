@@ -2230,9 +2230,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         current_prepared['quoteOrderQty'] = remaining_qty
                     else:
                         current_prepared['quantity'] = remaining_qty
-                    # Open/add: IOC vs nearest book level — take what's there now,
-                    # remainder reposts to the next level. Close keeps GTC.
-                    open_tif = 'GTC' if loop_reduce_only else 'IOC'
+                    # Open AND close: IOC vs nearest book level — take what's there
+                    # now; remainder reposts to the next level. No GTC waiting.
+                    open_tif = 'IOC'
                     _set_stage(f"{stage_prefix}place_limit_order" if attempt_index == 0 else f"{stage_prefix}place_limit_order_repost")
                     attempt_result = client.place_limit_order(
                         current_prepared,
