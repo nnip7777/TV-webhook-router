@@ -464,13 +464,15 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     if need_usdt is None or need_usdt <= 0:
                         add_mode = False
                     else:
-                        # min: destination.minUsdt or instrument minNotional (checked at place)
+                        # min: cell.minUsdt / instrument minNotional (XAUT=5).
                         limits = (destination or {}).get('limits') or {}
                         min_usdt = 0.0
                         try:
                             min_usdt = float(limits.get('minUsdt') or 0)
                         except (TypeError, ValueError):
                             min_usdt = 0.0
+                        if min_usdt <= 0 and str(symbol).upper() == 'XAUTUSDT':
+                            min_usdt = 5.0  # Bybit lotSizeFilter.minNotionalValue
                         if min_usdt > 0 and need_usdt < min_usdt:
                             smart_inc_skip = True
                             smart_inc_applied = {

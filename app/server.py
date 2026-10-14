@@ -2552,6 +2552,20 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
     symbol_limits = _lookup_symbol_limits(broker_cfg, destination.get('symbol'))
     if symbol_limits:
         destination['limits'] = copy.deepcopy(symbol_limits)
+    # Cell-provided limits (minUsdt/minQty) win over catalog defaults.
+    cell_limits = options.get('limits')
+    if isinstance(cell_limits, dict) and cell_limits:
+        merged = dict(destination.get('limits') or {})
+        for lk, lv in cell_limits.items():
+            if lv not in (None, ''):
+                merged[lk] = lv
+        destination['limits'] = merged
+    # Bybit XAUT: instrument minNotional=5 USDT (UI save may wipe cell limits).
+    if broker_name == 'bybit' and str(destination.get('symbol') or '').upper() == 'XAUTUSDT':
+        lim = dict(destination.get('limits') or {})
+        lim.setdefault('minUsdt', 5)
+        lim.setdefault('minQty', 0.002)
+        destination['limits'] = lim
 
     risk_pct_raw = str(options.get('riskPct', '')).strip().replace('%', '')
     # riskPct/smartInc are supported for BingX and Bybit (cell UI + execution).

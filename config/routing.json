@@ -332551,7 +332551,7 @@
           "testnet": false,
           "broker": "bybit",
           "symbol": "XAUTUSDT",
-          "riskPct": 12.0,
+          "riskPct": 17.0,
           "marginType": "ISOLATED",
           "smartInc": true,
           "smartIncTol": 10.0,
@@ -332565,7 +332565,7 @@
         }
       ],
       "uiCreatedAt": "2026-10-11T22:39:01.940672Z",
-      "uiUpdatedAt": "2026-10-13T19:53:45.434828Z"
+      "uiUpdatedAt": "2026-10-14T09:10:04.715971Z"
     },
     {
       "id": "ui-gc1",
@@ -332590,7 +332590,7 @@
           "testnet": false,
           "broker": "bybit",
           "symbol": "XAUTUSDT",
-          "riskPct": 12.0,
+          "riskPct": 17.0,
           "marginType": "ISOLATED",
           "smartInc": true,
           "smartIncTol": 10.0,
@@ -332604,7 +332604,7 @@
         }
       ],
       "uiCreatedAt": "2026-10-11T23:01:37.585906Z",
-      "uiUpdatedAt": "2026-10-13T19:53:36.309966Z"
+      "uiUpdatedAt": "2026-10-14T09:10:14.925055Z"
     },
     {
       "id": "ui-ng1",
