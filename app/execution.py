@@ -459,30 +459,43 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'qty': quantity,
                     }
                 elif need is not None:
-                    if not smart_inc_need_ok(need, destination):
-                        # Tiny residual add below exchange minQty — skip.
-                        smart_inc_skip = True
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'reason': 'need_below_min_qty',
-                            'qty': quantity,
-                        }
+                    # Open/add is ALWAYS USDT (user rule). need is contracts internally.
+                    need_usdt = smart_inc_open_qty(need, pos_mark or pos_avg, 'usdt')
+                    if need_usdt is None or need_usdt <= 0:
+                        add_mode = False
                     else:
-                        quantity = smart_inc_open_qty(need, pos_mark or pos_avg, qty_kind)
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'qty': quantity,
-                        }
+                        # min: destination.minUsdt or instrument minNotional (checked at place)
+                        limits = (destination or {}).get('limits') or {}
+                        min_usdt = 0.0
+                        try:
+                            min_usdt = float(limits.get('minUsdt') or 0)
+                        except (TypeError, ValueError):
+                            min_usdt = 0.0
+                        if min_usdt > 0 and need_usdt < min_usdt:
+                            smart_inc_skip = True
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddUsdt': need_usdt,
+                                'reason': 'need_below_min_usdt',
+                                'qty': quantity,
+                            }
+                        else:
+                            quantity = need_usdt
+                            qty_kind = 'usdt'
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddUsdt': need_usdt,
+                                'qty': quantity,
+                                'qtyKind': 'usdt',
+                            }
                 else:
                     # avg/mark unavailable → fall back to hours
                     add_mode = False
@@ -720,6 +733,24 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 'results': add_resp,
                             }
 
+            # Open/add must be USDT (user rule). Adapter converts USDT → contracts
+            # with lotSizeFilter step; close/reduce stays in contracts.
+            if not reduce_only and str(qty_kind).lower() != 'usdt':
+                try:
+                    tick = client._request('GET', '/v5/market/tickers', params={'category': category, 'symbol': symbol})
+                    row = (((tick.get('result') or {}).get('list') or [None]) or [None])[0] or {}
+                    mark = row.get('markPrice') or row.get('lastPrice') or 0
+                    if mark:
+                        quantity = float(quantity) * float(mark)
+                        qty_kind = 'usdt'
+                        request_payload['qty'] = quantity
+                        request_payload['qtyKind'] = 'usdt'
+                        if smart_inc_applied is not None:
+                            smart_inc_applied['qty'] = quantity
+                            smart_inc_applied['qtyKind'] = 'usdt'
+                except Exception:
+                    pass
+
             if str(execution_mode).lower() == 'limit':
                 price = destination.get('price') or payload.get('price')
                 request_payload['price'] = price
@@ -732,6 +763,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     price=price,
                     reduce_only=reduce_only,
                     position_idx=margin_idx,
+                    qty_kind=qty_kind,
                 )
             else:
                 order_result = client.place_order(
@@ -742,6 +774,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     order_type='Market',
                     reduce_only=reduce_only,
                     position_idx=margin_idx,
+                    qty_kind=qty_kind,
                 )
 
             # Post-trade: if position already open and risk above target, top-up margin.

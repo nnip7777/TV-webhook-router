@@ -219,6 +219,49 @@ class BybitBroker:
             body['positionIdx'] = int(position_idx)
         return self._request('POST', '/v5/position/set-margin-mode', body=body)
 
+    def get_qty_rules(self, symbol: str, category: str = 'linear') -> Dict[str, Any]:
+        """lotSizeFilter for linear symbol: minOrderQty / qtyStep / minNotionalValue."""
+        cache = getattr(self, '_qty_rules_cache', None)
+        if cache is None:
+            cache = {}
+            self._qty_rules_cache = cache
+        key = f'{category}:{symbol}'
+        if key in cache:
+            return cache[key]
+        rules = {'minOrderQty': 0.001, 'qtyStep': 0.001, 'minNotionalValue': 0.0}
+        try:
+            info = self._request('GET', '/v5/market/instruments-info', params={'category': category, 'symbol': symbol})
+            row = (((info.get('result') or {}).get('list') or [None]) or [None])[0]
+            lot = (row or {}).get('lotSizeFilter') or {}
+            rules = {
+                'minOrderQty': float(lot.get('minOrderQty') or 0.001),
+                'qtyStep': float(lot.get('qtyStep') or 0.001),
+                'minNotionalValue': float(lot.get('minNotionalValue') or 0),
+            }
+        except Exception:
+            pass
+        cache[key] = rules
+        return rules
+
+    def usdt_to_contract_qty(self, symbol: str, usdt_qty: Any, price: Any, category: str = 'linear') -> float:
+        """USDT notional → contracts, quantized DOWN to qtyStep (Bybit linear API takes contracts)."""
+        from decimal import Decimal, ROUND_DOWN
+        usdt = Decimal(str(usdt_qty or '0'))
+        px = Decimal(str(price or '0'))
+        if usdt <= 0 or px <= 0:
+            return 0.0
+        rules = self.get_qty_rules(symbol, category)
+        step = Decimal(str(rules.get('qtyStep') or '0.001'))
+        min_qty = Decimal(str(rules.get('minOrderQty') or '0.001'))
+        contracts = (usdt / px)
+        contracts = contracts.quantize(step, rounding=ROUND_DOWN)
+        if contracts < min_qty:
+            return 0.0
+        min_notional = Decimal(str(rules.get('minNotionalValue') or '0'))
+        if min_notional > 0 and contracts * px < min_notional:
+            return 0.0
+        return float(contracts)
+
     def place_order(
         self,
         symbol: str,
@@ -229,13 +272,28 @@ class BybitBroker:
         price: Optional[Any] = None,
         reduce_only: bool = False,
         position_idx: Optional[int] = None,
+        qty_kind: str = 'contracts',
     ) -> Dict[str, Any]:
+        """qty: contracts by default; qty_kind='usdt' converts via lotSizeFilter."""
+        out_qty = qty
+        if str(qty_kind or '').lower() in ('usdt', 'quote', 'quote_usdt', 'notional'):
+            px = price
+            if px in (None, '', 0, '0'):
+                try:
+                    book = self._request('GET', '/v5/market/tickers', params={'category': category, 'symbol': symbol})
+                    row = (((book.get('result') or {}).get('list') or [None]) or [None])[0] or {}
+                    px = row.get('markPrice') or row.get('lastPrice') or 0
+                except Exception:
+                    px = 0
+            out_qty = self.usdt_to_contract_qty(symbol, qty, px, category)
+            if not out_qty:
+                return {'retCode': 10001, 'retMsg': 'Qty invalid (usdt below minOrderQty/minNotional)', 'result': {}}
         body: Dict[str, Any] = {
             'category': category,
             'symbol': symbol,
             'side': 'Buy' if str(side).lower() == 'buy' else 'Sell',
             'orderType': 'Limit' if str(order_type).lower() == 'limit' else 'Market',
-            'qty': str(qty),
+            'qty': str(out_qty),
             'reduceOnly': reduce_only,
         }
         if position_idx is not None:
