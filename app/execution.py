@@ -65,7 +65,7 @@ def smart_inc_required_add_qty(
     tol: float,
     max_hours: int | None = None,
 ) -> float | None:
-    """Qty to add so position avg is within `tol` of mark.
+    """Contracts to add so position avg is within `tol` of mark (internal math).
 
     LONG:  skip if A ≤ P+tol; else q ≥ Q*(A−P−tol)/tol  → new_avg ≤ P+tol
     SHORT: skip if A ≥ P−tol; else q ≥ Q*(P−tol−A)/tol  → new_avg ≥ P−tol
@@ -98,6 +98,33 @@ def smart_inc_required_add_qty(
     if max_hours is not None and max_hours > 0:
         need = min(need, float(q0) * float(max_hours))
     return need
+
+
+def smart_inc_required_add_usdt(
+    base_qty: float,
+    avg_price: float,
+    mark_price: float,
+    direction: str,
+    tol: float,
+    max_hours: int | None = None,
+) -> float | None:
+    """USDT notional to add so avg is within `tol` of mark.
+
+    N = M * (gap/tol − 1) where M = Q*P; same as contracts_need * P.
+    Open/add orders are placed in USDT (quoteOrderQty) — this is the qty to send.
+    """
+    need_c = smart_inc_required_add_qty(base_qty, avg_price, mark_price, direction, tol, max_hours)
+    if need_c is None:
+        return None
+    if need_c <= 0:
+        return 0.0
+    try:
+        p = float(mark_price)
+    except (TypeError, ValueError):
+        return None
+    if p <= 0:
+        return None
+    return need_c * p
 
 
 def smart_inc_need_ok(need: float, destination: Dict[str, Any]) -> bool:
@@ -504,8 +531,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
     if smart_inc_skip:
         _reason = 'smart_inc_avg_in_range'
-        if smart_inc_applied and smart_inc_applied.get('reason') == 'need_below_min_qty':
-            _reason = 'smart_inc_need_below_min_qty'
+        if smart_inc_applied and smart_inc_applied.get('reason') in ('need_below_min_qty', 'need_below_min_usdt'):
+            _reason = 'smart_inc_need_below_min'
         elif smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
             _reason = 'smart_inc_same_hour'
         return {
@@ -1116,7 +1143,11 @@ def _bingx_order_id(order_row: Dict[str, Any]) -> str:
 
 
 def _bingx_order_status(order_row: Dict[str, Any]) -> str:
-    return str(order_row.get('status') or '').strip().upper()
+    status = str(order_row.get('status') or '').strip().upper()
+    # BingX uses British CANCELLED; older checks used CANCELED.
+    if status == 'CANCELLED':
+        return 'CANCELED'
+    return status
 
 
 def _safe_decimal(value: Any, default: str = '0') -> Decimal:
@@ -1664,31 +1695,60 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'qty': quantity,
                     }
                 elif need is not None:
-                    if not smart_inc_need_ok(need, destination):
-                        smart_inc_skip = True
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'reason': 'need_below_min_qty',
-                            'qty': quantity,
-                        }
+                    # Open/add is placed in USDT — compute notional directly, no contract qty on the wire.
+                    need_usdt = smart_inc_required_add_usdt(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
+                    if need_usdt is None:
+                        add_mode = False
                     else:
-                        # need is contracts; open path uses quoteOrderQty when openQtyKind=usdt.
-                        quantity = smart_inc_open_qty(need, pos_mark or pos_avg, open_qty_kind)
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'qty': quantity,
-                            'qtyKind': open_qty_kind,
-                        }
+                        # min check: minUsdt (preferred) or minQty*price; skip tiny residuals.
+                        limits = (destination or {}).get('limits') or {}
+                        min_usdt = 0.0
+                        try:
+                            min_usdt = float(limits.get('minUsdt') or 0)
+                        except (TypeError, ValueError):
+                            min_usdt = 0.0
+                        if min_usdt <= 0 and limits.get('minQty'):
+                            try:
+                                min_usdt = float(limits['minQty']) * (pos_mark or pos_avg)
+                            except (TypeError, ValueError):
+                                min_usdt = 0.0
+                        if need_usdt <= 0:
+                            smart_inc_skip = True
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddUsdt': 0.0,
+                                'reason': 'avg_already_in_range',
+                                'qty': quantity,
+                            }
+                        elif min_usdt > 0 and need_usdt < min_usdt:
+                            smart_inc_skip = True
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddUsdt': need_usdt,
+                                'reason': 'need_below_min_usdt',
+                                'qty': quantity,
+                            }
+                        else:
+                            quantity = need_usdt
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddUsdt': need_usdt,
+                                'qty': quantity,
+                                'qtyKind': 'usdt',
+                            }
+                            open_qty_kind = 'usdt'
                 else:
                     add_mode = False
             if not smart_inc_skip and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
@@ -1725,12 +1785,14 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         execution_mode = 'limit'
         if price in (None, '') and smart_inc_applied.get('markPrice'):
             price = smart_inc_applied['markPrice']
+    # avg_tol / open path orders are placed in USDT when openQtyKind=usdt.
+    request_qty_kind = open_qty_kind if (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol') else qty_kind
     request_payload = {
         'broker': broker,
         'symbol': symbol,
         'side': side,
         'qty': quantity,
-        'qtyKind': qty_kind,
+        'qtyKind': request_qty_kind,
         'category': category,
         'executionMode': execution_mode,
         'positionSide': position_side,
@@ -2119,13 +2181,18 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 poll_plan_ms = [350, 700, 1200]
                 max_reposts = 5
                 current_prepared = dict(loop_prepared)
-                remaining_qty = str(current_prepared.get('quantity'))
+                # USDT orders carry quoteOrderQty; contracts carry quantity.
+                is_quote_order = str(current_prepared.get('qtyKind') or '').lower() in ('usdt', 'quote', 'quote_usdt', 'notional') or current_prepared.get('quoteOrderQty') not in (None, '')
+                remaining_qty = str(current_prepared.get('quoteOrderQty') if is_quote_order else current_prepared.get('quantity'))
                 loop_result = None
                 loop_final_order_row = {}
                 loop_effective_position_side = loop_position_side
 
                 for attempt_index in range(max_reposts + 1):
-                    current_prepared['quantity'] = remaining_qty
+                    if is_quote_order:
+                        current_prepared['quoteOrderQty'] = remaining_qty
+                    else:
+                        current_prepared['quantity'] = remaining_qty
                     _set_stage(f"{stage_prefix}place_limit_order" if attempt_index == 0 else f"{stage_prefix}place_limit_order_repost")
                     attempt_result = client.place_limit_order(
                         current_prepared,
@@ -2182,7 +2249,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
                     loop_final_order_row = latest_order or order_row
                     final_status = _bingx_order_status(loop_final_order_row)
-                    total_qty = current_prepared.get('quantity') or '0'
+                    total_qty = current_prepared.get('quoteOrderQty') if is_quote_order else (current_prepared.get('quantity') or '0')
                     quantity_precision = int((prepared.get('contract') or {}).get('quantityPrecision') or 0)
                     attempt_entry['observedCompletedAt'] = _utcnow_iso()
 
@@ -2208,7 +2275,17 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             break
 
                     executed_qty = _bingx_order_executed_qty(loop_final_order_row)
-                    remaining_qty = _bingx_remaining_qty(total_qty, executed_qty, quantity_precision)
+                    if is_quote_order:
+                        # remaining in USDT: total quote − filled notional (executed contracts × avg price)
+                        avg_fill = _bingx_order_avg_price(loop_final_order_row, current_prepared.get('price'))
+                        filled_notional = executed_qty * avg_fill
+                        rem = _safe_decimal(total_qty) - filled_notional
+                        if rem < 0:
+                            rem = Decimal('0')
+                        # price precision for USDT remainder
+                        remaining_qty = format(rem, 'f').rstrip('0').rstrip('.') or '0'
+                    else:
+                        remaining_qty = _bingx_remaining_qty(total_qty, executed_qty, quantity_precision)
                     attempt_entry['finalStatus'] = final_status
                     attempt_entry['executedQty'] = str(executed_qty)
                     attempt_entry['remainingQty'] = remaining_qty
@@ -2255,8 +2332,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         break
 
                     _set_stage(f'{stage_prefix}prepare_repost_price')
-                    repost_prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=remaining_qty, price=None, qty_kind='contracts')
+                    repost_kind = 'usdt' if is_quote_order else 'contracts'
+                    repost_prepared = client.prepare_limit_order(symbol=symbol, side=side, qty=remaining_qty, price=None, qty_kind=repost_kind)
                     current_prepared = repost_prepared
+                    is_quote_order = str(current_prepared.get('qtyKind') or '').lower() in ('usdt', 'quote', 'quote_usdt', 'notional') or current_prepared.get('quoteOrderQty') not in (None, '')
                     request_payload['repostCount'] = request_payload.get('repostCount', 0) + 1
 
                 return loop_result, loop_final_order_row, remaining_qty, order_attempts, loop_effective_position_side

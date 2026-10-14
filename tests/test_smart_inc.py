@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / 'app'))
 
 import analytics  # noqa: E402
 import execution  # noqa: E402
-from execution import smart_inc_max_multiplier, smart_inc_multiplier, smart_inc_avg_tol, smart_inc_required_add_qty, smart_inc_open_qty  # noqa: E402
+from execution import smart_inc_max_multiplier, smart_inc_multiplier, smart_inc_avg_tol, smart_inc_required_add_qty, smart_inc_open_qty, smart_inc_required_add_usdt, _bingx_order_status  # noqa: E402
 
 
 class SmartIncAvgTolTest(unittest.TestCase):
@@ -98,6 +98,34 @@ class SmartIncOpenQtyTest(unittest.TestCase):
         need = smart_inc_required_add_qty(Q, A, P, 'short', tol)
         usdt = smart_inc_open_qty(need, P, 'usdt')
         self.assertAlmostEqual(usdt, 400.0, delta=5.0)
+
+
+class SmartIncRequiredAddUsdtTest(unittest.TestCase):
+    def test_gas_short_usdt_direct(self):
+        # live case: Q=156.05, A=3.607, P=3.648, tol=0.016 → ~889.48 USDT
+        usdt = smart_inc_required_add_usdt(156.05, 3.607, 3.648, 'short', 0.016)
+        self.assertAlmostEqual(usdt, 889.485, places=3)
+
+    def test_in_range_is_zero(self):
+        self.assertEqual(smart_inc_required_add_usdt(100, 3.55, 3.56, 'short', 0.02), 0.0)
+
+    def test_halving_from_notional(self):
+        # Q*P=400, gap=0.04, tol=0.02 → N=400
+        Q, P, tol = 400 / 3.63, 3.63, 0.02
+        usdt = smart_inc_required_add_usdt(Q, P - 0.04, P, 'short', tol)
+        self.assertAlmostEqual(usdt, 400.0, delta=1.0)
+
+    def test_bad_inputs_none(self):
+        self.assertIsNone(smart_inc_required_add_usdt(0, 3.5, 3.6, 'short', 0.01))
+        self.assertIsNone(smart_inc_required_add_usdt(10, 3.5, 3.6, 'long', None))
+
+
+class BingxOrderStatusTest(unittest.TestCase):
+    def test_cancelled_british_normalizes(self):
+        self.assertEqual(_bingx_order_status({'status': 'CANCELLED'}), 'CANCELED')
+        self.assertEqual(_bingx_order_status({'status': 'canceled'}), 'CANCELED')
+        self.assertEqual(_bingx_order_status({'status': 'NEW'}), 'NEW')
+        self.assertEqual(_bingx_order_status({'status': 'FILLED'}), 'FILLED')
 
 
 class SmartIncMultiplierTest(unittest.TestCase):
