@@ -272,6 +272,7 @@ class BingXBroker:
         covered = Decimal('0')
         levels_used = []
         selected_price = None
+        nearest_price = None
         for level in levels:
             if not isinstance(level, (list, tuple)) or len(level) < 2:
                 continue
@@ -289,9 +290,17 @@ class BingXBroker:
                 'rawQty': format(level_qty, 'f'),
                 'availableQty': format(available, 'f'),
             })
+            # Nearest book position (best ask for buy / best bid for sell) —
+            # trade against THIS level first; remaining qty reposts to the next.
+            if nearest_price is None:
+                nearest_price = price
             selected_price = price
             if covered >= target:
                 break
+
+        # Prefer nearest level: one IOC against it, then repost remainder to next level.
+        if nearest_price is not None:
+            selected_price = nearest_price
 
         return {
             'selectedPrice': None if selected_price is None else format(selected_price, 'f'),
@@ -586,13 +595,14 @@ class BingXBroker:
         position_side: Optional[str] = 'BOTH',
         reduce_only: Optional[bool] = None,
         client_order_id: Optional[str] = None,
+        time_in_force: str = 'GTC',
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             'symbol': prepared['symbol'],
             'side': prepared['side'],
             'type': 'LIMIT',
             'price': prepared['price'],
-            'timeInForce': 'GTC',
+            'timeInForce': str(time_in_force or 'GTC').upper(),
         }
         if prepared.get('quoteOrderQty') not in (None, ''):
             params['quoteOrderQty'] = prepared['quoteOrderQty']

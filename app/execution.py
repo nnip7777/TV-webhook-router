@@ -2230,12 +2230,16 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         current_prepared['quoteOrderQty'] = remaining_qty
                     else:
                         current_prepared['quantity'] = remaining_qty
+                    # Open/add: IOC vs nearest book level — take what's there now,
+                    # remainder reposts to the next level. Close keeps GTC.
+                    open_tif = 'GTC' if loop_reduce_only else 'IOC'
                     _set_stage(f"{stage_prefix}place_limit_order" if attempt_index == 0 else f"{stage_prefix}place_limit_order_repost")
                     attempt_result = client.place_limit_order(
                         current_prepared,
                         position_side=loop_position_side,
                         reduce_only=loop_reduce_only,
                         client_order_id=client_order_id,
+                        time_in_force=open_tif,
                     )
 
                     message = str((attempt_result or {}).get('msg') or '')
@@ -2249,6 +2253,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             position_side=retry_position_side,
                             reduce_only=loop_reduce_only,
                             client_order_id=client_order_id,
+                            time_in_force=open_tif,
                         )
 
                     loop_result = attempt_result
@@ -2323,6 +2328,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         remaining_qty = format(rem, 'f').rstrip('0').rstrip('.') or '0'
                     else:
                         remaining_qty = _bingx_remaining_qty(total_qty, executed_qty, quantity_precision)
+                    # Fully filled order: quoteOrderQty rounding must not look like an unfilled remainder.
+                    if final_status == 'FILLED':
+                        remaining_qty = '0'
                     attempt_entry['finalStatus'] = final_status
                     attempt_entry['executedQty'] = str(executed_qty)
                     attempt_entry['remainingQty'] = remaining_qty
@@ -2354,6 +2362,23 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
                     if final_status == 'FILLED' or Decimal(remaining_qty) <= 0:
                         break
+
+                    # IOC (open/add): exchange already cancelled the unfilled part —
+                    # remaining qty → next book level via repost, don't treat as error.
+                    if open_tif == 'IOC' and final_status in ('CANCELED', 'EXPIRED', 'PARTIALLY_FILLED'):
+                        if attempt_index >= max_reposts:
+                            break
+                        if Decimal(remaining_qty) <= 0:
+                            break
+                        _set_stage(f'{stage_prefix}prepare_repost_price')
+                        repost_kind = 'usdt' if is_quote_order else 'contracts'
+                        repost_prepared = client.prepare_limit_order(
+                            symbol=symbol, side=side, qty=remaining_qty, price=None, qty_kind=repost_kind,
+                        )
+                        current_prepared = repost_prepared
+                        is_quote_order = str(current_prepared.get('qtyKind') or '').lower() in ('usdt', 'quote', 'quote_usdt', 'notional') or current_prepared.get('quoteOrderQty') not in (None, '')
+                        request_payload['repostCount'] = request_payload.get('repostCount', 0) + 1
+                        continue
 
                     if final_status not in ('NEW', 'PARTIALLY_FILLED'):
                         break
@@ -2784,8 +2809,19 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             business_error = str(result.get('msg') or result.get('code') or 'bingx_error')
         elif request_payload.get('finalRemainingQty') not in (None, '', '0'):
             try:
-                if Decimal(str(request_payload.get('finalRemainingQty'))) > 0:
-                    business_error = f"unfilled_remainder:{request_payload.get('finalRemainingQty')}"
+                rem = Decimal(str(request_payload.get('finalRemainingQty')))
+                if rem > 0:
+                    # Dust below instrument min → not an error (quote rounding / partial level).
+                    limits = (destination or {}).get('limits') or {}
+                    unit = str(request_payload.get('openQtyKind') or request_payload.get('qtyKind') or '').lower()
+                    if unit in ('usdt', 'quote', 'quote_usdt', 'notional'):
+                        min_rem = Decimal(str(limits.get('minUsdt') or 1))
+                    else:
+                        min_rem = Decimal(str(limits.get('minQty') or 0.001))
+                    if min_rem <= 0:
+                        min_rem = Decimal('0.001')
+                    if rem >= min_rem:
+                        business_error = f"unfilled_remainder:{request_payload.get('finalRemainingQty')}"
             except Exception:
                 pass
 
