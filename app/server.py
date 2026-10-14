@@ -1390,9 +1390,12 @@ def _result_is_dry_run(result_obj: Any) -> bool:
 _SKIP_REASON_TEXT = {
     'smart_inc_same_hour': 'skip: уже был ордер по этому символу в текущем часе',
     'smart_inc_avg_in_range': 'skip: средняя цена уже в диапазоне tol',
+    'avg_already_in_range': 'skip: средняя цена уже в диапазоне tol',
     'smart_inc_need_below_min': 'skip: объём add меньше минимума биржи',
     'smart_inc_need_below_min_qty': 'skip: объём add меньше minQty',
+    'need_below_min_qty': 'skip: объём add меньше minQty',
     'smart_inc_need_below_min_usdt': 'skip: объём add меньше minUsdt',
+    'need_below_min_usdt': 'skip: объём add меньше minUsdt',
 }
 
 
