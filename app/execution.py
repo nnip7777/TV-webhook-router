@@ -803,21 +803,25 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 add = target_margin_pre - before_iso
                 if add > 1e-8:
                     if before_iso <= 1e-8 and before_qty <= 0:
-                        # opening new isolated position: set isolated mode first
+                        # Opening NEW isolated position: only set isolated mode here.
+                        # add_margin requires an open position (Bybit: "Margin cannot
+                        # be set without open position") — top-up happens post-trade.
                         client.set_margin_mode(symbol, trade_mode=1, position_idx=margin_idx)
-                    add = min(add, max(0.0, available))
-                    if add > 1e-8:
-                        request_payload['riskControl']['preTradeAddMargin'] = add
-                        add_resp = client.add_margin(symbol, add, category=category, position_idx=margin_idx)
-                        request_payload['riskControl']['preTradeAddMarginResult'] = add_resp
-                        ret = (add_resp or {}).get('retCode')
-                        if ret not in (None, 0, '0'):
-                            msg = str((add_resp or {}).get('retMsg') or '')
-                            return {
-                                **{k: request_payload[k] for k in ('broker', 'symbol', 'side', 'qty') if k in request_payload},
-                                'error': f'pre_trade_margin_failed: {msg or ret}',
-                                'results': add_resp,
-                            }
+                    elif before_qty > 0:
+                        # Existing position: top-up before placing.
+                        add = min(add, max(0.0, available))
+                        if add > 1e-8:
+                            request_payload['riskControl']['preTradeAddMargin'] = add
+                            add_resp = client.add_margin(symbol, add, category=category, position_idx=margin_idx)
+                            request_payload['riskControl']['preTradeAddMarginResult'] = add_resp
+                            ret = (add_resp or {}).get('retCode')
+                            if ret not in (None, 0, '0'):
+                                msg = str((add_resp or {}).get('retMsg') or '')
+                                return {
+                                    **{k: request_payload[k] for k in ('broker', 'symbol', 'side', 'qty') if k in request_payload},
+                                    'error': f'pre_trade_margin_failed: {msg or ret}',
+                                    'results': add_resp,
+                                }
 
             # Open/add must be USDT (user rule). Adapter converts USDT → contracts
             # with lotSizeFilter step; close/reduce stays in contracts.
@@ -1978,7 +1982,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             request_payload['price'] = prepared['price']
             request_payload['symbol'] = prepared['symbol']
             request_payload['qty'] = prepared.get('quantity', prepared.get('quoteOrderQty', quantity))
-            request_payload['qtyKind'] = qty_kind
+            # Journal truth: USDT open path uses quoteOrderQty — report openQtyKind as qtyKind.
+            if str(open_qty_kind).lower() in ('usdt', 'quote', 'quote_usdt', 'notional'):
+                request_payload['qtyKind'] = 'usdt'
+            else:
+                request_payload['qtyKind'] = qty_kind
             request_payload['openQtyKind'] = open_qty_kind
             request_payload['positionSide'] = position_side
             request_payload['bookTicker'] = prepared.get('bookTicker') or {}
