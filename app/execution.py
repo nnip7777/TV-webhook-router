@@ -2234,6 +2234,17 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 # for post-fill top-up to target (initial margin comes out of available too).
                 if current_iso <= 0:
                     if available + 1e-8 < target_iso:
+                        # Flip close→open: isolated free-up may lag the balance snapshot.
+                        # One short retry with a fresh balance before aborting.
+                        rc['preTradeBalanceRetry'] = True
+                        time.sleep(0.4)
+                        try:
+                            pre_bal = client.get_balance()
+                            available = _bingx_account_available(pre_bal)
+                            rc['preTradeAvailableRetry'] = available
+                        except Exception as retry_exc:
+                            rc['preTradeBalanceRetryError'] = str(retry_exc)
+                    if available + 1e-8 < target_iso:
                         rc['preTradeAddMarginSkipped'] = 'insufficient_balance_for_new_position'
                         return _pretrade_abort(
                             f'pre-trade margin insufficient for new position: '
@@ -2622,6 +2633,16 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     open_side = 'buy' if target_direction == 'long' else 'sell'
                     open_position_side = 'LONG' if target_direction == 'long' else 'SHORT'
                     _set_stage('target_direction_prepare_open')
+                    # Flip: close just freed isolated margin — refresh balance before
+                    # the open pre-trade check (BingX available can lag a beat).
+                    time.sleep(0.35)
+                    try:
+                        fresh_bal = client.get_balance()
+                        margin_ops['balance'] = fresh_bal
+                        request_payload['riskControl']['balanceRefreshAfterClose'] = True
+                        request_payload['riskControl']['availableAfterClose'] = _bingx_account_available(fresh_bal)
+                    except Exception as refresh_exc:
+                        request_payload['riskControl']['balanceRefreshAfterCloseError'] = str(refresh_exc)
                     target_open_qty_kind = 'usdt'
                     open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None, qty_kind=target_open_qty_kind)
                     request_payload['targetOpenQtyKind'] = target_open_qty_kind
