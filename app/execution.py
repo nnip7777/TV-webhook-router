@@ -1175,6 +1175,24 @@ def _bingx_target_isolated_for_notional(notional: float, risk_pct: float) -> flo
     return maintenance / (float(risk_pct) / 100.0)
 
 
+def _bingx_prepared_notional(prepared: Dict[str, Any]) -> float:
+    """USDT notional of a prepared order: quoteOrderQty is already USDT (no mark×)."""
+    quote = prepared.get('quoteOrderQty')
+    if quote not in (None, ''):
+        try:
+            return abs(float(quote))
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        qty = abs(float(prepared.get('quantity') or 0))
+        price = abs(float(prepared.get('price') or 0))
+    except (TypeError, ValueError):
+        return 0.0
+    if str(prepared.get('qtyKind') or '').lower() in ('usdt', 'quote', 'quote_usdt', 'notional'):
+        return qty
+    return qty * price
+
+
 def _bingx_extract_position(positions_payload: Dict[str, Any], symbol: str, fallback_side: str = '') -> Dict[str, Any]:
     rows = (positions_payload or {}).get('data') or []
     if isinstance(rows, dict):
@@ -2144,9 +2162,18 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     positions_before = client.get_positions(prepared['symbol'])
                 before_position = _bingx_extract_position(positions_before, prepared['symbol'], requested_position_side)
                 before_qty = _bingx_position_qty(before_position)
+                # Target leg only: extract may fall back to the opposite (flip) leg
+                # when the open side is still empty.
+                before_side = str((before_position or {}).get('positionSide') or (before_position or {}).get('side') or '').upper()
+                if str(requested_position_side or '').upper() and before_side and before_side != str(requested_position_side).upper():
+                    before_qty = 0.0
                 mark_price = float(prepared['price'])
-                incoming_qty = abs(float(prepared.get('quantity') or prepared.get('quoteOrderQty') or 0))
-                expected_final_qty = max(0.0, before_qty + incoming_qty)
+                incoming_notional = _bingx_prepared_notional(prepared)
+                try:
+                    incoming_raw = abs(float(prepared.get('quoteOrderQty') or prepared.get('quantity') or 0))
+                except (TypeError, ValueError):
+                    incoming_raw = 0.0
+                expected_final_qty = max(0.0, before_qty + (0.0 if prepared.get('quoteOrderQty') not in (None, '') else incoming_raw))
                 unrealized_before = _bingx_account_unrealized(balance)
                 # Terminal Risk = riskRate = maintenance / isolated.
                 # Target isolated so riskRate == riskPct% (e.g.12 → 0.12).
@@ -2154,7 +2181,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 target_isolated_pre = allowed_loss + unrealized_before
                 if target_isolated_pre < 0:
                     target_isolated_pre = 0.0
-                expected_notional = abs(mark_price * expected_final_qty)
+                # Final notional = target-side contracts×mark + this order (USDT already USDT).
+                expected_notional = abs(mark_price * before_qty) + incoming_notional
                 target_margin_pre = min(expected_notional, target_isolated_pre) if target_isolated_pre > 0 else 0.0
                 # Do not change leverage — user sets it in BingX terminal.
                 actual_leverage = 0
@@ -2170,7 +2198,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'targetIsolatedPre': target_isolated_pre,
                     'targetIsolatedRiskRate': _bingx_target_isolated_for_notional(expected_notional, risk_pct),
                     'beforeQty': before_qty,
-                    'incomingQty': incoming_qty,
+                    'incomingQty': incoming_raw,
+                    'incomingNotional': incoming_notional,
                     'expectedFinalQty': expected_final_qty,
                     'expectedNotional': expected_notional,
                     'preTradeLeverage': actual_leverage,
@@ -2202,18 +2231,31 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         '_riskControl': margin_ops,
                     }
 
-                target_iso = _bingx_target_isolated_for_notional(
-                    float(rc.get('expectedNotional') or 0.0), risk_pct
-                )
-                rc['preTradeTargetIsolated'] = target_iso
-                if target_iso <= 0:
-                    return None
+                # Recompute from THIS order + live target-side position:
+                # flip close→open invalidates the pre-close snapshot, and
+                # quoteOrderQty is already USDT (must not × mark).
                 _set_stage('pre_trade_get_position')
                 try:
                     pos_rows = client.get_positions(prepared['symbol'])
                     pos = _bingx_extract_position(pos_rows, prepared['symbol'], position_side)
                 except Exception as e:
                     return _pretrade_abort(f'pre-trade margin: cannot read position: {e} — order not placed')
+                same_side_qty = _bingx_position_qty(pos)
+                pos_side = str((pos or {}).get('positionSide') or (pos or {}).get('side') or '').upper()
+                if str(position_side or '').upper() and pos_side and pos_side != str(position_side).upper():
+                    same_side_qty = 0.0
+                try:
+                    mark_now = abs(float(prepared.get('price') or 0))
+                except (TypeError, ValueError):
+                    mark_now = 0.0
+                order_notional = _bingx_prepared_notional(prepared)
+                expected_notional = abs(mark_now * same_side_qty) + order_notional
+                rc['expectedNotional'] = expected_notional
+                rc['expectedNotionalSource'] = 'prepared+live_position'
+                target_iso = _bingx_target_isolated_for_notional(expected_notional, risk_pct)
+                rc['preTradeTargetIsolated'] = target_iso
+                if target_iso <= 0:
+                    return None
                 current_iso = _bingx_position_isolated(pos)
                 rc['preTradeIsolated'] = current_iso
                 need_add = max(0.0, target_iso - current_iso)

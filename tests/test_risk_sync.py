@@ -289,5 +289,29 @@ class BingXRiskSyncOnceTest(unittest.TestCase):
         self.assertIn('insufficient_available_balance', self.journal[0]['details'])
 
 
+class BingXPreparedNotionalTest(unittest.TestCase):
+    """USDT opens must not mark×qty (gas flip 2026-10-18: 500 USDT → fake 1775)."""
+
+    def test_quote_order_qty_is_already_usdt(self):
+        from execution import _bingx_prepared_notional, _bingx_target_isolated_for_notional
+        prepared = {'quoteOrderQty': '500', 'price': '3.391', 'qtyKind': 'usdt'}
+        notional = _bingx_prepared_notional(prepared)
+        self.assertAlmostEqual(notional, 500.0, places=8)
+        # riskPct=15 → maintenance 0.3%×500 / 0.15 = 10 USDT (was 35.51 with bug)
+        target = _bingx_target_isolated_for_notional(notional, 15.0)
+        self.assertAlmostEqual(target, 10.0, places=8)
+
+    def test_contracts_qty_uses_price(self):
+        from execution import _bingx_prepared_notional
+        prepared = {'quantity': '10', 'price': '3.391', 'qtyKind': 'contracts'}
+        self.assertAlmostEqual(_bingx_prepared_notional(prepared), 33.91, places=6)
+
+    def test_regression_old_mixed_units_formula(self):
+        # old: mark × (short_contracts + usdt_qty) = 3.391 × 523.598 = 1775.5 → target 35.51
+        from execution import _bingx_target_isolated_for_notional
+        buggy = 3.391 * (23.598 + 500)
+        self.assertAlmostEqual(_bingx_target_isolated_for_notional(buggy, 15.0), 35.51041636, places=6)
+
+
 if __name__ == '__main__':
     unittest.main()
