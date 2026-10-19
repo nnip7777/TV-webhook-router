@@ -447,17 +447,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
             if add_mode and pos_qty > 0 and smart_inc_tol is not None and not smart_inc_skip:
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
-                    smart_inc_skip = True
-                    smart_inc_applied = {
-                        'mode': 'avg_tol',
-                        'tol': smart_inc_tol,
-                        'posQty': pos_qty,
-                        'avgPrice': pos_avg,
-                        'markPrice': pos_mark,
-                        'requiredAddQty': 0.0,
-                        'reason': 'avg_already_in_range',
-                        'qty': quantity,
-                    }
+                    # Avg already within tol: do not skip — fall through to hours (cell × hours).
+                    add_mode = False
                 elif need is not None:
                     # Open/add is ALWAYS USDT (user rule). need is contracts internally.
                     need_usdt = smart_inc_open_qty(need, pos_mark or pos_avg, 'usdt')
@@ -1823,17 +1814,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             if add_mode and pos_qty > 0 and smart_inc_tol is not None and not smart_inc_skip:
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
-                    smart_inc_skip = True
-                    smart_inc_applied = {
-                        'mode': 'avg_tol',
-                        'tol': smart_inc_tol,
-                        'posQty': pos_qty,
-                        'avgPrice': pos_avg,
-                        'markPrice': pos_mark,
-                        'requiredAddQty': 0.0,
-                        'reason': 'avg_already_in_range',
-                        'qty': quantity,
-                    }
+                    # Avg already within tol: do not skip — fall through to hours (cell × hours).
+                    add_mode = False
                 elif need is not None:
                     # Open/add is placed in USDT — compute notional directly, no contract qty on the wire.
                     need_usdt = smart_inc_required_add_usdt(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
@@ -1853,17 +1835,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             except (TypeError, ValueError):
                                 min_usdt = 0.0
                         if need_usdt <= 0:
-                            smart_inc_skip = True
-                            smart_inc_applied = {
-                                'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
-                                'posQty': pos_qty,
-                                'avgPrice': pos_avg,
-                                'markPrice': pos_mark,
-                                'requiredAddUsdt': 0.0,
-                                'reason': 'avg_already_in_range',
-                                'qty': quantity,
-                            }
+                            # Numerically in range after usdt conversion — fall through to hours.
+                            add_mode = False
                         elif min_usdt > 0 and need_usdt < min_usdt:
                             smart_inc_skip = True
                             smart_inc_applied = {
