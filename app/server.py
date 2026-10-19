@@ -6001,7 +6001,9 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception:
                 pass
-            return self._json(404, {'error': 'route_not_found', 'message': 'Ticker observed and added to admin UI'})
+            # TV treats non-2xx as delivery failure and raises alert errors;
+            # journal/admin still record route_not_found — accept with 202.
+            return self._json(202, {'error': 'route_not_found', 'message': 'Ticker observed and added to admin UI'})
 
         materialized = materialize_route(payload, route, config)
         decision = _enqueue_webhook_job(payload, materialized, config.get('defaultExecution', {}))
