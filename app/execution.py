@@ -450,45 +450,59 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     # Avg already within tol: do not skip — fall through to hours (cell × hours).
                     add_mode = False
                 elif need is not None:
-                    # Open/add is ALWAYS USDT (user rule). need is contracts internally.
-                    need_usdt = smart_inc_open_qty(need, pos_mark or pos_avg, 'usdt')
-                    if need_usdt is None or need_usdt <= 0:
-                        add_mode = False
-                    else:
-                        # min: cell.minUsdt / instrument minNotional (XAUT=5).
-                        limits = (destination or {}).get('limits') or {}
+                    # Bybit places CONTRACTS — no USDT round-trip (minQty=0.002).
+                    limits = (destination or {}).get('limits') or {}
+                    min_qty = 0.0
+                    try:
+                        min_qty = float(limits.get('minQty') or 0)
+                    except (TypeError, ValueError):
+                        min_qty = 0.0
+                    if min_qty <= 0 and str(symbol).upper() == 'XAUTUSDT':
+                        min_qty = 0.002
+                    min_usdt = 0.0
+                    try:
+                        min_usdt = float(limits.get('minUsdt') or 0)
+                    except (TypeError, ValueError):
                         min_usdt = 0.0
-                        try:
-                            min_usdt = float(limits.get('minUsdt') or 0)
-                        except (TypeError, ValueError):
-                            min_usdt = 0.0
-                        if min_usdt <= 0 and str(symbol).upper() == 'XAUTUSDT':
-                            min_usdt = 5.0  # Bybit lotSizeFilter.minNotionalValue
-                        if min_usdt > 0 and need_usdt < min_usdt:
-                            smart_inc_skip = True
-                            smart_inc_applied = {
-                                'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
-                                'posQty': pos_qty,
-                                'avgPrice': pos_avg,
-                                'markPrice': pos_mark,
-                                'requiredAddUsdt': need_usdt,
-                                'reason': 'need_below_min_usdt',
-                                'qty': quantity,
-                            }
-                        else:
-                            quantity = need_usdt
-                            qty_kind = 'usdt'
-                            smart_inc_applied = {
-                                'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
-                                'posQty': pos_qty,
-                                'avgPrice': pos_avg,
-                                'markPrice': pos_mark,
-                                'requiredAddUsdt': need_usdt,
-                                'qty': quantity,
-                                'qtyKind': 'usdt',
-                            }
+                    if min_usdt <= 0 and str(symbol).upper() == 'XAUTUSDT':
+                        min_usdt = 5.0
+                    mark_for_min = pos_mark or pos_avg
+                    if min_qty > 0 and need < min_qty:
+                        smart_inc_skip = True
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'reason': 'need_below_min_qty',
+                            'qty': quantity,
+                        }
+                    elif min_usdt > 0 and mark_for_min > 0 and need * mark_for_min < min_usdt:
+                        smart_inc_skip = True
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'reason': 'need_below_min_usdt',
+                            'qty': quantity,
+                        }
+                    else:
+                        quantity = need  # contracts — Bybit wire unit
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': need,
+                            'qty': quantity,
+                            'qtyKind': 'contracts',
+                        }
                 else:
                     # avg/mark unavailable → fall back to hours
                     add_mode = False
@@ -814,27 +828,12 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                     'results': add_resp,
                                 }
 
-            # Open/add must be USDT (user rule). Adapter converts USDT → contracts
-            # with lotSizeFilter step; close/reduce stays in contracts.
-            # NOTE: qty_kind is closed over from _execute_bybit — do NOT assign
-            # here or it becomes a local UnboundLocalError in this nested _run.
+            # Bybit open/add: place CONTRACTS as sized (hours/avg_tol) — no
+            # contracts→USDT→contracts round-trip (precision dies vs minQty=0.002).
+            # Close/reduce is contracts too. NOTE: qty_kind is closed over from
+            # _execute_bybit — do NOT assign it here (nested _run UnboundLocalError).
             order_qty_kind = qty_kind
             order_qty = quantity
-            if not reduce_only and str(order_qty_kind).lower() != 'usdt':
-                try:
-                    tick = client._request('GET', '/v5/market/tickers', params={'category': category, 'symbol': symbol})
-                    row = (((tick.get('result') or {}).get('list') or [None]) or [None])[0] or {}
-                    mark = row.get('markPrice') or row.get('lastPrice') or 0
-                    if mark:
-                        order_qty = float(order_qty) * float(mark)
-                        order_qty_kind = 'usdt'
-                        request_payload['qty'] = order_qty
-                        request_payload['qtyKind'] = 'usdt'
-                        if smart_inc_applied is not None:
-                            smart_inc_applied['qty'] = order_qty
-                            smart_inc_applied['qtyKind'] = 'usdt'
-                except Exception:
-                    pass
 
             if str(execution_mode).lower() == 'limit':
                 price = destination.get('price') or payload.get('price')
