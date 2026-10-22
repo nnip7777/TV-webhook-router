@@ -315,6 +315,19 @@ class BybitBroker:
             out_qty = self.usdt_to_contract_qty(symbol, qty, px, category)
             if not out_qty:
                 return {'retCode': 10001, 'retMsg': 'Qty invalid (usdt below minOrderQty/minNotional)', 'result': {}}
+        else:
+            # Contracts: snap to qtyStep (float avg need → 0.00777 is illegal).
+            try:
+                from decimal import Decimal as _D, ROUND_UP as _RU
+                rules = self.get_qty_rules(symbol, category)
+                step = _D(str(rules.get('qtyStep') or '0.001'))
+                min_qty = _D(str(rules.get('minOrderQty') or '0'))
+                q = _D(str(out_qty)).quantize(step, rounding=_RU)
+                if q <= 0 or (min_qty > 0 and q < min_qty):
+                    return {'retCode': 10001, 'retMsg': 'Qty invalid (below minOrderQty)', 'result': {}}
+                out_qty = float(q)
+            except Exception:
+                pass
         body: Dict[str, Any] = {
             'category': category,
             'symbol': symbol,

@@ -451,6 +451,14 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
                 elif need is not None:
                     # Bybit places CONTRACTS — no USDT round-trip (minQty=0.002).
+                    # Snap need to qtyStep first (avg math → 0.00777 is illegal).
+                    from decimal import Decimal as _D, ROUND_UP as _RU
+                    try:
+                        _need_q = _D(str(need)).quantize(_D('0.001'), rounding=_RU)
+                        if _need_q > 0:
+                            need = float(_need_q)
+                    except Exception:
+                        pass
                     limits = (destination or {}).get('limits') or {}
                     min_qty = 0.0
                     try:
@@ -492,7 +500,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             'qty': quantity,
                         }
                     else:
-                        quantity = need  # contracts — Bybit wire unit
+                        quantity = need  # contracts — Bybit wire unit (already step-snapped)
                         smart_inc_applied = {
                             'mode': 'avg_tol',
                             'tol': smart_inc_tol,
