@@ -10,7 +10,7 @@ from decimal import Decimal, ROUND_UP
 from typing import Any, Dict, List
 from dataclasses import dataclass, field
 
-from analytics import hours_since_last_fill
+from analytics import hours_since_last_fill, sync_exchange_fills
 from bingx_adapter import BingXBroker
 from bybit_adapter import BybitBroker
 from finam_adapter import FinamBroker
@@ -391,6 +391,12 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
             base_qty = None
         if base_qty is not None:
             # Same-hour dedup on exchange symbol (NG1! + NATURAL… → one fill).
+            # Pull freshest exchange fills first — bg sync runs only AFTER the
+            # webhook job, so sizing would otherwise miss manual/other fills.
+            try:
+                sync_exchange_fills(broker, symbol, lookback_hours=48)
+            except Exception:
+                pass
             hours = hours_since_last_fill(broker, symbol)
             multiplier = smart_inc_multiplier(hours)
             if multiplier == 0:
@@ -1770,6 +1776,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
             base_qty = None
         if base_qty is not None:
             # Same-hour dedup on exchange symbol (NG1! + NATURAL… → one fill).
+            # Pull freshest exchange fills first (see Bybit path).
+            try:
+                sync_exchange_fills(broker, symbol, lookback_hours=48)
+            except Exception:
+                pass
             hours = hours_since_last_fill(broker, symbol)
             multiplier = smart_inc_multiplier(hours)
             if multiplier == 0:
