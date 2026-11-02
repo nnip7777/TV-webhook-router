@@ -413,6 +413,38 @@ class SmartOrderExecutor:
             } for level in levels]
 
         book = orderbook or {}
+        # Finam v1: {symbol, orderbook: {rows: [{price:{value}, sell_size:{value}|buy_size:{value}}]}}
+        rows = None
+        nested = book.get('orderbook')
+        if isinstance(nested, dict):
+            rows = nested.get('rows')
+        elif isinstance(book.get('rows'), list):
+            rows = book.get('rows')
+        if isinstance(rows, list):
+            # side buy → we lift asks (sell_size); side sell → hit bids (buy_size)
+            size_key = 'sell_size' if side == 'buy' else 'buy_size'
+            normalized = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if row.get('action') not in (None, '', 'ACTION_ADD'):
+                    continue
+                size_raw = row.get(size_key)
+                if size_raw in (None, ''):
+                    continue
+                price_raw = row.get('price')
+                if isinstance(price_raw, dict):
+                    price_raw = price_raw.get('value')
+                volume_raw = size_raw.get('value') if isinstance(size_raw, dict) else size_raw
+                price = _to_decimal(price_raw)
+                volume = abs(_to_decimal(volume_raw))
+                if price <= 0:
+                    continue
+                normalized.append({'price': price, 'volume': volume})
+            # best ask first (asc) for buy; best bid first (desc) for sell
+            normalized.sort(key=lambda lvl: lvl['price'], reverse=(side != 'buy'))
+            return normalized
+
         levels = list(book.get('asks' if side == 'buy' else 'bids', []) or [])
         normalized = []
         for level in levels:
@@ -620,8 +652,33 @@ class SmartOrderExecutor:
             raise Exception(f'unsupported target direction: {target_direction}')
 
         after_qty = await self.get_current_position_qty(symbol, exchange)
-        return {
-            'status': 'success',
+        open_filled = int((open_phase or {}).get('filledQty') or 0)
+        open_remaining = int((open_phase or {}).get('remainingQty') or 0)
+        step_errors = []
+        for phase in (close_phase, open_phase):
+            if not isinstance(phase, dict):
+                continue
+            if phase.get('error'):
+                step_errors.append(str(phase['error']))
+            for st in (phase.get('steps') or []):
+                if isinstance(st, dict) and st.get('error'):
+                    step_errors.append(str(st['error']))
+
+        # Honest status: no open fill → error (never "success" with filledQty=0).
+        status = 'success'
+        error = None
+        if open_phase is not None and open_filled <= 0:
+            status = 'error'
+            error = step_errors[0] if step_errors else 'open_not_filled'
+        elif open_remaining > 0:
+            status = 'partial'
+            error = step_errors[0] if step_errors else f'open_remaining_{open_remaining}'
+        elif step_errors and open_filled <= 0:
+            status = 'error'
+            error = step_errors[0]
+
+        result = {
+            'status': status,
             'decision': decision,
             'targetDirection': target_direction,
             'beforeQty': current_qty,
@@ -629,6 +686,9 @@ class SmartOrderExecutor:
             'closePhase': close_phase,
             'openPhase': open_phase,
         }
+        if error:
+            result['error'] = error
+        return result
 
     async def execute_smart_order(self, symbol: str, exchange: str,
                                    side: str, quantity: int,

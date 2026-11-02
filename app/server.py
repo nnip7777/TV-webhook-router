@@ -1361,6 +1361,16 @@ def _result_error_text(result_obj: Any) -> str:
         code = result_obj.get('code')
         if code not in (None, 0, '0'):
             return str(result_obj.get('msg') or code)
+        # Smart executor nested phases (Finam): surface step errors.
+        for phase_key in ('openPhase', 'closePhase', 'phase'):
+            phase = result_obj.get(phase_key)
+            if not isinstance(phase, dict):
+                continue
+            if phase.get('error'):
+                return str(phase['error'])
+            for st in (phase.get('steps') or []):
+                if isinstance(st, dict) and st.get('error'):
+                    return str(st['error'])
         nested = result_obj.get('results')
         if isinstance(nested, dict) and nested is not result_obj:
             nested_error = _result_error_text(nested)
@@ -1377,6 +1387,36 @@ def _result_error_text(result_obj: Any) -> str:
                 errors.append(str(item_error))
         return ' || '.join(item for item in errors if item)
     return ''
+
+
+def _result_filled_qty(result_obj: Any) -> int:
+    """Executed qty from smart-executor phases / fill counters (0 if unknown)."""
+    if not isinstance(result_obj, dict):
+        return 0
+    total = 0
+    for key in ('filledQty',):
+        try:
+            total += int(result_obj.get(key) or 0)
+        except (TypeError, ValueError):
+            pass
+    for phase_key in ('openPhase', 'closePhase', 'phase'):
+        phase = result_obj.get(phase_key)
+        if isinstance(phase, dict):
+            try:
+                total += int(phase.get('filledQty') or 0)
+            except (TypeError, ValueError):
+                pass
+    try:
+        before = result_obj.get('beforeQty')
+        after = result_obj.get('afterQty')
+        if before is not None and after is not None:
+            total = max(total, abs(int(after) - int(before)))
+    except (TypeError, ValueError):
+        pass
+    nested = result_obj.get('results')
+    if isinstance(nested, dict) and nested is not result_obj:
+        total = max(total, _result_filled_qty(nested))
+    return total
 
 
 def _result_is_dry_run(result_obj: Any) -> bool:
@@ -1995,7 +2035,7 @@ def _render_journal_page(week: str = '', broker: str = '', ticker: str = '', sta
             week_values.append(value)
     week_options = ''.join(f"<option value='{html.escape(v)}' {'selected' if week == v else ''}>{html.escape(v)}</option>" for v in week_values)
     broker_options = ''.join(f"<option value='{name}' {'selected' if broker == name else ''}>{name}</option>" for name in ['alor','bybit','bingx','finam','schwab'])
-    status_options = ''.join(f"<option value='{name}' {'selected' if status == name else ''}>{name}</option>" for name in ['accepted','placed','executed','execution_error','partial_error','route_not_found','invalid_json','missing_fields','ok','error'])
+    status_options = ''.join(f"<option value='{name}' {'selected' if status == name else ''}>{name}</option>" for name in ['accepted','placed','filled','executed','execution_error','partial_error','route_not_found','invalid_json','missing_fields','ok','error'])
     kind_options = ''.join(f"<option value='{name}' {'selected' if kind == name else ''}>{name}</option>" for name in ['webhook','quick-order','settings-save','settings-sync','risk-sync','server-start'])
     prev_link = f"/journal?week={html.escape(week)}&broker={html.escape(broker)}&ticker={html.escape(ticker)}&status={html.escape(status)}&kind={html.escape(kind)}&sort={html.escape(sort)}&page={page-1}" if page > 1 else ''
     next_link = f"/journal?week={html.escape(week)}&broker={html.escape(broker)}&ticker={html.escape(ticker)}&status={html.escape(status)}&kind={html.escape(kind)}&sort={html.escape(sort)}&page={page+1}" if end_idx < total else ''
@@ -4867,7 +4907,16 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
         result_obj = dest.get('results') or {}
         err = str(dest.get('error') or _result_error_text(result_obj) or '')
         dry_run = bool(dest.get('dryRun') or _result_is_dry_run(result_obj))
-        broker_status = 'dry_run' if dry_run else ('execution_error' if err else 'placed')
+        filled_qty = _result_filled_qty(result_obj)
+        if dry_run:
+            broker_status = 'dry_run'
+        elif err:
+            broker_status = 'execution_error'
+        elif filled_qty > 0:
+            # Confirmed execution (filledQty / position delta) — not just "accepted".
+            broker_status = 'filled'
+        else:
+            broker_status = 'placed'
         piece = f"{broker}:{symbol}"
         if venue:
             piece += f"@{venue}"
@@ -5063,21 +5112,30 @@ def _process_webhook_job(job: Dict[str, Any]) -> None:
             result_obj = dest.get('results') or {}
             err = str(dest.get('error') or _result_error_text(result_obj) or '')
             dry_run = bool(dest.get('dryRun') or _result_is_dry_run(result_obj))
+            filled_qty = _result_filled_qty(result_obj)
             if dry_run:
                 per_statuses.append('dry_run')
             elif dest.get('skipped'):
                 per_statuses.append('skipped')
             elif err:
                 per_statuses.append('execution_error')
+            elif filled_qty > 0:
+                per_statuses.append('filled')
             else:
                 per_statuses.append('placed')
         effective_statuses = [status for status in per_statuses if status != 'skipped']
         if per_statuses and all(status == 'skipped' for status in per_statuses):
             decision['status'] = 'skipped'
+        elif effective_statuses and all(status == 'filled' for status in effective_statuses):
+            decision['status'] = 'filled'
         elif effective_statuses and all(status == 'placed' for status in effective_statuses):
             decision['status'] = 'placed'
         elif effective_statuses and all(status == 'dry_run' for status in effective_statuses):
             decision['status'] = 'dry_run'
+        elif effective_statuses and any(status == 'filled' for status in effective_statuses) and all(
+            status in ('filled', 'placed') for status in effective_statuses
+        ):
+            decision['status'] = 'filled'
         elif per_statuses and any(status == 'execution_error' for status in per_statuses):
             decision['status'] = 'partial_error'
     except Exception as e:
