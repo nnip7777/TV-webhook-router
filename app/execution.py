@@ -863,74 +863,79 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     position_idx = (1 if desired_side == 'buy' else 2) if hedged_mode_detected else None
                 request_payload['openPositionIdx'] = None if position_idx in (None, '') else int(position_idx)
 
-            # Pre-trade risk: ensure isolated margin so riskRate ≈ riskPct%
-            # Cross cell: skip isolated mutations (set trade_mode=1 / add_margin).
+            # Pre-trade risk: ensure margin so riskRate ≈ riskPct%.
+            # Cross: still try add_margin on an existing leg (cell riskPct);
+            # never set trade_mode=1 (that would leave cross). New cross pos:
+            # mode is set later via trade_mode=0; add_margin is meaningless.
             margin_idx = None if position_idx in (None, '') else int(position_idx)
             if risk_control_enabled and not reduce_only and str(side).lower() in ('buy', 'sell'):
-                if bool(destination.get('cross')):
-                    request_payload['riskControl'] = {
-                        'mode': 'bybit',
-                        'skipped': 'cross',
-                        'note': 'cross cell — isolated risk top-up skipped',
-                    }
-                else:
-                    wallet = client.get_wallet_balance()
-                    equity = _bybit_account_equity(wallet)
-                    available = _bybit_account_available(wallet)
-                    positions_before = client.get_positions(category=category, symbol=symbol)
-                    before_pos = _bybit_pick_position(positions_before, symbol, target_direction or side)
-                    before_iso = _bybit_position_isolated(before_pos)
-                    before_rr = _bybit_position_risk_rate(before_pos)
-                    before_qty = _bybit_position_qty(before_pos)
-                    mark_price = 0.0
-                    for key in ('markPrice', 'entryPrice', 'avgPrice'):
-                        try:
-                            mark_price = abs(float(before_pos.get(key) or 0))
-                            if mark_price > 0:
-                                break
-                        except Exception:
-                            pass
+                cross_cell = bool(destination.get('cross'))
+                wallet = client.get_wallet_balance()
+                equity = _bybit_account_equity(wallet)
+                available = _bybit_account_available(wallet)
+                positions_before = client.get_positions(category=category, symbol=symbol)
+                before_pos = _bybit_pick_position(positions_before, symbol, target_direction or side)
+                before_iso = _bybit_position_isolated(before_pos)
+                before_rr = _bybit_position_risk_rate(before_pos)
+                before_qty = _bybit_position_qty(before_pos)
+                mark_price = 0.0
+                for key in ('markPrice', 'entryPrice', 'avgPrice'):
                     try:
-                        incoming_qty = abs(float(quantity or 0))
+                        mark_price = abs(float(before_pos.get(key) or 0))
+                        if mark_price > 0:
+                            break
                     except Exception:
-                        incoming_qty = 0.0
-                    expected_final_qty = max(0.0, before_qty + incoming_qty)
-                    expected_notional = mark_price * expected_final_qty
+                        pass
+                try:
+                    incoming_qty = abs(float(quantity or 0))
+                except Exception:
+                    incoming_qty = 0.0
+                expected_final_qty = max(0.0, before_qty + incoming_qty)
+                expected_notional = mark_price * expected_final_qty
+                unrealized = 0.0
+                try:
+                    unrealized = float(before_pos.get('unrealisedPnl') or before_pos.get('unrealisedPnl') or 0)
+                except Exception:
                     unrealized = 0.0
-                    try:
-                        unrealized = float(before_pos.get('unrealisedPnl') or before_pos.get('unrealisedPnl') or 0)
-                    except Exception:
-                        unrealized = 0.0
-                    allowed_loss = max(0.0, equity * (risk_pct / 100.0))
-                    target_isolated_pre = max(0.0, allowed_loss + unrealized)
-                    target_margin_pre = min(expected_notional, target_isolated_pre) if expected_notional > 0 else target_isolated_pre
-                    request_payload['riskControl'] = {
-                        'mode': 'bybit',
-                        'equity': equity,
-                        'available': available,
-                        'allowedLoss': allowed_loss,
-                        'beforeIsolated': before_iso,
-                        'beforeRiskRate': before_rr,
-                        'beforeQty': before_qty,
-                        'incomingQty': incoming_qty,
-                        'expectedFinalQty': expected_final_qty,
-                        'expectedNotional': expected_notional,
-                        'targetIsolatedPre': target_margin_pre,
-                    }
-                    add = target_margin_pre - before_iso
-                    if add > 1e-8:
-                        if before_iso <= 1e-8 and before_qty <= 0:
-                            # Opening NEW isolated position: only set isolated mode here.
+                allowed_loss = max(0.0, equity * (risk_pct / 100.0))
+                target_isolated_pre = max(0.0, allowed_loss + unrealized)
+                target_margin_pre = min(expected_notional, target_isolated_pre) if expected_notional > 0 else target_isolated_pre
+                request_payload['riskControl'] = {
+                    'mode': 'bybit',
+                    'cross': cross_cell,
+                    'equity': equity,
+                    'available': available,
+                    'allowedLoss': allowed_loss,
+                    'beforeIsolated': before_iso,
+                    'beforeRiskRate': before_rr,
+                    'beforeQty': before_qty,
+                    'incomingQty': incoming_qty,
+                    'expectedFinalQty': expected_final_qty,
+                    'expectedNotional': expected_notional,
+                    'targetIsolatedPre': target_margin_pre,
+                }
+                add = target_margin_pre - before_iso
+                if add > 1e-8:
+                    if before_iso <= 1e-8 and before_qty <= 0:
+                        # Opening NEW isolated position: only set isolated mode here.
+                        # Cross: skip (mode set later with trade_mode=0); add_margin
+                        # needs an open position anyway.
+                        if not cross_cell:
                             client.set_margin_mode(symbol, trade_mode=1, position_idx=margin_idx, category=category)
-                        elif before_qty > 0:
-                            add = min(add, max(0.0, available))
-                            if add > 1e-8:
-                                request_payload['riskControl']['preTradeAddMargin'] = add
-                                add_resp = client.add_margin(symbol, add, category=category, position_idx=margin_idx)
-                                request_payload['riskControl']['preTradeAddMarginResult'] = add_resp
-                                ret = (add_resp or {}).get('retCode')
-                                if ret not in (None, 0, '0'):
-                                    msg = str((add_resp or {}).get('retMsg') or '')
+                    elif before_qty > 0:
+                        # Existing position: top-up before placing.
+                        add = min(add, max(0.0, available))
+                        if add > 1e-8:
+                            request_payload['riskControl']['preTradeAddMargin'] = add
+                            add_resp = client.add_margin(symbol, add, category=category, position_idx=margin_idx)
+                            request_payload['riskControl']['preTradeAddMarginResult'] = add_resp
+                            ret = (add_resp or {}).get('retCode')
+                            if ret not in (None, 0, '0'):
+                                msg = str((add_resp or {}).get('retMsg') or '')
+                                # Cross: API may reject add-margin — journal, do not abort the order.
+                                if cross_cell:
+                                    request_payload['riskControl']['preTradeAddMarginFailed'] = True
+                                else:
                                     return {
                                         **{k: request_payload[k] for k in ('broker', 'symbol', 'side', 'qty') if k in request_payload},
                                         'error': f'pre_trade_margin_failed: {msg or ret}',
@@ -989,8 +994,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 order_result = _bybit_walk_ioc(side, order_qty, order_qty_kind, reduce_only, margin_idx)
 
             # Post-trade: if position already open and risk above target, top-up margin.
-            # Cross cells skip isolated add_margin.
-            if risk_control_enabled and not reduce_only and not bool(destination.get('cross')):
+            # Cross cells also try add_margin (cell riskPct); failures are journaled only.
+            if risk_control_enabled and not reduce_only:
                 try:
                     time.sleep(0.25)
                     wallet2 = client.get_wallet_balance()
