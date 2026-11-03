@@ -1,3 +1,11 @@
+## 2026.10.22-001
+- Bybit per-cell `cross` checkbox (routing UI, Bybit only): on flip, if opposite leg is in **loss** (`unrealisedPnl < 0`) — do **not** close it; enable dual-side (auto) + cross margin (`tradeMode=0`) and open the other direction so both legs stand (loss not realized). Profit/flat → normal close→open.
+- Journal `nettingAction=target_direction_keep_opposite_then_open_target` + `keepOpposite` (side/qty/upnl); analytics books it as add, not reduce.
+- Cross cell skips isolated risk top-up (`set trade_mode=1`, `add_margin` pre/post); `set_margin_mode` now sends `category=linear`; new `set_position_mode` for dual-side. Dual/cross API failure → `dual_side_enable_failed` / `cross_margin_set_failed`, no second order.
+- Settings: `SMART_INC_RESTART_HOURS` (default 36) — idle gap that resets smart-inc multiplier to ×1 (separate from `SMART_INC_MAX_MULTIPLIER`).
+- smart-inc same-hour: skip only when avg already in tol; outside tol → avg_tol catch-up even in the same hour. Journal `qty`/`qtyUnit` now come from the real order request (e.g. 200 usdt / 0.002 contracts), not TV payload qty=1.
+- WHR journal `route_not_found` returns HTTP 202 (TV no longer shows 404 delivery errors); Finam orderbook parses v1 `orderbook.rows`; status `filled` when a fill is confirmed.
+
 ## 2026.10.11-001
 - Periodic BingX risk sync: every RISK_SYNC_INTERVAL_SECONDS (default 90s) check terminal riskRate of all open BingX positions; when risk grew ≥30% over the target, add isolated margin so risk returns to target (cell `riskPct` from routing, else `RISK_SYNC_DEFAULT_PCT`).
 - Margin is only ever added in this loop, never reduced; adjustments are journaled as `kind=risk-sync` (filterable on the Journal page); `dryRun` BingX config skips the loop.

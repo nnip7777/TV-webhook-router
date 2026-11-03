@@ -46,6 +46,17 @@ def smart_inc_multiplier(hours: float | None) -> int:
     return min(smart_inc_max_multiplier(), max(0, int(hours)))
 
 
+def should_keep_opposite_on_cross(unrealised_pnl) -> bool:
+    """True when opposite leg is in loss → keep it under cross flip mode.
+
+    Profit or flat (0) → normal close→open. Unknown PnL fails toward close→open.
+    """
+    try:
+        return float(unrealised_pnl or 0) < 0
+    except (TypeError, ValueError):
+        return False
+
+
 def smart_inc_avg_tol(destination: Dict[str, Any]) -> float | None:
     """Price tolerance (absolute) for smart-inc add-to-position, from routing cell.
 
@@ -577,6 +588,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'reduceOnly': reduce_only,
         'signalMode': signal_mode,
         'targetDirection': target_direction,
+        'cross': bool(destination.get('cross')),
     }
     if smart_inc_applied is not None:
         request_payload['smartInc'] = smart_inc_applied
@@ -719,6 +731,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 short_size = 0.0
                 long_idx = 0
                 short_idx = 0
+                long_upnl = 0.0
+                short_upnl = 0.0
                 observed_position_indexes = set()
                 for row in rows:
                     if not isinstance(row, dict):
@@ -735,12 +749,18 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         row_idx = 0
                     observed_position_indexes.add(row_idx)
                     row_side = str(row.get('side') or '').strip().lower()
+                    try:
+                        row_upnl = float(row.get('unrealisedPnl') or 0)
+                    except Exception:
+                        row_upnl = 0.0
                     if row_side == 'buy' and size > 0:
                         long_size += size
+                        long_upnl += row_upnl
                         if row_idx:
                             long_idx = row_idx
                     elif row_side == 'sell' and size > 0:
                         short_size += size
+                        short_upnl += row_upnl
                         if row_idx:
                             short_idx = row_idx
                 hedged_mode_detected = any(idx in (1, 2) for idx in observed_position_indexes)
@@ -749,27 +769,78 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'shortSize': short_size,
                     'longPositionIdx': long_idx,
                     'shortPositionIdx': short_idx,
+                    'longUtpnl': long_upnl,
+                    'shortUtpnl': short_upnl,
                     'observedPositionIdxs': sorted(observed_position_indexes),
                     'positionMode': 'hedged' if hedged_mode_detected else 'one-way',
                 }
 
                 desired_side = 'buy' if target_direction == 'long' else 'sell'
+                opposite_upnl = 0.0
                 if target_direction == 'long' and short_size > 0:
                     target_mode_close_then_open = True
                     close_qty = short_size
                     close_side = 'buy'
                     close_position_idx = (short_idx or 2) if hedged_mode_detected else None
+                    opposite_upnl = short_upnl
                 elif target_direction == 'short' and long_size > 0:
                     target_mode_close_then_open = True
                     close_qty = long_size
                     close_side = 'sell'
                     close_position_idx = (long_idx or 1) if hedged_mode_detected else None
+                    opposite_upnl = long_upnl
                 else:
                     close_qty = 0.0
                     close_side = ''
                     close_position_idx = None
 
-                if target_mode_close_then_open:
+                cross_enabled = bool(destination.get('cross'))
+                keep_opposite = bool(
+                    target_mode_close_then_open
+                    and cross_enabled
+                    and should_keep_opposite_on_cross(opposite_upnl)
+                )
+
+                def _mode_already_ok(resp: Any) -> bool:
+                    if not isinstance(resp, dict):
+                        return False
+                    ret = resp.get('retCode')
+                    if ret in (None, 0, '0'):
+                        return True
+                    try:
+                        if int(ret) == 1101:
+                            return True
+                    except (TypeError, ValueError):
+                        pass
+                    msg = str(resp.get('retMsg') or '').lower()
+                    return 'not changed' in msg or 'same' in msg
+
+                if target_mode_close_then_open and keep_opposite:
+                    # Cross + losing opposite → keep it, open the other side (both legs).
+                    request_payload['nettingAction'] = 'target_direction_keep_opposite_then_open_target'
+                    request_payload['keepOpposite'] = {
+                        'side': close_side,
+                        'qty': close_qty,
+                        'positionIdx': close_position_idx,
+                        'unrealisedPnl': opposite_upnl,
+                        'reason': 'cross_loss',
+                    }
+                    if not hedged_mode_detected:
+                        dual_resp = client.set_position_mode(True, category=category)
+                        request_payload['dualSideEnsure'] = dual_resp
+                        if not _mode_already_ok(dual_resp):
+                            msg = str((dual_resp or {}).get('retMsg') or (dual_resp or {}).get('retCode') or 'failed')
+                            return {
+                                'broker': broker,
+                                'symbol': symbol,
+                                'side': side_raw,
+                                'qty': quantity,
+                                'error': f'dual_side_enable_failed: {msg}',
+                                'results': dual_resp,
+                            }
+                        hedged_mode_detected = True
+                    position_idx = 1 if desired_side == 'buy' else 2
+                elif target_mode_close_then_open:
                     request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
                     request_payload['closeOpposite'] = {
                         'side': close_side,
@@ -793,74 +864,101 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 request_payload['openPositionIdx'] = None if position_idx in (None, '') else int(position_idx)
 
             # Pre-trade risk: ensure isolated margin so riskRate ≈ riskPct%
-            # (same intent as BingX; Bybit fields: positionMM / positionBalance).
+            # Cross cell: skip isolated mutations (set trade_mode=1 / add_margin).
             margin_idx = None if position_idx in (None, '') else int(position_idx)
             if risk_control_enabled and not reduce_only and str(side).lower() in ('buy', 'sell'):
-                wallet = client.get_wallet_balance()
-                equity = _bybit_account_equity(wallet)
-                available = _bybit_account_available(wallet)
-                positions_before = client.get_positions(category=category, symbol=symbol)
-                before_pos = _bybit_pick_position(positions_before, symbol, target_direction or side)
-                before_iso = _bybit_position_isolated(before_pos)
-                before_rr = _bybit_position_risk_rate(before_pos)
-                before_qty = _bybit_position_qty(before_pos)
-                mark_price = 0.0
-                for key in ('markPrice', 'entryPrice', 'avgPrice'):
+                if bool(destination.get('cross')):
+                    request_payload['riskControl'] = {
+                        'mode': 'bybit',
+                        'skipped': 'cross',
+                        'note': 'cross cell — isolated risk top-up skipped',
+                    }
+                else:
+                    wallet = client.get_wallet_balance()
+                    equity = _bybit_account_equity(wallet)
+                    available = _bybit_account_available(wallet)
+                    positions_before = client.get_positions(category=category, symbol=symbol)
+                    before_pos = _bybit_pick_position(positions_before, symbol, target_direction or side)
+                    before_iso = _bybit_position_isolated(before_pos)
+                    before_rr = _bybit_position_risk_rate(before_pos)
+                    before_qty = _bybit_position_qty(before_pos)
+                    mark_price = 0.0
+                    for key in ('markPrice', 'entryPrice', 'avgPrice'):
+                        try:
+                            mark_price = abs(float(before_pos.get(key) or 0))
+                            if mark_price > 0:
+                                break
+                        except Exception:
+                            pass
                     try:
-                        mark_price = abs(float(before_pos.get(key) or 0))
-                        if mark_price > 0:
-                            break
+                        incoming_qty = abs(float(quantity or 0))
                     except Exception:
-                        pass
-                try:
-                    incoming_qty = abs(float(quantity or 0))
-                except Exception:
-                    incoming_qty = 0.0
-                expected_final_qty = max(0.0, before_qty + incoming_qty)
-                expected_notional = mark_price * expected_final_qty
-                unrealized = 0.0
-                try:
-                    unrealized = float(before_pos.get('unrealisedPnl') or before_pos.get('unrealisedPnl') or 0)
-                except Exception:
+                        incoming_qty = 0.0
+                    expected_final_qty = max(0.0, before_qty + incoming_qty)
+                    expected_notional = mark_price * expected_final_qty
                     unrealized = 0.0
-                allowed_loss = max(0.0, equity * (risk_pct / 100.0))
-                target_isolated_pre = max(0.0, allowed_loss + unrealized)
-                target_margin_pre = min(expected_notional, target_isolated_pre) if expected_notional > 0 else target_isolated_pre
-                request_payload['riskControl'] = {
-                    'mode': 'bybit',
-                    'equity': equity,
-                    'available': available,
-                    'allowedLoss': allowed_loss,
-                    'beforeIsolated': before_iso,
-                    'beforeRiskRate': before_rr,
-                    'beforeQty': before_qty,
-                    'incomingQty': incoming_qty,
-                    'expectedFinalQty': expected_final_qty,
-                    'expectedNotional': expected_notional,
-                    'targetIsolatedPre': target_margin_pre,
-                }
-                add = target_margin_pre - before_iso
-                if add > 1e-8:
-                    if before_iso <= 1e-8 and before_qty <= 0:
-                        # Opening NEW isolated position: only set isolated mode here.
-                        # add_margin requires an open position (Bybit: "Margin cannot
-                        # be set without open position") — top-up happens post-trade.
-                        client.set_margin_mode(symbol, trade_mode=1, position_idx=margin_idx)
-                    elif before_qty > 0:
-                        # Existing position: top-up before placing.
-                        add = min(add, max(0.0, available))
-                        if add > 1e-8:
-                            request_payload['riskControl']['preTradeAddMargin'] = add
-                            add_resp = client.add_margin(symbol, add, category=category, position_idx=margin_idx)
-                            request_payload['riskControl']['preTradeAddMarginResult'] = add_resp
-                            ret = (add_resp or {}).get('retCode')
-                            if ret not in (None, 0, '0'):
-                                msg = str((add_resp or {}).get('retMsg') or '')
-                                return {
-                                    **{k: request_payload[k] for k in ('broker', 'symbol', 'side', 'qty') if k in request_payload},
-                                    'error': f'pre_trade_margin_failed: {msg or ret}',
-                                    'results': add_resp,
-                                }
+                    try:
+                        unrealized = float(before_pos.get('unrealisedPnl') or before_pos.get('unrealisedPnl') or 0)
+                    except Exception:
+                        unrealized = 0.0
+                    allowed_loss = max(0.0, equity * (risk_pct / 100.0))
+                    target_isolated_pre = max(0.0, allowed_loss + unrealized)
+                    target_margin_pre = min(expected_notional, target_isolated_pre) if expected_notional > 0 else target_isolated_pre
+                    request_payload['riskControl'] = {
+                        'mode': 'bybit',
+                        'equity': equity,
+                        'available': available,
+                        'allowedLoss': allowed_loss,
+                        'beforeIsolated': before_iso,
+                        'beforeRiskRate': before_rr,
+                        'beforeQty': before_qty,
+                        'incomingQty': incoming_qty,
+                        'expectedFinalQty': expected_final_qty,
+                        'expectedNotional': expected_notional,
+                        'targetIsolatedPre': target_margin_pre,
+                    }
+                    add = target_margin_pre - before_iso
+                    if add > 1e-8:
+                        if before_iso <= 1e-8 and before_qty <= 0:
+                            # Opening NEW isolated position: only set isolated mode here.
+                            client.set_margin_mode(symbol, trade_mode=1, position_idx=margin_idx, category=category)
+                        elif before_qty > 0:
+                            add = min(add, max(0.0, available))
+                            if add > 1e-8:
+                                request_payload['riskControl']['preTradeAddMargin'] = add
+                                add_resp = client.add_margin(symbol, add, category=category, position_idx=margin_idx)
+                                request_payload['riskControl']['preTradeAddMarginResult'] = add_resp
+                                ret = (add_resp or {}).get('retCode')
+                                if ret not in (None, 0, '0'):
+                                    msg = str((add_resp or {}).get('retMsg') or '')
+                                    return {
+                                        **{k: request_payload[k] for k in ('broker', 'symbol', 'side', 'qty') if k in request_payload},
+                                        'error': f'pre_trade_margin_failed: {msg or ret}',
+                                        'results': add_resp,
+                                    }
+
+            # Cross cell: ensure trade_mode=0 before open/add (keep path may already set it).
+            if not reduce_only and str(side).lower() in ('buy', 'sell') and bool(destination.get('cross')):
+                ensure_idx = int(position_idx) if position_idx not in (None, '') else None
+                cm_resp = client.set_margin_mode(symbol, trade_mode=0, position_idx=ensure_idx, category=category)
+                request_payload['crossMarginEnsure'] = cm_resp
+                cm_ret = (cm_resp or {}).get('retCode') if isinstance(cm_resp, dict) else None
+                cm_msg = str((cm_resp or {}).get('retMsg') or '') if isinstance(cm_resp, dict) else ''
+                try:
+                    cm_ok = cm_ret in (None, 0, '0') or int(cm_ret) == 1101
+                except (TypeError, ValueError):
+                    cm_ok = cm_ret in (None, 0, '0')
+                if not cm_ok:
+                    cm_ok = 'not changed' in cm_msg.lower() or 'same' in cm_msg.lower()
+                if not cm_ok:
+                    return {
+                        'broker': broker,
+                        'symbol': symbol,
+                        'side': side_raw,
+                        'qty': quantity,
+                        'error': f'cross_margin_set_failed: {cm_msg or cm_ret}',
+                        'results': cm_resp,
+                    }
 
             # Bybit open/add: place CONTRACTS as sized (hours/avg_tol) — no
             # contracts→USDT→contracts round-trip (precision dies vs minQty=0.002).
@@ -891,7 +989,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 order_result = _bybit_walk_ioc(side, order_qty, order_qty_kind, reduce_only, margin_idx)
 
             # Post-trade: if position already open and risk above target, top-up margin.
-            if risk_control_enabled and not reduce_only:
+            # Cross cells skip isolated add_margin.
+            if risk_control_enabled and not reduce_only and not bool(destination.get('cross')):
                 try:
                     time.sleep(0.25)
                     wallet2 = client.get_wallet_balance()

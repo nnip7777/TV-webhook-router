@@ -236,15 +236,24 @@ class BybitBroker:
             body['positionIdx'] = int(position_idx)
         return self._request('POST', '/v5/position/add-margin', body=body)
 
-    def set_margin_mode(self, symbol: str, trade_mode: int = 1, position_idx: Optional[int] = None) -> Dict[str, Any]:
+    def set_margin_mode(self, symbol: str, trade_mode: int = 1, position_idx: Optional[int] = None, category: str = 'linear') -> Dict[str, Any]:
         """trade_mode: 0=cross, 1=isolated (Bybit linear)."""
         body: Dict[str, Any] = {
+            'category': category,
             'symbol': symbol,
             'tradeMode': int(trade_mode),
         }
         if position_idx is not None:
             body['positionIdx'] = int(position_idx)
         return self._request('POST', '/v5/position/set-margin-mode', body=body)
+
+    def set_position_mode(self, hedged: bool, category: str = 'linear') -> Dict[str, Any]:
+        """Account-wide dual-side (hedge) vs one-way for a category."""
+        body: Dict[str, Any] = {
+            'category': category,
+            'positionMode': 'BothSide' if hedged else 'MergedSingle',
+        }
+        return self._request('POST', '/v5/position/set-position-mode', body=body)
 
     def get_qty_rules(self, symbol: str, category: str = 'linear') -> Dict[str, Any]:
         """lotSizeFilter for linear symbol: minOrderQty / qtyStep / minNotionalValue."""

@@ -2601,7 +2601,11 @@ def _infer_position_effect(phase: str, side: str, request: Dict[str, Any] | None
     target_direction = str(request.get('targetDirection') or '').strip().lower()
 
     if signal_mode == 'target-direction':
-        if netting_action in ('target_direction_open_or_increase_target', 'open_same_side_leg'):
+        if netting_action in (
+            'target_direction_open_or_increase_target',
+            'open_same_side_leg',
+            'target_direction_keep_opposite_then_open_target',
+        ):
             if target_direction == 'long':
                 return 'add_long'
             if target_direction == 'short':

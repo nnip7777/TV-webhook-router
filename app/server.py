@@ -2499,6 +2499,8 @@ def _routing_details(route: Dict[str, Any]) -> str:
             piece += f" qtyKind={qty_kind}"
         if destination.get('smartInc'):
             piece += " smartInc"
+        if destination.get('cross'):
+            piece += " cross"
         parts.append(piece)
     return ' | '.join(parts) if parts else 'no active destinations'
 
@@ -2563,6 +2565,7 @@ def _current_mapping(config: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, An
                     'riskPct': destination.get('riskPct', ''),
                     'smartInc': bool(destination.get('smartInc')),
                     'smartIncTol': destination.get('smartIncTol', ''),
+                    'cross': bool(destination.get('cross')),
                     'limits': copy.deepcopy(destination.get('limits', {})),
                 }
     return mapping
@@ -2664,9 +2667,13 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
             risk_pct_value = float(risk_pct_raw)
             if risk_pct_value > 0:
                 destination['riskPct'] = risk_pct_value
-                destination['marginType'] = 'ISOLATED'
+                destination['marginType'] = 'CROSS' if options.get('cross') else 'ISOLATED'
         except Exception:
             pass
+
+    if broker_name == 'bybit' and options.get('cross'):
+        destination['cross'] = True
+        destination['marginType'] = 'CROSS'
 
     if broker_name in ('bingx', 'bybit') and options.get('smartInc'):
         destination['smartInc'] = True
@@ -3941,6 +3948,8 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
             bucket['smartInc'] = bool(destination.get('smartInc'))
         if 'smartIncTol' not in bucket:
             bucket['smartIncTol'] = destination.get('smartIncTol', '')
+        if 'cross' not in bucket:
+            bucket['cross'] = bool(destination.get('cross'))
         bucket['limits'] = bucket.get('limits') or copy.deepcopy(destination.get('limits', {}))
     return merged
 
@@ -4149,6 +4158,12 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<span class='muted'>avg±</span></div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
+            cross_checked = 'checked' if current.get('cross') else ''
+            cross_line = (
+                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='cross|{html.escape(ticker)}|{html.escape(broker_name)}' {cross_checked}><span class='muted'>cross</span></label>"
+                f"<span class='muted'>flip: keep loser + hedge</span></div>"
+                if broker_name == 'bybit' else ''
+            )
             broker_cells.append(
                 f'<td class="broker-cell" data-broker-cell="{html.escape(broker_name)}" data-broker-symbol="{html.escape(margin_symbol)}">'
                 f"<div class='symbol-line'><label class='checkline-inline'><input type='checkbox' name='map|{html.escape(ticker)}|{html.escape(broker_name)}' {is_checked}></label>"
@@ -4158,6 +4173,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<div class='quick-line'><button type='button' class='quick-btn buy-btn' data-quick-order data-side='buy' data-broker='{html.escape(broker_name)}'>buy</button><input autocomplete='off' class='mini-input quick-qty {order_qty_class}' data-base-qty value='{html.escape(order_qty_value or broker_default_qty or '1')}' type='text' name='qty|{html.escape(ticker)}|{html.escape(broker_name)}' value='{html.escape(order_qty_value or broker_default_qty or '1')}' placeholder='qty'><button type='button' class='quick-btn sell-btn' data-quick-order data-side='sell' data-broker='{html.escape(broker_name)}'>sell</button><button type='button' class='quick-btn book-btn' data-book-view data-broker='{html.escape(broker_name)}'>book</button><span class='cell-subhint'>{html.escape(margin_hint)}</span></div>"
                 f"{risk_line}"
                 f"{smart_inc_line}"
+                f"{cross_line}"
                 f"<input type='hidden' name='qtyMultiplier|{html.escape(ticker)}|{html.escape(broker_name)}' value=''>"
                 '</td>'
             )
@@ -5664,6 +5680,7 @@ class Handler(BaseHTTPRequestHandler):
                     'riskPct': '',
                     'smartInc': False,
                     'smartIncTol': '',
+                    'cross': False,
                     'limits': {},
                 })
                 if field == 'map':
@@ -5682,6 +5699,8 @@ class Handler(BaseHTTPRequestHandler):
                     bucket['smartInc'] = True
                 elif field == 'smartIncTol':
                     bucket['smartIncTol'] = form.get(key, [''])[0]
+                elif field == 'cross':
+                    bucket['cross'] = True
 
             target_ticker = form.get('saveTicker', [''])[0].strip()
             config = load_config()
