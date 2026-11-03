@@ -204,7 +204,8 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_BIND_INTERFACE', 'label': 'BingX bind interface (optional, e.g. bingx-egress)', 'section': 'bingx', 'type': 'text'},
     {'key': 'BINGX_SOURCE_KEY', 'label': 'BingX source key', 'section': 'bingx', 'type': 'text', 'default': 'BX-AI-SKILL'},
     {'key': 'BINGX_RECV_WINDOW', 'label': 'BingX recvWindow', 'section': 'bingx', 'type': 'text', 'default': '5000'},
-    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час после сделки = ордер не ставится. Сброс до ×1 при простоя ≥36ч или без истории сделок. Работает при включённом чекбоксе smart-inc в ячейке (BingX и Bybit, target-direction). Общая настройка для обеих бирж.'},
+    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час: skip, либо avg-tol добивка, если средняя вне tol. Работает при включённом чекбоксе smart-inc (BingX и Bybit, target-direction). Общая настройка для обеих бирж.'},
+    {'key': 'SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart hours', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: простой (часы с последней сделки), после которого множитель сбрасывается в ×1. Без истории сделок тоже ×1. Применяется без перезапуска сервиса. Общая настройка для BingX и Bybit.'},
     {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска (BingX/Bybit)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) открытых позиций BingX и Bybit. Если риск вырос на 30% и более относительно цели — добавляется isolated margin. Цель: riskPct ячейки роутинга, иначе «default risk %». Маржа только добавляется. Журнал kind=risk-sync. Общая настройка для обеих бирж.'},
     {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск открытых позиций BingX/Bybit. Минимум 10. Применяется без перезапуска сервиса. Общая настройка для обеих бирж.'},
     {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'float', 'default': '12', 'help': 'Целевой риск % для позиций BingX/Bybit без riskPct в ячейке. 0 = только позиции с настроенным riskPct. Общая настройка для обеих бирж.'},
@@ -2286,6 +2287,27 @@ def _payload_qty_unit(payload: Dict[str, Any]) -> str:
     payload_target_mode = _payload_implies_target_direction(payload)
     default_unit = 'usdt' if payload_target_mode else 'contracts'
     return str(payload.get('qtyKind') or payload.get('sizeKind') or default_unit).strip().lower()
+
+
+def _journal_order_qty(dest: Dict[str, Any], payload: Dict[str, Any]) -> tuple:
+    """Real order size from dest.request (post smartInc), else payload qty.
+
+    Returns (qty, unit). TV payloads carry qty=1 as a flag; the wire size lives
+    in request.qty + request.qtyKind (e.g. 200 usdt / 0.002 contracts).
+    """
+    if not isinstance(dest, dict):
+        dest = {}
+    req = dest.get('request') or {}
+    raw = req.get('qty')
+    if raw not in (None, ''):
+        unit = _request_qty_unit(req) or _payload_qty_unit(payload)
+        try:
+            f = float(raw)
+            qty: Any = int(f) if f.is_integer() else f
+        except (TypeError, ValueError):
+            qty = raw
+        return qty, unit
+    return payload.get('qty'), _payload_qty_unit(payload)
 
 
 def _request_open_qty_unit(request: Dict[str, Any]) -> str:
@@ -4952,14 +4974,15 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             detail_parts.append(f"result={_short_json(result_obj, 260)}")
         if err and skip_txt:
             detail_parts.append(f"error={err[:260]}")
+        order_qty, order_unit = _journal_order_qty(dest, payload)
         append_journal({
             'time': decision.get('receivedAt'),
             'kind': destination_kind,
             'ticker': payload.get('sourceTicker'),
             'source': _payload_signal_source(payload),
             'side': payload.get('side'),
-            'qty': payload.get('qty'),
-            'qtyUnit': _payload_qty_unit(payload),
+            'qty': order_qty,
+            'qtyUnit': order_unit,
             'brokers': [broker],
             'status': broker_status,
             'symbol': symbol,
@@ -4998,14 +5021,17 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             summary_detail_parts.append(f"exec={' || '.join(destination_debug)}")
         if dest_err and not skip_txt:
             summary_detail_parts.append(f"error={dest_err}")
+        summary_qty, summary_unit = _journal_order_qty(
+            single_destination[0] if single_destination else {}, payload
+        )
         append_journal({
             'time': decision.get('receivedAt'),
             'kind': summary_kind,
             'ticker': payload.get('sourceTicker'),
             'source': _payload_signal_source(payload),
             'side': payload.get('side'),
-            'qty': payload.get('qty'),
-            'qtyUnit': _payload_qty_unit(payload),
+            'qty': summary_qty,
+            'qtyUnit': summary_unit,
             'brokers': [d.get('broker') for d in single_destination if d.get('broker')],
             'status': decision.get('status'),
             'details': ' | '.join(summary_detail_parts),

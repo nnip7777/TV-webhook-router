@@ -18,7 +18,6 @@ from schwab_adapter import SchwabBroker
 from settings import SMART_EXECUTOR_PATH, env_float, env_int
 
 # smart-inc: no fill within this window (or no history at all) = fresh start, multiplier 1.
-SMART_INC_RESTART_HOURS = 36.0
 
 
 def smart_inc_max_multiplier() -> int:
@@ -30,14 +29,19 @@ def smart_inc_max_multiplier() -> int:
     return max(1, env_int('SMART_INC_MAX_MULTIPLIER', 36))
 
 
+def smart_inc_restart_hours() -> float:
+    """Idle gap (hours) that resets multiplier to ×1 — Settings SMART_INC_RESTART_HOURS."""
+    return float(max(1, env_int('SMART_INC_RESTART_HOURS', 36)))
+
+
 def smart_inc_multiplier(hours: float | None) -> int:
     """Multipler for smart-inc sizing from completed clock-hours since last fill.
 
-    None (no fill history) or a gap >= SMART_INC_RESTART_HOURS means a fresh
+    None (no fill history) or a gap >= smart_inc_restart_hours() means a fresh
     start → 1. Otherwise the hour count itself: 0 = another source already
-    traded this ticker in the current clock hour → caller must skip the order.
+    traded this ticker in the current clock hour → caller must skip or avg_tol.
     """
-    if hours is None or hours >= SMART_INC_RESTART_HOURS:
+    if hours is None or hours >= smart_inc_restart_hours():
         return 1
     return min(smart_inc_max_multiplier(), max(0, int(hours)))
 
@@ -399,22 +403,13 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 pass
             hours = hours_since_last_fill(broker, symbol)
             multiplier = smart_inc_multiplier(hours)
-            if multiplier == 0:
-                smart_inc_skip = True
-                smart_inc_applied = {
-                    'mode': 'hours',
-                    'baseQty': base_qty,
-                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
-                    'multiplier': 0,
-                    'qty': quantity,
-                }
-            # Detect add-to-position early when tol mode is on.
-            # Same-hour skip already set → do not size further.
+            same_hour = multiplier == 0
+            # same-hour does NOT skip yet: avg_tol catch-up may still apply.
             add_mode = False
             pos_qty = 0.0
             pos_avg = 0.0
             pos_mark = 0.0
-            if smart_inc_tol is not None and not smart_inc_skip:
+            if smart_inc_tol is not None:
                 try:
                     _probe = BybitBroker(testnet=bool(destination.get('testnet', False)))
                     _prows = (((_probe.get_positions(category=category, symbol=symbol) or {}).get('result') or {}).get('list') or [])
@@ -450,14 +445,28 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             break
                 except Exception:
                     add_mode = False
-            if add_mode and pos_qty > 0 and smart_inc_tol is not None and not smart_inc_skip:
+            avg_handled = False
+            if add_mode and pos_qty > 0 and smart_inc_tol is not None:
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
-                    # Avg already within tol: do not skip — fall through to hours (cell × hours).
-                    add_mode = False
+                    # In tol range: same-hour → skip; otherwise hours growth.
+                    if same_hour:
+                        smart_inc_skip = True
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': 0.0,
+                            'reason': 'avg_already_in_range',
+                            'qty': quantity,
+                        }
+                    else:
+                        add_mode = False
                 elif need is not None:
-                    # Bybit places CONTRACTS — no USDT round-trip (minQty=0.002).
-                    # Snap need to qtyStep first (avg math → 0.00777 is illegal).
+                    # Outside tol → catch up (works even same-hour).
+                    avg_handled = True
                     from decimal import Decimal as _D, ROUND_UP as _RU
                     try:
                         _need_q = _D(str(need)).quantize(_D('0.001'), rounding=_RU)
@@ -520,18 +529,29 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 else:
                     # avg/mark unavailable → fall back to hours
                     add_mode = False
-            if not smart_inc_skip and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
-                scaled = base_qty * multiplier
-                quantity = int(scaled) if float(scaled).is_integer() else scaled
-                if smart_inc_applied is None:
-                    smart_inc_applied = {}
-                smart_inc_applied.update({
-                    'mode': 'hours',
-                    'baseQty': base_qty,
-                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
-                    'multiplier': multiplier,
-                    'qty': quantity,
-                })
+            # Hours path (cell × hours) — not same-hour and no avg_tol size.
+            if not smart_inc_skip and not avg_handled and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol' and smart_inc_applied.get('requiredAddQty')):
+                if same_hour:
+                    smart_inc_skip = True
+                    smart_inc_applied = {
+                        'mode': 'hours',
+                        'baseQty': base_qty,
+                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'multiplier': 0,
+                        'qty': quantity,
+                    }
+                else:
+                    scaled = base_qty * multiplier
+                    quantity = int(scaled) if float(scaled).is_integer() else scaled
+                    if smart_inc_applied is None:
+                        smart_inc_applied = {}
+                    smart_inc_applied.update({
+                        'mode': 'hours',
+                        'baseQty': base_qty,
+                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'multiplier': multiplier,
+                        'qty': quantity,
+                    })
 
     # avg_tol add must fill at ~current mark; maker limit may fill late/partial/wrong price.
     if smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol':
@@ -1783,21 +1803,13 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 pass
             hours = hours_since_last_fill(broker, symbol)
             multiplier = smart_inc_multiplier(hours)
-            if multiplier == 0:
-                smart_inc_skip = True
-                smart_inc_applied = {
-                    'mode': 'hours',
-                    'baseQty': base_qty,
-                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
-                    'multiplier': 0,
-                    'qty': quantity,
-                }
-            # Detect add-to-position when avg-tol mode is on (same as Bybit).
+            same_hour = multiplier == 0
+            # same-hour does NOT skip yet: avg_tol catch-up may still apply.
             add_mode = False
             pos_qty = 0.0
             pos_avg = 0.0
             pos_mark = 0.0
-            if smart_inc_tol is not None and not smart_inc_skip:
+            if smart_inc_tol is not None:
                 try:
                     _probe = BingXBroker()
                     _prows = _bingx_position_rows(_probe.get_positions(symbol), symbol)
@@ -1829,16 +1841,33 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             break
                 except Exception:
                     add_mode = False
-            if add_mode and pos_qty > 0 and smart_inc_tol is not None and not smart_inc_skip:
+            avg_handled = False
+            if add_mode and pos_qty > 0 and smart_inc_tol is not None:
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
-                    # Avg already within tol: do not skip — fall through to hours (cell × hours).
-                    add_mode = False
+                    # In tol range: same-hour → skip; otherwise hours growth.
+                    if same_hour:
+                        smart_inc_skip = True
+                        smart_inc_applied = {
+                            'mode': 'avg_tol',
+                            'tol': smart_inc_tol,
+                            'posQty': pos_qty,
+                            'avgPrice': pos_avg,
+                            'markPrice': pos_mark,
+                            'requiredAddQty': 0.0,
+                            'reason': 'avg_already_in_range',
+                            'qty': quantity,
+                        }
+                    else:
+                        add_mode = False
                 elif need is not None:
+                    # Outside tol → catch up (works even same-hour).
+                    avg_handled = True
                     # Open/add is placed in USDT — compute notional directly, no contract qty on the wire.
                     need_usdt = smart_inc_required_add_usdt(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                     if need_usdt is None:
                         add_mode = False
+                        avg_handled = False
                     else:
                         # min check: minUsdt (preferred) or minQty*price; skip tiny residuals.
                         limits = (destination or {}).get('limits') or {}
@@ -1855,6 +1884,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         if need_usdt <= 0:
                             # Numerically in range after usdt conversion — fall through to hours.
                             add_mode = False
+                            avg_handled = False
                         elif min_usdt > 0 and need_usdt < min_usdt:
                             smart_inc_skip = True
                             smart_inc_applied = {
@@ -1882,18 +1912,29 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             open_qty_kind = 'usdt'
                 else:
                     add_mode = False
-            if not smart_inc_skip and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol'):
-                scaled = base_qty * multiplier
-                quantity = int(scaled) if float(scaled).is_integer() else scaled
-                if smart_inc_applied is None:
-                    smart_inc_applied = {}
-                smart_inc_applied.update({
-                    'mode': 'hours',
-                    'baseQty': base_qty,
-                    'hoursSinceLastFill': None if hours is None else round(hours, 3),
-                    'multiplier': multiplier,
-                    'qty': quantity,
-                })
+            # Hours path (cell × hours) — not same-hour and no avg_tol size.
+            if not smart_inc_skip and not avg_handled and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol' and (smart_inc_applied.get('requiredAddQty') is not None or smart_inc_applied.get('requiredAddUsdt') is not None)):
+                if same_hour:
+                    smart_inc_skip = True
+                    smart_inc_applied = {
+                        'mode': 'hours',
+                        'baseQty': base_qty,
+                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'multiplier': 0,
+                        'qty': quantity,
+                    }
+                else:
+                    scaled = base_qty * multiplier
+                    quantity = int(scaled) if float(scaled).is_integer() else scaled
+                    if smart_inc_applied is None:
+                        smart_inc_applied = {}
+                    smart_inc_applied.update({
+                        'mode': 'hours',
+                        'baseQty': base_qty,
+                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'multiplier': multiplier,
+                        'qty': quantity,
+                    })
     category = destination.get('category', 'swap')
     execution_mode = str(destination.get('executionMode', destination.get('mode', 'maker'))).lower()
     reduce_only = destination.get('reduceOnly') if 'reduceOnly' in destination else payload.get('reduceOnly')
