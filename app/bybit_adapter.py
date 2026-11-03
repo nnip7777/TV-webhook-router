@@ -247,13 +247,19 @@ class BybitBroker:
             body['positionIdx'] = int(position_idx)
         return self._request('POST', '/v5/position/set-margin-mode', body=body)
 
-    def set_position_mode(self, hedged: bool, category: str = 'linear') -> Dict[str, Any]:
-        """Account-wide dual-side (hedge) vs one-way for a category."""
+    def set_position_mode(self, hedged: bool, category: str = 'linear', symbol: str = '') -> Dict[str, Any]:
+        """Switch one-way/hedge for a symbol (V5: POST /v5/position/switch-mode).
+
+        mode: 0 = MergedSingle (one-way), 3 = BothSides (hedge).
+        Symbol-level switch is required so other instruments stay one-way.
+        """
         body: Dict[str, Any] = {
             'category': category,
-            'positionMode': 'BothSide' if hedged else 'MergedSingle',
+            'mode': 3 if hedged else 0,
         }
-        return self._request('POST', '/v5/position/set-position-mode', body=body)
+        if symbol:
+            body['symbol'] = str(symbol)
+        return self._request('POST', '/v5/position/switch-mode', body=body)
 
     def get_qty_rules(self, symbol: str, category: str = 'linear') -> Dict[str, Any]:
         """lotSizeFilter for linear symbol: minOrderQty / qtyStep / minNotionalValue."""

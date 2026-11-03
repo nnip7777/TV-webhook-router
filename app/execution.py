@@ -826,7 +826,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'reason': 'cross_loss',
                     }
                     if not hedged_mode_detected:
-                        dual_resp = client.set_position_mode(True, category=category)
+                        # V5: POST /v5/position/switch-mode, mode=3, per symbol.
+                        dual_resp = client.set_position_mode(True, category=category, symbol=symbol)
                         request_payload['dualSideEnsure'] = dual_resp
                         if not _mode_already_ok(dual_resp):
                             msg = str((dual_resp or {}).get('retMsg') or (dual_resp or {}).get('retCode') or 'failed')
