@@ -65,6 +65,23 @@ class SmartIncRequiredAddQtyTest(unittest.TestCase):
         need = smart_inc_required_add_qty(10, 3850, 3800, 'long', 10.0)
         self.assertAlmostEqual(need, 40.0, places=6)
 
+    def test_long_avg_below_mark_outside_tol_catches_up(self):
+        # NG1 2026-11-03: A=2.871, P=2.885, tol=0.005, |gap|=0.014 > tol
+        # Old one-sided formula returned 0 → hours ×22 = 1100 USDT blow-up.
+        need = smart_inc_required_add_qty(17.403, 2.871, 2.885, 'long', 0.005)
+        self.assertGreater(need, 0.0)
+
+    def test_short_avg_above_mark_outside_tol_catches_up(self):
+        need = smart_inc_required_add_qty(10, 3.60, 3.50, 'short', 0.01)
+        self.assertGreater(need, 0.0)
+
+    def test_abs_gap_boundary(self):
+        # |A-P| == tol → still in range (float noise: use almostEqual)
+        self.assertAlmostEqual(
+            smart_inc_required_add_qty(10, 3.538, 3.528, 'long', 0.01), 0.0, places=9)
+        self.assertAlmostEqual(
+            smart_inc_required_add_qty(10, 3.518, 3.528, 'short', 0.01), 0.0, places=9)
+
     def test_bad_inputs(self):
         self.assertIsNone(smart_inc_required_add_qty(0, 3.5, 3.528, 'long', 0.01))
         self.assertIsNone(smart_inc_required_add_qty(10, 0, 3.528, 'long', 0.01))

@@ -80,11 +80,13 @@ def smart_inc_required_add_qty(
     tol: float,
     max_hours: int | None = None,
 ) -> float | None:
-    """Contracts to add so position avg is within `tol` of mark (internal math).
+    """Contracts to add so position avg is within `tol` of mark (abs distance).
 
-    LONG:  skip if A ≤ P+tol; else q ≥ Q*(A−P−tol)/tol  → new_avg ≤ P+tol
-    SHORT: skip if A ≥ P−tol; else q ≥ Q*(P−tol−A)/tol  → new_avg ≥ P−tol
-    Returns 0.0 if already in range (caller should skip), None on bad inputs.
+    In range: |A − P| ≤ tol → 0.
+    Outside: q ≥ Q × (|A − P| − tol) / tol  → new avg within tol of mark.
+    Both directions (avg above or below mark) count — one-sided checks let
+    |gap| > tol slip into hours-mode and blow up size (NG1 2026-11-03).
+    Returns 0.0 if already in range, None on bad inputs.
     """
     if tol is None or tol <= 0:
         return None
@@ -97,16 +99,12 @@ def smart_inc_required_add_qty(
     if q0 <= 0 or a <= 0 or p <= 0:
         return None
     d = str(direction or '').lower()
-    if d == 'long':
-        if a <= p + tol:
-            return 0.0
-        need = q0 * (a - p - tol) / tol
-    elif d == 'short':
-        if a >= p - tol:
-            return 0.0
-        need = q0 * (p - tol - a) / tol
-    else:
+    if d not in ('long', 'short'):
         return None
+    gap = abs(a - p)
+    if gap <= tol:
+        return 0.0
+    need = q0 * (gap - tol) / tol
     if need <= 0:
         return 0.0
     # Cap by hours-multiplier path if configured (same potolok).
