@@ -2717,7 +2717,10 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
     return destination
 
 
-def _qty_badge_class(value: Any) -> str:
+def _qty_badge_class(value: Any, both: bool = False) -> str:
+    if both:
+        # Both hedge legs open — yellow regardless of net sign.
+        return 'qty-both'
     raw = str(value or '').strip().upper()
     if raw == 'WORK':
         return 'qty-work'
@@ -3015,6 +3018,29 @@ def _fmt_qty_text(value: Any) -> str:
         return str(int(num))
     text = f"{num:.8f}".rstrip('0').rstrip('.')
     return text or '0'
+
+
+def _live_symbol_qty_info(broker_name: str, *symbols: str) -> tuple:
+    """(qty_text, both_legs) — both=True when long and short hedge legs coexist."""
+    broker_payload = ((METRICS_CACHE.get('data') or {}).get(broker_name) or {}) if broker_name else {}
+    symbol_map = broker_payload.get('symbols') or {}
+    for symbol in symbols:
+        if not symbol:
+            continue
+        symbol_payload = (symbol_map.get(symbol) or {})
+        qty = symbol_payload.get('qty')
+        both = bool(symbol_payload.get('qtyBoth'))
+        if qty not in (None, '') or both:
+            return _fmt_qty_text(qty), both
+        base = symbol.split('@')[0]
+        for cached_key, cached_val in symbol_map.items():
+            cached_base = cached_key.split('@')[0]
+            if cached_base == base and cached_base != cached_key:
+                qty = cached_val.get('qty')
+                both = bool(cached_val.get('qtyBoth'))
+                if qty not in (None, '') or both:
+                    return _fmt_qty_text(qty), both
+    return '', False
 
 
 def _quick_order_base_qty(instrument: Dict[str, Any], broker_name: str, current: Dict[str, Any]) -> str:
@@ -3361,29 +3387,56 @@ def _live_broker_metrics(config: Dict[str, Any]) -> Dict[str, Any]:
         }
         for p in ((pos.get('result') or {}).get('list') or []):
             symbol = str(p.get('symbol') or '')
+            if not symbol:
+                continue
             total_im = p.get('positionIMByMp') or p.get('positionIM') or p.get('positionMMByMp') or p.get('positionMM')
             size = p.get('size') or 0
-            per_unit = None
             try:
                 size_num = abs(float(size))
-                if size_num > 0:
+            except (TypeError, ValueError):
+                size_num = 0.0
+            per_unit = None
+            if size_num > 0:
+                try:
                     per_unit = float(total_im) / size_num
+                except Exception:
+                    pass
+            side = str(p.get('side') or '').strip().lower()
+            # Aggregate both hedge legs for the same symbol (do not overwrite).
+            entry = metrics['bybit']['symbols'].get(symbol)
+            if entry is None:
+                entry = {'longSize': 0.0, 'shortSize': 0.0, 'totalGo': 0.0, 'perUnitGo': None, 'text': ''}
+                metrics['bybit']['symbols'][symbol] = entry
+            if side == 'sell':
+                entry['shortSize'] = entry.get('shortSize', 0.0) + size_num
+            else:
+                entry['longSize'] = entry.get('longSize', 0.0) + size_num
+            try:
+                entry['totalGo'] = float(entry.get('totalGo') or 0) + float(total_im or 0)
             except Exception:
                 pass
-            if symbol:
-                try:
-                    size_num = float(size)
-                    qty_live = int(size_num) if size_num.is_integer() else size_num
-                    if str(p.get('side') or '').lower() == 'sell':
-                        qty_live = -abs(qty_live)
-                except Exception:
-                    qty_live = size
-                metrics['bybit']['symbols'][symbol] = {
-                    'totalGo': _fmt_num(total_im),
-                    'perUnitGo': _fmt_num(per_unit),
-                    'text': f"ГО {_fmt_num(total_im)} / {_fmt_num(per_unit)} за 1",
-                    'qty': qty_live,
-                }
+            if per_unit is not None:
+                entry['perUnitGo'] = per_unit
+            entry['text'] = f"ГО {_fmt_num(entry.get('totalGo'))} / {_fmt_num(entry.get('perUnitGo'))} за 1"
+        # Resolve qty / qtyBoth after the loop.
+        for symbol, entry in list(metrics['bybit']['symbols'].items()):
+            long_sz = float(entry.get('longSize') or 0)
+            short_sz = float(entry.get('shortSize') or 0)
+            if long_sz > 0 and short_sz > 0:
+                # Both hedge legs: sum of sizes, yellow badge.
+                entry['qty'] = long_sz + short_sz
+                entry['qtyBoth'] = True
+            elif long_sz > 0:
+                entry['qty'] = int(long_sz) if float(long_sz).is_integer() else long_sz
+                entry['qtyBoth'] = False
+            elif short_sz > 0:
+                entry['qty'] = -(int(short_sz) if float(short_sz).is_integer() else short_sz)
+                entry['qtyBoth'] = False
+            else:
+                entry['qty'] = 0
+                entry['qtyBoth'] = False
+            entry.pop('longSize', None)
+            entry.pop('shortSize', None)
     except Exception:
         pass
 
@@ -3430,29 +3483,53 @@ def _live_broker_metrics(config: Dict[str, Any]) -> Dict[str, Any]:
         }
         for p in (positions.get('data') or []):
             symbol = str(p.get('symbol') or '')
+            if not symbol:
+                continue
             qty_raw = p.get('positionAmt') or 0
             total_im = p.get('initialMargin')
-            per_unit = None
             try:
-                qty_num_abs = abs(float(qty_raw))
-                if qty_num_abs > 0:
-                    per_unit = float(total_im) / qty_num_abs
+                size_num = abs(float(qty_raw))
+            except (TypeError, ValueError):
+                size_num = 0.0
+            per_unit = None
+            if size_num > 0:
+                try:
+                    per_unit = float(total_im) / size_num
+                except Exception:
+                    pass
+            side = str(p.get('positionSide') or '').upper()
+            entry = metrics['bingx']['symbols'].get(symbol)
+            if entry is None:
+                entry = {'longSize': 0.0, 'shortSize': 0.0, 'totalGo': 0.0, 'perUnitGo': None, 'text': ''}
+                metrics['bingx']['symbols'][symbol] = entry
+            if side == 'SHORT':
+                entry['shortSize'] = entry.get('shortSize', 0.0) + size_num
+            else:
+                entry['longSize'] = entry.get('longSize', 0.0) + size_num
+            try:
+                entry['totalGo'] = float(entry.get('totalGo') or 0) + float(total_im or 0)
             except Exception:
                 pass
-            if symbol:
-                try:
-                    qty_live = float(qty_raw)
-                    qty_live = int(qty_live) if qty_live.is_integer() else qty_live
-                    if str(p.get('positionSide') or '').upper() == 'SHORT':
-                        qty_live = -abs(qty_live)
-                except Exception:
-                    qty_live = qty_raw
-                metrics['bingx']['symbols'][symbol] = {
-                    'totalGo': _fmt_num(total_im),
-                    'perUnitGo': _fmt_num(per_unit),
-                    'text': f"ГО {_fmt_num(total_im)} / {_fmt_num(per_unit)} за 1",
-                    'qty': qty_live,
-                }
+            if per_unit is not None:
+                entry['perUnitGo'] = per_unit
+            entry['text'] = f"ГО {_fmt_num(entry.get('totalGo'))} / {_fmt_num(entry.get('perUnitGo'))} за 1"
+        for symbol, entry in list(metrics['bingx']['symbols'].items()):
+            long_sz = float(entry.get('longSize') or 0)
+            short_sz = float(entry.get('shortSize') or 0)
+            if long_sz > 0 and short_sz > 0:
+                entry['qty'] = long_sz + short_sz
+                entry['qtyBoth'] = True
+            elif long_sz > 0:
+                entry['qty'] = int(long_sz) if float(long_sz).is_integer() else long_sz
+                entry['qtyBoth'] = False
+            elif short_sz > 0:
+                entry['qty'] = -(int(short_sz) if float(short_sz).is_integer() else short_sz)
+                entry['qtyBoth'] = False
+            else:
+                entry['qty'] = 0
+                entry['qtyBoth'] = False
+            entry.pop('longSize', None)
+            entry.pop('shortSize', None)
     except Exception:
         pass
 
@@ -4127,8 +4204,8 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             broker_default_qty = _current_broker_order_qty(instrument, broker_name, current, obs, ticker)
             order_qty_value = _current_order_qty(current, broker_default_qty or '1')
             order_qty_class = _qty_badge_class(order_qty_value)
-            position_qty_value = _live_symbol_qty_text(broker_name, symbol_raw, ticker, margin_symbol)
-            position_qty_class = _qty_badge_class(position_qty_value)
+            position_qty_value, position_qty_both = _live_symbol_qty_info(broker_name, symbol_raw, ticker, margin_symbol)
+            position_qty_class = _qty_badge_class(position_qty_value, both=position_qty_both)
             symbol_list_id = f"lookup-symbol-{html.escape(broker_name)}"
             venue_list_id = f"lookup-venue-{html.escape(broker_name)}"
 
@@ -4169,7 +4246,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<div class='symbol-line'><label class='checkline-inline'><input type='checkbox' name='map|{html.escape(ticker)}|{html.escape(broker_name)}' {is_checked}></label>"
                 f"<input list='{symbol_list_id}' autocomplete='off' class='mini-input symbol-input' type='text' name='symbol|{html.escape(ticker)}|{html.escape(broker_name)}' value='{symbol_value}' placeholder='symbol'>"
                 f"<input list='{venue_list_id}' autocomplete='off' class='mini-input venue-inline' type='text' name='venue|{html.escape(ticker)}|{html.escape(broker_name)}' value='{venue_value}' placeholder='{venue_placeholder}'>"
-                f"<input autocomplete='off' class='mini-input position-inline {position_qty_class}' type='text' value='{html.escape(position_qty_value)}' placeholder='pos' readonly tabindex='-1'></div>"
+                f"<input autocomplete='off' class='mini-input position-inline {position_qty_class}' data-both='{'1' if position_qty_both else '0'}' type='text' value='{html.escape(position_qty_value)}' placeholder='pos' readonly tabindex='-1'></div>"
                 f"<div class='quick-line'><button type='button' class='quick-btn buy-btn' data-quick-order data-side='buy' data-broker='{html.escape(broker_name)}'>buy</button><input autocomplete='off' class='mini-input quick-qty {order_qty_class}' data-base-qty value='{html.escape(order_qty_value or broker_default_qty or '1')}' type='text' name='qty|{html.escape(ticker)}|{html.escape(broker_name)}' value='{html.escape(order_qty_value or broker_default_qty or '1')}' placeholder='qty'><button type='button' class='quick-btn sell-btn' data-quick-order data-side='sell' data-broker='{html.escape(broker_name)}'>sell</button><button type='button' class='quick-btn book-btn' data-book-view data-broker='{html.escape(broker_name)}'>book</button><span class='cell-subhint'>{html.escape(margin_hint)}</span></div>"
                 f"{risk_line}"
                 f"{smart_inc_line}"
@@ -4302,6 +4379,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
     .quick-qty {{ width: 56px; min-width: 56px; text-align: center; margin: 0; flex: 0 0 56px; }}
     .qty-neg {{ border-color: #dc2626; color: #fecaca; background: #2b1212; }}
     .qty-pos {{ border-color: #16a34a; color: #bbf7d0; background: #102315; }}
+    .qty-both {{ border-color: #eab308; color: #fef08a; background: #2a2111; font-weight: 600; }}
     .qty-work {{ border-color: #d97706; color: #fde68a; background: #2b2111; font-weight: 600; }}
     .qty-neutral {{ border-color: #4b5563; }}
     .broker-info-card {{ display:flex; flex-direction:column; gap:4px; min-height:92px; }}
@@ -4333,7 +4411,11 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
   <script>
     function updateQtyColors() {{
       document.querySelectorAll('input[name^="qty|"], .position-inline').forEach(function(input) {{
-        input.classList.remove('qty-neg', 'qty-pos', 'qty-neutral', 'qty-work');
+        input.classList.remove('qty-neg', 'qty-pos', 'qty-neutral', 'qty-work', 'qty-both');
+        if (input.classList.contains('position-inline') && input.getAttribute('data-both') === '1') {{
+          input.classList.add('qty-both');
+          return;
+        }}
         const raw = String(input.value || '').trim().toUpperCase();
         if (raw === 'WORK') {{
           input.classList.add('qty-work');
@@ -4773,16 +4855,22 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
               const positionInput = cell.querySelector('.position-inline');
               if (positionInput) {{
                 positionInput.value = String(sym.qty);
-                positionInput.classList.remove('qty-neg', 'qty-pos', 'qty-neutral', 'qty-work');
-                const rawQty = String(sym.qty || '').trim().toUpperCase();
-                if (rawQty === 'WORK' || String(sym.state || '') === 'working') positionInput.classList.add('qty-work');
-                else if (rawQty === 'REJ' || rawQty === 'REJECT' || rawQty === 'REJECTED' || String(sym.state || '') === 'error') positionInput.classList.add('qty-neg');
-                else {{
-                  const v = parseFloat(positionInput.value);
-                  if (isNaN(v)) positionInput.classList.add('qty-neutral');
-                  else if (v < 0) positionInput.classList.add('qty-neg');
-                  else if (v > 0) positionInput.classList.add('qty-pos');
-                  else positionInput.classList.add('qty-neutral');
+                const both = !!sym.qtyBoth;
+                positionInput.setAttribute('data-both', both ? '1' : '0');
+                positionInput.classList.remove('qty-neg', 'qty-pos', 'qty-neutral', 'qty-work', 'qty-both');
+                if (both) {{
+                  positionInput.classList.add('qty-both');
+                }} else {{
+                  const rawQty = String(sym.qty || '').trim().toUpperCase();
+                  if (rawQty === 'WORK' || String(sym.state || '') === 'working') positionInput.classList.add('qty-work');
+                  else if (rawQty === 'REJ' || rawQty === 'REJECT' || rawQty === 'REJECTED' || String(sym.state || '') === 'error') positionInput.classList.add('qty-neg');
+                  else {{
+                    const v = parseFloat(positionInput.value);
+                    if (isNaN(v)) positionInput.classList.add('qty-neutral');
+                    else if (v < 0) positionInput.classList.add('qty-neg');
+                    else if (v > 0) positionInput.classList.add('qty-pos');
+                    else positionInput.classList.add('qty-neutral');
+                  }}
                 }}
               }}
               const quickInput = cell.querySelector('.quick-qty');
