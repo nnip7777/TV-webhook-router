@@ -1209,6 +1209,47 @@ def _finam_symbol_venue(symbol: str) -> str:
     return 'MOEX'
 
 
+def _derive_liquidity_flag(row: Dict[str, Any], qty: float, price: float, commission: float, broker: str = '') -> str:
+    """maker/taker for a fill.
+
+    Priority: explicit liquidityFlag/isMaker fields → commission-rate heuristic.
+    Rate = |fee| / notional. Typical USDT-perp: maker ≈ 0.02%, taker ≈ 0.05%.
+    Flat-fee brokers (Finam/Alor) often have no signal → ''.
+    """
+    explicit = str(row.get('liquidityFlag') or row.get('liquidity_flag') or '').strip().lower()
+    if explicit in ('maker', 'taker'):
+        return explicit
+    if row.get('isMaker') is True:
+        return 'maker'
+    if row.get('isMaker') is False:
+        return 'taker'
+    # order type hints (own orders)
+    otype = str(row.get('orderType') or row.get('type') or '').strip().lower()
+    tif = str(row.get('timeInForce') or row.get('tif') or '').strip().upper()
+    if tif in ('POSTONLY', 'POST_ONLY', 'PO'):
+        return 'maker'
+    if otype in ('market', 'stop_market', 'stopmarket'):
+        return 'taker'
+    notional = abs(qty * price)
+    if notional <= 0 or commission is None:
+        return ''
+    try:
+        rate = abs(float(commission)) / notional
+    except (TypeError, ValueError):
+        return ''
+    if rate <= 0:
+        return ''
+    # crypto perps: below ~2.5bp → maker; above ~4bp → taker; middle unknown
+    if broker in ('bingx', 'bybit'):
+        if rate <= 0.00025:
+            return 'maker'
+        if rate >= 0.0004:
+            return 'taker'
+        return ''
+    # flat-fee venues: no reliable rate signal
+    return ''
+
+
 def _normalize_broker_fill_row(broker: str, row: Dict[str, Any], default_symbol: str = '', default_venue: str = '') -> Dict[str, Any] | None:
     broker = str(broker or '').strip().lower()
     price_raw = row.get('price')
@@ -1280,7 +1321,7 @@ def _normalize_broker_fill_row(broker: str, row: Dict[str, Any], default_symbol:
         'notional': qty * price if price else 0.0,
         'commission': commission,
         'commission_currency': commission_currency,
-        'liquidity_flag': str(row.get('liquidityFlag') or ''),
+        'liquidity_flag': _derive_liquidity_flag(row, qty, price, commission, broker=broker),
         'position_effect': '',
         'source_type': 'exchange_sync',
         'raw_json': _json_text(row),
@@ -1521,6 +1562,53 @@ def _fetch_broker_fill_rows(broker: str, symbol: str = '', lookback_hours: int =
             if symbol and row_symbol != symbol:
                 continue
             fill = _normalize_broker_fill_row('alor', row, default_venue=str(row.get('_alorExchange') or row.get('exchange') or 'MOEX'))
+            if fill:
+                rows.append(fill)
+        return rows
+
+    if broker == 'bybit':
+        from bybit_adapter import BybitBroker
+        import time as _time
+        client = BybitBroker()
+        end_ts = int(_time.time() * 1000)
+        if since_iso:
+            try:
+                start_dt = datetime.fromisoformat(str(since_iso).replace('Z', '+00:00'))
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=LOCAL_TZ)
+                start_ts = int(start_dt.timestamp() * 1000)
+            except Exception:
+                start_ts = end_ts - lookback_hours * 60 * 60 * 1000
+        else:
+            start_ts = end_ts - lookback_hours * 60 * 60 * 1000
+        if not symbol:
+            return []
+        payload = client.get_execution_list(symbol=symbol, start_time=start_ts, end_time=end_ts, limit=100)
+        result = (payload or {}).get('result') or {}
+        raw_rows = result.get('list') or []
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            # V5: execFee/fee, orderPrice/orderQty, execType=Trade (not liquidity)
+            if str(row.get('execType') or '') not in ('', 'Trade'):
+                continue
+            norm = {
+                'orderId': row.get('orderId') or '',
+                'tradeId': row.get('execId') or row.get('tradeId') or '',
+                'symbol': row.get('symbol') or symbol,
+                'side': row.get('side') or '',
+                'price': row.get('orderPrice') or row.get('execPrice') or 0,
+                'qty': row.get('execQty') or row.get('orderQty') or 0,
+                'commission': row.get('execFee') or row.get('fee') or 0,
+                'currency': row.get('feeCurrency') or row.get('currency') or 'USDT',
+                'orderType': row.get('orderType') or '',
+                'timeInForce': row.get('timeInForce') or '',
+                'liquidityFlag': row.get('liquidityFlag') or '',
+                'category': row.get('category') or 'linear',
+                'execTime': row.get('execTime') or row.get('timestamp') or '',
+                'timestamp': row.get('execTime') or row.get('timestamp') or '',
+            }
+            fill = _normalize_broker_fill_row('bybit', norm, default_symbol=symbol, default_venue='linear')
             if fill:
                 rows.append(fill)
         return rows

@@ -212,6 +212,24 @@ class BybitBroker:
     def get_order_status(self, symbol: str, order_id: str, category: str = 'linear') -> Dict[str, Any]:
         return self._request('GET', '/v5/order/realtime', params={'category': category, 'symbol': symbol, 'orderId': order_id})
 
+    def get_execution_list(
+        self,
+        symbol: Optional[str] = None,
+        category: str = 'linear',
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """V5 execution history (own fills). execType=Trade; fee/feeRate present."""
+        params: Dict[str, Any] = {'category': category, 'limit': max(1, min(100, int(limit)))}
+        if symbol:
+            params['symbol'] = symbol
+        if start_time is not None:
+            params['startTime'] = int(start_time)
+        if end_time is not None:
+            params['endTime'] = int(end_time)
+        return self._request('GET', '/v5/execution/list', params=params)
+
 
     def add_margin(self, symbol: str, margin: Any, category: str = 'linear', position_idx: Optional[int] = None) -> Dict[str, Any]:
         """Add isolated margin (POST /v5/position/add-margin). margin > 0 only.
