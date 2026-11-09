@@ -1,3 +1,6 @@
+## 2026.11.09-003
+- BingX cross + open position: `set_margin_type` reject *«close open positions / cancel pending orders»* → **soft-continue** (journal `crossMarginEnsureSkipped=open_position`); add to existing leg is **not** cancelled. Flip path re-ensures CROSS **after close when flat** (`set_margin_type_before_target_open`, hard fail if rejected) so the opposite open gets cross mode.
+
 ## 2026.11.09-002
 - BingX `set_margin_type`: wire map `CROSS` → `CROSSED` (API enum is `ISOLATED|CROSSED|SEPARATE_ISOLATED`). Journal/UI keep `CROSS`. Fixes `cross_margin_set_failed` on first gas cross order (14:06).
 

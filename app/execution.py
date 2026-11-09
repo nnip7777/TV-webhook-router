@@ -2446,18 +2446,35 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 request_payload['crossMarginEnsure'] = mt_resp
                 # Cross: hard-fail closed (mirror Bybit) — no order if mode not set.
                 # Isolated: keep prior non-abort behavior (result was ignored before).
+                # Exception: BingX rejects marginType change while positions/orders exist.
+                # Add/keep into an open book must not cancel — soft-continue; flip
+                # re-ensures CROSS after close when flat (before target open).
                 if cross_cell and not _bingx_api_ok(mt_resp):
                     mt_msg = str((mt_resp or {}).get('msg') or (mt_resp or {}).get('code') or '')
-                    return {
-                        'broker': broker,
-                        'symbol': symbol,
-                        'category': category,
-                        'qty': quantity,
-                        'side': side_raw,
-                        'request': request_payload,
-                        'error': f'cross_margin_set_failed: {mt_msg}',
-                        'results': mt_resp if isinstance(mt_resp, dict) else {'raw': mt_resp},
-                    }
+                    mt_msg_l = mt_msg.lower()
+                    _open_pos_markers = (
+                        'close open positions',
+                        'close open position',
+                        'cancel pending orders',
+                    )
+                    if any(m in mt_msg_l for m in _open_pos_markers):
+                        request_payload['crossMarginEnsureSkipped'] = 'open_position'
+                        request_payload['crossMarginEnsureSkipReason'] = mt_msg
+                        request_payload['crossMarginEnsureSkipNote'] = (
+                            'BingX cannot change marginType with open positions; '
+                            'add continues in current mode; CROSS applies on next flat open'
+                        )
+                    else:
+                        return {
+                            'broker': broker,
+                            'symbol': symbol,
+                            'category': category,
+                            'qty': quantity,
+                            'side': side_raw,
+                            'request': request_payload,
+                            'error': f'cross_margin_set_failed: {mt_msg}',
+                            'results': mt_resp if isinstance(mt_resp, dict) else {'raw': mt_resp},
+                        }
 
             effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
 
@@ -2947,18 +2964,36 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         request_payload['riskControl']['availableAfterClose'] = _bingx_account_available(fresh_bal)
                     except Exception as refresh_exc:
                         request_payload['riskControl']['balanceRefreshAfterCloseError'] = str(refresh_exc)
+                    # Flat after close: BingX now allows marginType switch — ensure CROSS
+                    # before opening the opposite target (hard fail if rejected).
+                    if cross_cell:
+                        _set_stage('set_margin_type_before_target_open')
+                        mt_open = client.set_margin_type(prepared['symbol'], 'CROSS')
+                        margin_ops['setMarginTypeBeforeTargetOpen'] = mt_open
+                        request_payload['crossMarginEnsureBeforeTargetOpen'] = mt_open
+                        if not _bingx_api_ok(mt_open):
+                            mt_open_msg = str((mt_open or {}).get('msg') or (mt_open or {}).get('code') or '')
+                            result = {
+                                'code': -1,
+                                'msg': f'cross_margin_set_failed: {mt_open_msg}',
+                            }
+                            final_order_row = {}
+                            remaining_qty = '0'
+                            order_attempts = []
                     target_open_qty_kind = 'usdt'
                     open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None, qty_kind=target_open_qty_kind)
                     request_payload['targetOpenQtyKind'] = target_open_qty_kind
                     pre_abort = None
-                    if risk_control_enabled and not dry_run:
+                    if result is not None and isinstance(result, dict) and result.get('code') not in (None, 0, '0'):
+                        pre_abort = None  # already failed set_margin_type_before_target_open
+                    elif risk_control_enabled and not dry_run:
                         pre_abort = _ensure_pretrade_margin(open_position_side)
                     if pre_abort:
                         pretrade_aborted = True
                         result = pre_abort
                         final_order_row = {}
                         remaining_qty = '0'
-                    else:
+                    elif isinstance(result, dict) and result.get('code') in (None, 0, '0'):
                         open_result, open_final_order_row, open_remaining_qty, open_attempts, open_effective_position_side = _run_limit_repost_loop(
                             open_prepared,
                             open_position_side,
