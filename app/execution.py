@@ -245,6 +245,47 @@ def bingx_risk_pct_by_symbol(config: Dict[str, Any], broker: str = 'bingx') -> D
     return targets
 
 
+def bingx_cross_symbols(config: Dict[str, Any], broker: str = 'bingx') -> set:
+    """Normalized exchange symbols whose routing cell has cross=True (risk-sync skip)."""
+    broker_l = str(broker or '').strip().lower()
+    out: set = set()
+    for route in (config or {}).get('routes') or []:
+        if not isinstance(route, dict):
+            continue
+        for dest in route.get('destinations') or []:
+            if not isinstance(dest, dict):
+                continue
+            if str(dest.get('broker') or '').strip().lower() != broker_l:
+                continue
+            if not dest.get('cross'):
+                continue
+            symbol = str(dest.get('symbol') or '').strip()
+            if symbol:
+                out.add(symbol.replace('-', '').upper())
+    return out
+
+
+def _bingx_position_upnl(row: Any) -> float:
+    """Best-effort unrealised PnL from a BingX position row; unknown → 0.0 (fail-closed: close)."""
+    if not isinstance(row, dict):
+        return 0.0
+    for key in (
+        'unrealizedProfit',
+        'unrealisedPnl',
+        'unrealizedPnl',
+        'unrealizedProfitLoss',
+        'upnl',
+        'uPnl',
+    ):
+        value = row.get(key)
+        if value not in (None, ''):
+            try:
+                return float(value)
+            except Exception:
+                continue
+    return 0.0
+
+
 @dataclass
 class ExecutionResult:
     broker: str
@@ -2060,6 +2101,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
     # Do NOT pin to mark — that bypasses the book and causes cancel/repost churn.
     # avg_tol / open path orders are placed in USDT when openQtyKind=usdt.
     request_qty_kind = open_qty_kind if (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol') else qty_kind
+    cross_cell = bool(destination.get('cross'))
     request_payload = {
         'broker': broker,
         'symbol': symbol,
@@ -2071,6 +2113,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'positionSide': position_side,
         'signalMode': signal_mode,
         'targetDirection': target_direction,
+        'cross': cross_cell,
         'stage': 'init',
         'stageTrace': ['init'],
     }
@@ -2084,7 +2127,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         request_payload['clientOrderId'] = client_order_id
     if risk_pct is not None:
         request_payload['riskPct'] = risk_pct
-        request_payload['marginType'] = 'ISOLATED'
+    request_payload['marginType'] = 'CROSS' if cross_cell else 'ISOLATED'
     if price not in (None, ''):
         request_payload['price'] = price
 
@@ -2250,15 +2293,67 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     request_payload['targetDirectionOppositeQty'] = float(opposite_qty_target)
                     request_payload['targetDirectionSameQty'] = float(same_qty_target)
                     if opposite_qty_target > 0:
-                        close_position_side = opposite_side
-                        close_position_qty = opposite_qty_target
-                        api_position_side = opposite_side
-                        effective_reduce_only = None
-                        request_payload['positionSideNetting'] = opposite_side
-                        request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
-                        request_payload['hedgeCloseUsesReduceOnly'] = False
-                        request_payload['targetDirectionCloseInitialQtyRaw'] = str(opposite_qty_target)
-                        target_mode_close_then_open = True
+                        opposite_row = next(
+                            (
+                                r for r in position_rows_before
+                                if str((r or {}).get('positionSide') or (r or {}).get('side') or '').upper() == opposite_side
+                            ),
+                            None,
+                        )
+                        opposite_upnl = _bingx_position_upnl(opposite_row)
+                        cross_enabled = bool(cross_cell)
+                        keep_opposite = bool(
+                            cross_enabled
+                            and should_keep_opposite_on_cross(opposite_upnl)
+                        )
+                        if keep_opposite:
+                            # CROSS + losing opposite: keep both legs, open target (Bybit parity).
+                            if current_position_mode is not True:
+                                # Force dual-side for keep (target-direction already desires True).
+                                _set_stage('set_position_mode_keep_opposite')
+                                mode_change = client.set_position_mode(True)
+                                request_payload['positionModeChange'] = mode_change
+                                if not _bingx_api_ok(mode_change):
+                                    return {
+                                        'broker': broker,
+                                        'symbol': symbol,
+                                        'category': category,
+                                        'qty': quantity,
+                                        'side': side_raw,
+                                        'request': request_payload,
+                                        'error': f"dual_side_enable_failed: {str((mode_change or {}).get('msg') or (mode_change or {}).get('code') or '')}",
+                                        'results': mode_change if isinstance(mode_change, dict) else {'raw': mode_change},
+                                    }
+                                current_position_mode = True
+                                request_payload['hedgedModeCurrent'] = True
+                                request_payload['positionSideMode'] = 'hedge'
+                                api_position_side = 'LONG' if side == 'buy' else 'SHORT'
+                            close_position_side = None
+                            close_position_qty = Decimal('0')
+                            requested_position_side = desired_side
+                            api_position_side = desired_side
+                            effective_reduce_only = None
+                            target_mode_close_then_open = False
+                            request_payload['positionSideNetting'] = desired_side
+                            request_payload['nettingAction'] = 'target_direction_keep_opposite_then_open_target'
+                            request_payload['keepOpposite'] = {
+                                'side': 'sell' if opposite_side == 'SHORT' else 'buy',
+                                'qty': float(opposite_qty_target),
+                                'positionSide': opposite_side,
+                                'unrealizedProfit': opposite_upnl,
+                                'reason': 'cross_loss',
+                            }
+                            request_payload['hedgeOpenUsesReduceOnly'] = False
+                        else:
+                            close_position_side = opposite_side
+                            close_position_qty = opposite_qty_target
+                            api_position_side = opposite_side
+                            effective_reduce_only = None
+                            request_payload['positionSideNetting'] = opposite_side
+                            request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
+                            request_payload['hedgeCloseUsesReduceOnly'] = False
+                            request_payload['targetDirectionCloseInitialQtyRaw'] = str(opposite_qty_target)
+                            target_mode_close_then_open = True
                     else:
                         requested_position_side = desired_side
                         api_position_side = desired_side
@@ -2340,19 +2435,42 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'preTradeLeverage': actual_leverage,
                     'leverageSource': 'position_or_terminal',
                 }
+
+            # Cross cells: always ensure CROSS margin mode before open/add (even without riskPct).
+            # Isolated: only when risk_control_enabled (prior behavior — set ISOLATED once).
+            if cross_cell or risk_control_enabled:
                 _set_stage('set_margin_type')
-                margin_ops['setMarginType'] = client.set_margin_type(prepared['symbol'], 'ISOLATED')
+                desired_margin = 'CROSS' if cross_cell else 'ISOLATED'
+                mt_resp = client.set_margin_type(prepared['symbol'], desired_margin)
+                margin_ops['setMarginType'] = mt_resp
+                request_payload['crossMarginEnsure'] = mt_resp
+                # Cross: hard-fail closed (mirror Bybit) — no order if mode not set.
+                # Isolated: keep prior non-abort behavior (result was ignored before).
+                if cross_cell and not _bingx_api_ok(mt_resp):
+                    mt_msg = str((mt_resp or {}).get('msg') or (mt_resp or {}).get('code') or '')
+                    return {
+                        'broker': broker,
+                        'symbol': symbol,
+                        'category': category,
+                        'qty': quantity,
+                        'side': side_raw,
+                        'request': request_payload,
+                        'error': f'cross_margin_set_failed: {mt_msg}',
+                        'results': mt_resp if isinstance(mt_resp, dict) else {'raw': mt_resp},
+                    }
 
             effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
 
             def _ensure_pretrade_margin(position_side: str) -> Dict[str, Any] | None:
-                """Add isolated to riskPct target before opening/adding.
+                """Add margin to riskPct target before opening/adding (isolated and cross).
 
                 Returns None if OK; error dict → abort without placing order.
                 """
                 if dry_run or not risk_control_enabled:
                     return None
                 rc = request_payload.setdefault('riskControl', {})
+                if cross_cell:
+                    rc['cross'] = True
 
                 def _pretrade_abort(msg: str) -> Dict[str, Any]:
                     _set_stage('pre_trade_margin_aborted')
@@ -2446,6 +2564,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     )
                 except Exception as e:
                     rc['preTradeAddMarginError'] = str(e)
+                    if cross_cell:
+                        # Cross: still try margin top-up; API may reject — journal, do not abort (Bybit parity).
+                        rc['preTradeAddMarginFailed'] = True
+                        return None
                     return _pretrade_abort(f'pre-trade add_margin failed: {e} — order not placed')
                 margin_ops['preTradeAddMargin'] = add_resp
                 rc['preTradeAddMargin'] = need_add
@@ -2453,6 +2575,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     rc['preTradeAddMarginFailed'] = True
                     rc['preTradeAddMarginApiCode'] = add_resp.get('code') if isinstance(add_resp, dict) else None
                     rc['preTradeAddMarginApiMsg'] = str((add_resp or {}).get('msg') or '') if isinstance(add_resp, dict) else str(add_resp)
+                    if cross_cell:
+                        return None
                     return _pretrade_abort(
                         f'pre-trade add_margin rejected: code={rc.get("preTradeAddMarginApiCode")} '
                         f'msg={rc.get("preTradeAddMarginApiMsg")} — order not placed'
@@ -2467,6 +2591,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     # Allow small slack (mark/uPnL drift)
                     if iso_after + 0.05 < target_iso * 0.5:
                         rc['preTradeAddMarginNoEffect'] = True
+                        if cross_cell:
+                            # Cross: position margin field may lag / not reflect account cushion — journal only.
+                            return None
                         return _pretrade_abort(
                             f'pre-trade margin still low after add: isolated={iso_after:.4f} '
                             f'target={target_iso:.4f} — order not placed'
@@ -2869,7 +2996,15 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             opposite_side = 'SHORT' if expected_side == 'LONG' else 'LONG'
                             final_expected_qty = final_buckets.get(expected_side, Decimal('0')) or Decimal('0')
                             final_opposite_qty = final_buckets.get(opposite_side, Decimal('0')) or Decimal('0')
-                            if final_expected_qty <= 0 or final_opposite_qty > 0:
+                            keep_opposite = str(request_payload.get('nettingAction') or '') == 'target_direction_keep_opposite_then_open_target'
+                            if keep_opposite:
+                                # CROSS keep-loser: both legs may stand.
+                                if final_expected_qty <= 0:
+                                    result = {
+                                        'code': -1,
+                                        'msg': f'target-direction final reconcile failed: expected {expected_side} > 0, got {final_buckets}'
+                                    }
+                            elif final_expected_qty <= 0 or final_opposite_qty > 0:
                                 result = {
                                     'code': -1,
                                     'msg': f'target-direction final reconcile failed: expected {expected_side} > 0 and {opposite_side} == 0, got {final_buckets}'
@@ -2940,6 +3075,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 else:
                     target_margin = 0.0
                 target_used = 0.0  # legacy; terminal risk is riskRate
+                request_payload.setdefault('riskControl', {})
+                if cross_cell:
+                    request_payload['riskControl']['cross'] = True
                 request_payload['riskControl'].update({
                     'effectivePositionSide': effective_position_side,
                     'finalQty': final_qty,
@@ -3003,6 +3141,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                     request_payload['riskControl']['addMarginFailed'] = True
                                     request_payload['riskControl']['addMarginApiCode'] = add_resp.get('code') if isinstance(add_resp, dict) else None
                                     request_payload['riskControl']['addMarginApiMsg'] = str((add_resp or {}).get('msg') or '') if isinstance(add_resp, dict) else str(add_resp)
+                                else:
+                                    request_payload['riskControl']['addMarginFailed'] = False
                             else:
                                 request_payload['riskControl']['addMarginSkipped'] = 'insufficient_balance'
                         except Exception as add_err:

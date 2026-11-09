@@ -1,3 +1,8 @@
+## 2026.11.09-001
+- BingX per-cell `cross` checkbox (same as Bybit): `set_margin_type(CROSS)` before open/add (fail → `cross_margin_set_failed`, no order); on target-direction flip with **losing** opposite — keep both legs (`nettingAction=target_direction_keep_opposite_then_open_target`, `keepOpposite.reason=cross_loss`) + dual-side; profit/flat → normal close→open; final reconcile allows both legs when keeping.
+- **Margin top-up always runs per cell `riskPct` on both Bybit and BingX** (pre-trade, post-trade, periodic risk-sync) for isolated **and** cross — never skip top-up to avoid liquidation. Cross: API reject of `add_margin` / no-effect verify → journaled (`preTradeAddMarginFailed` / `preTradeAddMarginNoEffect`), order still placed (Bybit parity); isolated keeps hard abort on pre-trade reject.
+- Journal BingX `cross` + `marginType=CROSS|ISOLATED`. Risk-sync does **not** skip cross cells.
+
 ## 2026.10.22-001
 - Bybit per-cell `cross` checkbox (routing UI, Bybit only): on flip, if opposite leg is in **loss** (`unrealisedPnl < 0`) — do **not** close it; enable dual-side (auto) + cross margin (`tradeMode=0`) and open the other direction so both legs stand (loss not realized). Profit/flat → normal close→open.
 - Journal `nettingAction=target_direction_keep_opposite_then_open_target` + `keepOpposite` (side/qty/upnl); analytics books it as add, not reduce.

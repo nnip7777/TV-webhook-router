@@ -2671,7 +2671,7 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
         except Exception:
             pass
 
-    if broker_name == 'bybit' and options.get('cross'):
+    if broker_name in ('bingx', 'bybit') and options.get('cross'):
         destination['cross'] = True
         destination['marginType'] = 'CROSS'
 
@@ -4239,7 +4239,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             cross_line = (
                 f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='cross|{html.escape(ticker)}|{html.escape(broker_name)}' {cross_checked}><span class='muted'>cross</span></label>"
                 f"<span class='muted'>flip: keep loser + hedge</span></div>"
-                if broker_name == 'bybit' else ''
+                if broker_name in ('bingx', 'bybit') else ''
             )
             broker_cells.append(
                 f'<td class="broker-cell" data-broker-cell="{html.escape(broker_name)}" data-broker-symbol="{html.escape(margin_symbol)}">'
