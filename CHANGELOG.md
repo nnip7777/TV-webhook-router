@@ -1,3 +1,6 @@
+## 2026.11.09-002
+- BingX `set_margin_type`: wire map `CROSS` → `CROSSED` (API enum is `ISOLATED|CROSSED|SEPARATE_ISOLATED`). Journal/UI keep `CROSS`. Fixes `cross_margin_set_failed` on first gas cross order (14:06).
+
 ## 2026.11.09-001
 - BingX per-cell `cross` checkbox (same as Bybit): `set_margin_type(CROSS)` before open/add (fail → `cross_margin_set_failed`, no order); on target-direction flip with **losing** opposite — keep both legs (`nettingAction=target_direction_keep_opposite_then_open_target`, `keepOpposite.reason=cross_loss`) + dual-side; profit/flat → normal close→open; final reconcile allows both legs when keeping.
 - **Margin top-up always runs per cell `riskPct` on both Bybit and BingX** (pre-trade, post-trade, periodic risk-sync) for isolated **and** cross — never skip top-up to avoid liquidation. Cross: API reject of `add_margin` / no-effect verify → journaled (`preTradeAddMarginFailed` / `preTradeAddMarginNoEffect`), order still placed (Bybit parity); isolated keeps hard abort on pre-trade reject.

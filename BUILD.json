@@ -1,15 +1,15 @@
 {
-  "version": "2026.11.09-001",
-  "builtAt": "2026-11-09T00:21:48.940490+00:00",
+  "version": "2026.11.09-002",
+  "builtAt": "2026-11-09T14:15:13.959310+00:00",
   "fileCount": 17,
   "files": {
     "VERSION": {
-      "sha256": "55ace39ffa372d3eb5d2f6f14dc4b3b86a0bd8a0eabd86b93cacd8e7e892d003",
+      "sha256": "cff773daa3a7d67200d02f304cbd451cdeeb5b1cf33161f9f61fe967252b40e8",
       "bytes": 15
     },
     "CHANGELOG.md": {
-      "sha256": "2e9267a937a4116233fb82391c417781f7299f66d148b2204d504a310d5cd226",
-      "bytes": 44244
+      "sha256": "ae3d6b45eca2edf0dbc01e1da4fe7ec5a07455503525e749297cb486a17829ca",
+      "bytes": 44464
     },
     "README.md": {
       "sha256": "e606c7da89ccad1618da80f8ac0c0da32099d21620609a24f078fe2f9c222997",
@@ -48,8 +48,8 @@
       "bytes": 16564
     },
     "app/bingx_adapter.py": {
-      "sha256": "cc0ff441b72f2f93d511db1d8e62d3509da440ffc97cde0091d99654c344851a",
-      "bytes": 27686
+      "sha256": "f7d93cf0924c7e01d9eb137b2b06a4a87e49ca4a40dd813e8be6028d7fc1b1e1",
+      "bytes": 27832
     },
     "app/finam_adapter.py": {
       "sha256": "dba8018707f2a094abee3504d20d730938eefc0d31a47928141cffa6056daf24",

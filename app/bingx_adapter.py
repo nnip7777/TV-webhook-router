@@ -198,9 +198,13 @@ class BingXBroker:
         return self._request('GET', '/openApi/swap/v2/user/positions', params=params)
 
     def set_margin_type(self, symbol: str, margin_type: str = 'ISOLATED') -> Dict[str, Any]:
+        # BingX wire enum is CROSSED (not CROSS); UI/journal may pass CROSS.
+        mt = str(margin_type or 'ISOLATED').upper()
+        if mt == 'CROSS':
+            mt = 'CROSSED'
         return self._request('POST', '/openApi/swap/v2/trade/marginType', params={
             'symbol': symbol,
-            'marginType': str(margin_type or 'ISOLATED').upper(),
+            'marginType': mt,
         })
 
     def set_leverage(self, symbol: str, side: str, leverage: int) -> Dict[str, Any]:

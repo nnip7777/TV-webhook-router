@@ -66,5 +66,33 @@ class BingxPositionUpnlTest(unittest.TestCase):
         self.assertEqual(_bingx_position_upnl({'foo': 1}), 0.0)
 
 
+class BingxSetMarginTypeWireEnumTest(unittest.TestCase):
+    """BingX marginType API accepts CROSSED, not CROSS (UI/journal may pass CROSS)."""
+
+    def _capture(self, margin_type):
+        from bingx_adapter import BingXBroker
+        captured = {}
+        client = BingXBroker.__new__(BingXBroker)  # skip __init__ (no network/env)
+        def _fake_request(method, path, params=None, **kwargs):
+            captured['path'] = path
+            captured['params'] = params or {}
+            return {'code': 0}
+        client._request = _fake_request
+        client.set_margin_type('NCCO-USDT', margin_type)
+        return captured
+
+    def test_cross_maps_to_crosed(self):
+        cap = self._capture('CROSS')
+        self.assertEqual(cap['params'].get('marginType'), 'CROSSED')
+
+    def test_isolated_unchanged(self):
+        cap = self._capture('ISOLATED')
+        self.assertEqual(cap['params'].get('marginType'), 'ISOLATED')
+
+    def test_crosed_passthrough(self):
+        cap = self._capture('CROSSED')
+        self.assertEqual(cap['params'].get('marginType'), 'CROSSED')
+
+
 if __name__ == '__main__':
     unittest.main()
