@@ -1,3 +1,7 @@
+## 2026.11.10-001
+- Rename routing checkbox label **CROSS → HEDGE** (field key stays `cross` for config compat). Semantics: **one checkbox** = on flip keep the **losing** opposite leg and open the reverse in parallel (dual/hedge); off → always close→open. Profit/flat opposite still closes when on.
+- **Margin type never aborts the order** (Bybit `set-margin-mode`, BingX `set_margin_type` / before-target-open): reject → journal `crossMarginEnsureFailed` + message, order continues. Dual-side enable failure still fails closed (`dual_side_enable_failed`) — required for keep path.
+
 ## 2026.11.09-003
 - BingX cross + open position: `set_margin_type` reject *«close open positions / cancel pending orders»* → **soft-continue** (journal `crossMarginEnsureSkipped=open_position`); add to existing leg is **not** cancelled. Flip path re-ensures CROSS **after close when flat** (`set_margin_type_before_target_open`, hard fail if rejected) so the opposite open gets cross mode.
 

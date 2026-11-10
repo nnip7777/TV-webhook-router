@@ -2500,7 +2500,7 @@ def _routing_details(route: Dict[str, Any]) -> str:
         if destination.get('smartInc'):
             piece += " smartInc"
         if destination.get('cross'):
-            piece += " cross"
+            piece += " hedge"
         parts.append(piece)
     return ' | '.join(parts) if parts else 'no active destinations'
 
@@ -4237,8 +4237,8 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             )
             cross_checked = 'checked' if current.get('cross') else ''
             cross_line = (
-                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='cross|{html.escape(ticker)}|{html.escape(broker_name)}' {cross_checked}><span class='muted'>cross</span></label>"
-                f"<span class='muted'>flip: keep loser + hedge</span></div>"
+                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='cross|{html.escape(ticker)}|{html.escape(broker_name)}' {cross_checked}><span class='muted'>hedge</span></label>"
+                f"<span class='muted'>keep loser + reverse</span></div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
             broker_cells.append(
