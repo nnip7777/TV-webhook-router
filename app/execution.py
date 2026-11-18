@@ -982,8 +982,21 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 except Exception:
                     unrealized = 0.0
                 allowed_loss = max(0.0, equity * (risk_pct / 100.0))
-                target_isolated_pre = max(0.0, allowed_loss + unrealized)
-                target_margin_pre = min(expected_notional, target_isolated_pre) if expected_notional > 0 else target_isolated_pre
+                # Leverage-aware: exchange requires ~notional/lev; risk% is a separate
+                # risk-sync target. Gate on leverage so high-lev adds are not blocked.
+                actual_leverage = 0
+                try:
+                    actual_leverage = int(float(before_pos.get('leverage') or 0))
+                except Exception:
+                    actual_leverage = 0
+                expected_notional = mark_price * expected_final_qty
+                if actual_leverage > 0 and expected_notional > 0:
+                    target_margin_pre = expected_notional / float(actual_leverage)
+                    target_src = f'leverage:{actual_leverage}'
+                else:
+                    target_isolated_pre = max(0.0, allowed_loss + unrealized)
+                    target_margin_pre = min(expected_notional, target_isolated_pre) if expected_notional > 0 else target_isolated_pre
+                    target_src = 'risk_formula'
                 request_payload['riskControl'] = {
                     'mode': 'bybit',
                     'hedge': bool(destination.get('cross')),
@@ -997,6 +1010,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'expectedFinalQty': expected_final_qty,
                     'expectedNotional': expected_notional,
                     'targetIsolatedPre': target_margin_pre,
+                    'preTradeTargetSource': target_src,
+                    'preTradeLeverage': actual_leverage,
                 }
                 add = target_margin_pre - before_iso
                 if add > 1e-8:
@@ -1371,6 +1386,32 @@ def _bingx_target_isolated_for_notional(notional: float, risk_pct: float) -> flo
         return 0.0
     maintenance = 0.003 * abs(notional)
     return maintenance / (float(risk_pct) / 100.0)
+
+
+def _bingx_position_leverage(pos: Dict[str, Any] | None) -> int:
+    """Leverage from a BingX position row; 0 if unknown."""
+    if not isinstance(pos, dict):
+        return 0
+    try:
+        return max(0, int(float(pos.get('leverage') or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bingx_pretrade_target_margin(expected_notional: float, risk_pct: float, leverage: int) -> tuple[float, str]:
+    """Pre-trade margin gate: prefer exchange leverage, fall back to risk formula.
+
+    At leverage L the exchange requires ~notional/L margin. The risk% formula
+    (0.3%×notional / risk%) can demand far more than L allows (e.g. 99x vs 20%)
+    and blocks adds that fit available×L. Returns (target_iso, source).
+    """
+    if expected_notional <= 0:
+        return 0.0, 'zero_notional'
+    if leverage > 0:
+        return abs(expected_notional) / float(leverage), f'leverage:{leverage}'
+    if risk_pct and risk_pct > 0:
+        return _bingx_target_isolated_for_notional(expected_notional, risk_pct), 'risk_formula'
+    return 0.0, 'none'
 
 
 def _bingx_prepared_notional(prepared: Dict[str, Any]) -> float:
@@ -2536,8 +2577,28 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 expected_notional = abs(mark_now * same_side_qty) + order_notional
                 rc['expectedNotional'] = expected_notional
                 rc['expectedNotionalSource'] = 'prepared+live_position'
-                target_iso = _bingx_target_isolated_for_notional(expected_notional, risk_pct)
+                # Leverage-aware gate: exchange needs notional/lev, not risk% formula alone.
+                leverage = _bingx_position_leverage(pos)
+                if leverage <= 0:
+                    try:
+                        _rows = (pos_rows or {}).get('data') or []
+                        if isinstance(_rows, dict):
+                            _rows = [_rows]
+                        _sym = str(prepared.get('symbol') or '').replace('-', '').upper()
+                        for _r in _rows:
+                            if not isinstance(_r, dict):
+                                continue
+                            if str(_r.get('symbol') or '').replace('-', '').upper() != _sym:
+                                continue
+                            leverage = _bingx_position_leverage(_r)
+                            if leverage > 0:
+                                break
+                    except Exception:
+                        leverage = 0
+                target_iso, target_src = _bingx_pretrade_target_margin(expected_notional, risk_pct, leverage)
                 rc['preTradeTargetIsolated'] = target_iso
+                rc['preTradeTargetSource'] = target_src
+                rc['preTradeLeverage'] = leverage
                 if target_iso <= 0:
                     return None
                 current_iso = 0.0 if side_mismatch else _bingx_position_isolated(pos)

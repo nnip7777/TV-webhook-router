@@ -1,3 +1,6 @@
+## 2026.11.19-001
+- **Pre-trade margin uses exchange leverage** (BingX + Bybit): gate = `expected_notional / leverage` when position leverage known (e.g. 99x → ~1.01% notional), fallback risk% formula only if leverage unknown. Prevents risk formula (1.5% at 20%) from blocking adds that fit available×lev. Journal `preTradeTargetSource=leverage:N|risk_formula`.
+
 ## 2026.11.18-004
 - **BingX keep-loser pre-trade margin fix:** `_ensure_pretrade_margin` no longer reads isolated margin from the **opposite** leg when `_bingx_extract_position` falls back (SHORT open, opening LONG). Side mismatch → `current_iso=0` → new-position path (balance check only), not `adjust_isolated_margin(LONG)` → no more `109400 position not exist`. Journal `preTradePositionSideMismatch`.
 
