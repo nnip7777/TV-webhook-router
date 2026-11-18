@@ -1,3 +1,6 @@
+## 2026.11.17-001
+- **smart-inc TF (per-cell):** new cell select `smartIncTf` = `1м 5м 8м 10м 15м 20м 60м 280м День` (default **60** = prior hour-like behavior). Multiplier = **completed bars of that TF** since last fill (not clock-hours); same-bar skip (`smart_inc_same_bar`); restart threshold `SMART_INC_RESTART_HOURS` now means **bars of cell TF** (legacy env key); cap `SMART_INC_MAX_MULTIPLIER` unchanged. Journal `smartInc.mode=bars` + `tf` + `barsSinceLastFill`.
+
 ## 2026.11.10-001
 - Rename routing checkbox label **CROSS → HEDGE** (field key stays `cross` for config compat). Semantics: **one checkbox** = on flip keep the **losing** opposite leg and open the reverse in parallel (dual/hedge); off → always close→open. Profit/flat opposite still closes when on.
 - **Margin type never aborts the order** (Bybit `set-margin-mode`, BingX `set_margin_type` / before-target-open): reject → journal `crossMarginEnsureFailed` + message, order continues. Dual-side enable failure still fails closed (`dual_side_enable_failed`) — required for keep path.

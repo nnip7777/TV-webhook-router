@@ -204,8 +204,8 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_BIND_INTERFACE', 'label': 'BingX bind interface (optional, e.g. bingx-egress)', 'section': 'bingx', 'type': 'text'},
     {'key': 'BINGX_SOURCE_KEY', 'label': 'BingX source key', 'section': 'bingx', 'type': 'text', 'default': 'BX-AI-SKILL'},
     {'key': 'BINGX_RECV_WINDOW', 'label': 'BingX recvWindow', 'section': 'bingx', 'type': 'text', 'default': '5000'},
-    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × часы с последней сделки по тикеру на бирже). 0 в тот же час: skip, либо avg-tol добивка, если средняя вне tol. Работает при включённом чекбоксе smart-inc (BingX и Bybit, target-direction). Общая настройка для обеих бирж.'},
-    {'key': 'SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart hours', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: простой (часы с последней сделки), после которого множитель сбрасывается в ×1. Без истории сделок тоже ×1. Применяется без перезапуска сервиса. Общая настройка для BingX и Bybit.'},
+    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × бары ТФ ячейки с последней сделки по тикеру на бирже). 0 в тот же бар: skip, либо avg-tol добивка, если средняя вне tol. Работает при включённом чекбоксе smart-inc (BingX и Bybit, target-direction). Общая настройка для обеих бирж.'},
+    {'key': 'SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart bars (legacy key)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: простой в барах ТФ ячейки (ключ SMART_INC_RESTART_HOURS, значение = бары), после которого множитель сбрасывается в ×1. Без истории сделок тоже ×1. Применяется без перезапуска сервиса. Общая настройка для BingX и Bybit.'},
     {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска (BingX/Bybit)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) открытых позиций BingX и Bybit. Если риск вырос на 30% и более относительно цели — добавляется isolated margin. Цель: riskPct ячейки роутинга, иначе «default risk %». Маржа только добавляется. Журнал kind=risk-sync. Общая настройка для обеих бирж.'},
     {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск открытых позиций BingX/Bybit. Минимум 10. Применяется без перезапуска сервиса. Общая настройка для обеих бирж.'},
     {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'float', 'default': '12', 'help': 'Целевой риск % для позиций BingX/Bybit без riskPct в ячейке. 0 = только позиции с настроенным riskPct. Общая настройка для обеих бирж.'},
@@ -1429,6 +1429,7 @@ def _result_is_dry_run(result_obj: Any) -> bool:
 
 
 _SKIP_REASON_TEXT = {
+    'smart_inc_same_bar': 'skip: уже был ордер по этому символу в текущем баре ТФ',
     'smart_inc_same_hour': 'skip: уже был ордер по этому символу в текущем часе',
     'smart_inc_avg_in_range': 'skip: средняя цена уже в диапазоне tol',
     'avg_already_in_range': 'skip: средняя цена уже в диапазоне tol',
@@ -2499,6 +2500,9 @@ def _routing_details(route: Dict[str, Any]) -> str:
             piece += f" qtyKind={qty_kind}"
         if destination.get('smartInc'):
             piece += " smartInc"
+            tf = destination.get('smartIncTf')
+            if tf:
+                piece += f"tf={tf}"
         if destination.get('cross'):
             piece += " hedge"
         parts.append(piece)
@@ -2565,6 +2569,7 @@ def _current_mapping(config: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, An
                     'riskPct': destination.get('riskPct', ''),
                     'smartInc': bool(destination.get('smartInc')),
                     'smartIncTol': destination.get('smartIncTol', ''),
+                    'smartIncTf': destination.get('smartIncTf', '60'),
                     'cross': bool(destination.get('cross')),
                     'limits': copy.deepcopy(destination.get('limits', {})),
                 }
@@ -2678,13 +2683,22 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
     if broker_name in ('bingx', 'bybit') and options.get('smartInc'):
         destination['smartInc'] = True
         # Optional avg-price tolerance for add-to-position (absolute price units).
-        # e.g. gas 0.01, gold XAU 10. Empty = hours-multiplier only.
+        # e.g. gas 0.01, gold XAU 10. Empty = bars-multiplier only.
         tol_raw = str(options.get('smartIncTol', '')).strip().replace('%', '')
         if tol_raw:
             try:
                 tol_val = float(tol_raw)
                 if tol_val > 0:
                     destination['smartIncTol'] = tol_val
+            except Exception:
+                pass
+        # Per-cell TF for smart-inc bars (minutes: 1,5,8,10,15,20,60,280,1440).
+        tf_raw = str(options.get('smartIncTf', '')).strip()
+        if tf_raw:
+            try:
+                tf_val = int(float(tf_raw))
+                if tf_val in (1, 5, 8, 10, 15, 20, 60, 280, 1440):
+                    destination['smartIncTf'] = tf_val
             except Exception:
                 pass
 
@@ -4025,6 +4039,8 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
             bucket['smartInc'] = bool(destination.get('smartInc'))
         if 'smartIncTol' not in bucket:
             bucket['smartIncTol'] = destination.get('smartIncTol', '')
+        if 'smartIncTf' not in bucket:
+            bucket['smartIncTf'] = destination.get('smartIncTf', '60')
         if 'cross' not in bucket:
             bucket['cross'] = bool(destination.get('cross'))
         bucket['limits'] = bucket.get('limits') or copy.deepcopy(destination.get('limits', {}))
@@ -4227,9 +4243,16 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name in ('bingx', 'bybit') else ''
             smart_inc_checked = 'checked' if current.get('smartInc') else ''
             smart_inc_tol_value = html.escape(str(current.get('smartIncTol') or ''))
+            smart_inc_tf_value = str(current.get('smartIncTf') or '60')
+            _tf_opts = [(1, '1м'), (5, '5м'), (8, '8м'), (10, '10м'), (15, '15м'), (20, '20м'), (60, '60м'), (280, '280м'), (1440, 'День')]
+            _tf_select = ''.join(
+                f"<option value='{v}'{' selected' if str(v) == smart_inc_tf_value else ''}>{lab}</option>"
+                for v, lab in _tf_opts
+            )
             smart_inc_line = (
                 f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label>"
-                f"<span class='muted'>×часы</span>"
+                f"<span class='muted'>×бары</span>"
+                f"<select name='smartIncTf|{html.escape(ticker)}|{html.escape(broker_name)}' class='mini-input quick-qty' style='width:64px;'>{_tf_select}</select>"
                 f"<span class='muted' style='margin-left:4px;'>tol</span>"
                 f"<input autocomplete='off' class='mini-input quick-qty' type='text' name='smartIncTol|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_tol_value}' placeholder='—' style='width:48px;'>"
                 f"<span class='muted'>avg±</span></div>"
@@ -5768,6 +5791,7 @@ class Handler(BaseHTTPRequestHandler):
                     'riskPct': '',
                     'smartInc': False,
                     'smartIncTol': '',
+                    'smartIncTf': '60',
                     'cross': False,
                     'limits': {},
                 })
@@ -5787,6 +5811,8 @@ class Handler(BaseHTTPRequestHandler):
                     bucket['smartInc'] = True
                 elif field == 'smartIncTol':
                     bucket['smartIncTol'] = form.get(key, [''])[0]
+                elif field == 'smartIncTf':
+                    bucket['smartIncTf'] = form.get(key, [''])[0]
                 elif field == 'cross':
                     bucket['cross'] = True
 

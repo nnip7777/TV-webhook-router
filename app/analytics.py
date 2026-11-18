@@ -1418,6 +1418,37 @@ def hours_since_last_fill(broker: str, symbol: str) -> float | None:
     return float(max(0, int(now // 3600) - int(last // 3600)))
 
 
+def bars_since_last_fill(broker: str, symbol: str, tf_minutes: float) -> float | None:
+    """Completed bars of `tf_minutes` between the last fill and now.
+
+    Same bucketing idea as hours_since_last_fill: both timestamps truncated
+    to TF boundaries so fill+signal in the same bar → 0 (same-bar skip).
+    Returns None when there is no fill history or tf_minutes <= 0.
+    """
+    broker = str(broker or '').strip().lower()
+    symbol = str(symbol or '').strip()
+    try:
+        step = float(tf_minutes) * 60.0
+    except (TypeError, ValueError):
+        return None
+    if not broker or not symbol or step <= 0:
+        return None
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            'SELECT observed_at FROM fills WHERE broker=? AND symbol=?',
+            (broker, symbol),
+        ).fetchall()
+    finally:
+        conn.close()
+    epochs = [epoch for row in rows if (epoch := _fill_epoch(row['observed_at'])) is not None]
+    if not epochs:
+        return None
+    now = datetime.now(tz=LOCAL_TZ).timestamp()
+    last = max(epochs)
+    return float(max(0, int(now // step) - int(last // step)))
+
+
 def _logical_fill_exists(conn: sqlite3.Connection, fill: Dict[str, Any]) -> bool:
     """True if a twin fill already exists (same broker/symbol/side/qty/price/time ±1s)."""
     epoch = _fill_epoch(fill.get('observed_at'))

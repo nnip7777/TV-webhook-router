@@ -10,14 +10,18 @@ from decimal import Decimal, ROUND_UP
 from typing import Any, Dict, List
 from dataclasses import dataclass, field
 
-from analytics import hours_since_last_fill, sync_exchange_fills
+from analytics import bars_since_last_fill, hours_since_last_fill, sync_exchange_fills
 from bingx_adapter import BingXBroker
 from bybit_adapter import BybitBroker
 from finam_adapter import FinamBroker
 from schwab_adapter import SchwabBroker
 from settings import SMART_EXECUTOR_PATH, env_float, env_int
 
-# smart-inc: no fill within this window (or no history at all) = fresh start, multiplier 1.
+# smart-inc: multiplier = bars of the cell TF since last fill (not raw hours).
+
+# Per-cell TF options (minutes). Day = 1440.
+SMART_INC_TF_MINUTES = (1, 5, 8, 10, 15, 20, 60, 280, 1440)
+SMART_INC_TF_DEFAULT = 60
 
 
 def smart_inc_max_multiplier() -> int:
@@ -29,21 +33,43 @@ def smart_inc_max_multiplier() -> int:
     return max(1, env_int('SMART_INC_MAX_MULTIPLIER', 36))
 
 
-def smart_inc_restart_hours() -> float:
-    """Idle gap (hours) that resets multiplier to ×1 — Settings SMART_INC_RESTART_HOURS."""
+def smart_inc_restart_bars() -> float:
+    """Idle gap in bars of the cell TF that resets multiplier to ×1.
+
+    Env key stays SMART_INC_RESTART_HOURS (legacy) but the value is now
+    interpreted as bars of the per-cell timeframe (default 36).
+    """
     return float(max(1, env_int('SMART_INC_RESTART_HOURS', 36)))
 
 
-def smart_inc_multiplier(hours: float | None) -> int:
-    """Multipler for smart-inc sizing from completed clock-hours since last fill.
+def smart_inc_tf_minutes(destination: Dict[str, Any] | None) -> int:
+    """Per-cell smart-inc timeframe in minutes; default 60 (legacy hours-like)."""
+    raw = (destination or {}).get('smartIncTf')
+    if raw in (None, ''):
+        return SMART_INC_TF_DEFAULT
+    try:
+        v = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return SMART_INC_TF_DEFAULT
+    if v <= 0:
+        return SMART_INC_TF_DEFAULT
+    if v in SMART_INC_TF_MINUTES:
+        return v
+    # Snap to nearest allowed TF if close; else default.
+    nearest = min(SMART_INC_TF_MINUTES, key=lambda x: abs(x - v))
+    return nearest if abs(nearest - v) <= max(1, v // 4) else SMART_INC_TF_DEFAULT
 
-    None (no fill history) or a gap >= smart_inc_restart_hours() means a fresh
-    start → 1. Otherwise the hour count itself: 0 = another source already
-    traded this ticker in the current clock hour → caller must skip or avg_tol.
+
+def smart_inc_multiplier(bars: float | None) -> int:
+    """Multiplier for smart-inc sizing from completed bars of the cell TF.
+
+    None (no fill history) or a gap >= smart_inc_restart_bars() means a fresh
+    start → 1. Otherwise the bar count itself: 0 = another source already
+    traded this ticker in the current bar → caller must skip or avg_tol.
     """
-    if hours is None or hours >= smart_inc_restart_hours():
+    if bars is None or bars >= smart_inc_restart_bars():
         return 1
-    return min(smart_inc_max_multiplier(), max(0, int(hours)))
+    return min(smart_inc_max_multiplier(), max(0, int(bars)))
 
 
 def should_keep_opposite_on_cross(unrealised_pnl) -> bool:
@@ -432,7 +458,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
     reduce_only = bool(destination.get('reduceOnly', False))
     dry_run = bool(destination.get('dryRun', False) or payload.get('dryRun', False))
 
-    # smart-inc: qty × hours since last fill (new open / reverse).
+    # smart-inc: qty × bars of cell TF since last fill (new open / reverse).
     # If smartIncTol is set and we are ADDING to an existing same-direction
     # position, switch to avg-price tolerance sizing (skip if already in range).
     smart_inc_applied = None
@@ -444,17 +470,18 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         except (TypeError, ValueError):
             base_qty = None
         if base_qty is not None:
-            # Same-hour dedup on exchange symbol (NG1! + NATURAL… → one fill).
+            # Same-bar dedup on exchange symbol (NG1! + NATURAL… → one fill).
             # Pull freshest exchange fills first — bg sync runs only AFTER the
             # webhook job, so sizing would otherwise miss manual/other fills.
             try:
                 sync_exchange_fills(broker, symbol, lookback_hours=48)
             except Exception:
                 pass
-            hours = hours_since_last_fill(broker, symbol)
-            multiplier = smart_inc_multiplier(hours)
-            same_hour = multiplier == 0
-            # same-hour does NOT skip yet: avg_tol catch-up may still apply.
+            tf_min = smart_inc_tf_minutes(destination)
+            bars = bars_since_last_fill(broker, symbol, tf_min)
+            multiplier = smart_inc_multiplier(bars)
+            same_bar = multiplier == 0
+            # same-bar does NOT skip yet: avg_tol catch-up may still apply.
             add_mode = False
             pos_qty = 0.0
             pos_avg = 0.0
@@ -500,7 +527,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
                     # In tol range: same-hour → skip; otherwise hours growth.
-                    if same_hour:
+                    if same_bar:
                         smart_inc_skip = True
                         smart_inc_applied = {
                             'mode': 'avg_tol',
@@ -581,12 +608,13 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             # Hours path (cell × hours) — not same-hour and no avg_tol size.
             if not smart_inc_skip and not avg_handled and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol' and smart_inc_applied.get('requiredAddQty')):
-                if same_hour:
+                if same_bar:
                     smart_inc_skip = True
                     smart_inc_applied = {
-                        'mode': 'hours',
+                        'mode': 'bars',
+                        'tf': tf_min,
                         'baseQty': base_qty,
-                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'barsSinceLastFill': None if bars is None else round(bars, 3),
                         'multiplier': 0,
                         'qty': quantity,
                     }
@@ -596,9 +624,10 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     if smart_inc_applied is None:
                         smart_inc_applied = {}
                     smart_inc_applied.update({
-                        'mode': 'hours',
+                        'mode': 'bars',
+                        'tf': tf_min,
                         'baseQty': base_qty,
-                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'barsSinceLastFill': None if bars is None else round(bars, 3),
                         'multiplier': multiplier,
                         'qty': quantity,
                     })
@@ -638,8 +667,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         _reason = 'smart_inc_avg_in_range'
         if smart_inc_applied and smart_inc_applied.get('reason') in ('need_below_min_qty', 'need_below_min_usdt'):
             _reason = 'smart_inc_need_below_min'
-        elif smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
-            _reason = 'smart_inc_same_hour'
+        elif smart_inc_applied and smart_inc_applied.get('mode') in ('hours', 'bars'):
+            _reason = 'smart_inc_same_bar'
         return {
             'broker': broker,
             'symbol': symbol,
@@ -1934,16 +1963,17 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         except (TypeError, ValueError):
             base_qty = None
         if base_qty is not None:
-            # Same-hour dedup on exchange symbol (NG1! + NATURAL… → one fill).
+            # Same-bar dedup on exchange symbol (NG1! + NATURAL… → one fill).
             # Pull freshest exchange fills first (see Bybit path).
             try:
                 sync_exchange_fills(broker, symbol, lookback_hours=48)
             except Exception:
                 pass
-            hours = hours_since_last_fill(broker, symbol)
-            multiplier = smart_inc_multiplier(hours)
-            same_hour = multiplier == 0
-            # same-hour does NOT skip yet: avg_tol catch-up may still apply.
+            tf_min = smart_inc_tf_minutes(destination)
+            bars = bars_since_last_fill(broker, symbol, tf_min)
+            multiplier = smart_inc_multiplier(bars)
+            same_bar = multiplier == 0
+            # same-bar does NOT skip yet: avg_tol catch-up may still apply.
             add_mode = False
             pos_qty = 0.0
             pos_avg = 0.0
@@ -1985,7 +2015,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
                 if need is not None and need <= 1e-12:
                     # In tol range: same-hour → skip; otherwise hours growth.
-                    if same_hour:
+                    if same_bar:
                         smart_inc_skip = True
                         smart_inc_applied = {
                             'mode': 'avg_tol',
@@ -2053,12 +2083,13 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             # Hours path (cell × hours) — not same-hour and no avg_tol size.
             if not smart_inc_skip and not avg_handled and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol' and (smart_inc_applied.get('requiredAddQty') is not None or smart_inc_applied.get('requiredAddUsdt') is not None)):
-                if same_hour:
+                if same_bar:
                     smart_inc_skip = True
                     smart_inc_applied = {
-                        'mode': 'hours',
+                        'mode': 'bars',
+                        'tf': tf_min,
                         'baseQty': base_qty,
-                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'barsSinceLastFill': None if bars is None else round(bars, 3),
                         'multiplier': 0,
                         'qty': quantity,
                     }
@@ -2068,9 +2099,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     if smart_inc_applied is None:
                         smart_inc_applied = {}
                     smart_inc_applied.update({
-                        'mode': 'hours',
+                        'mode': 'bars',
+                        'tf': tf_min,
                         'baseQty': base_qty,
-                        'hoursSinceLastFill': None if hours is None else round(hours, 3),
+                        'barsSinceLastFill': None if bars is None else round(bars, 3),
                         'multiplier': multiplier,
                         'qty': quantity,
                     })
@@ -2136,8 +2168,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         _reason = 'smart_inc_avg_in_range'
         if smart_inc_applied and smart_inc_applied.get('reason') == 'need_below_min_qty':
             _reason = 'smart_inc_need_below_min_qty'
-        elif smart_inc_applied and smart_inc_applied.get('mode') == 'hours':
-            _reason = 'smart_inc_same_hour'
+        elif smart_inc_applied and smart_inc_applied.get('mode') in ('hours', 'bars'):
+            _reason = 'smart_inc_same_bar'
         _set_stage('smart_inc_skip')
         return {
             'broker': broker,
