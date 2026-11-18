@@ -1,3 +1,6 @@
+## 2026.11.18-003
+- **Risk-sync bidirectional (±30% window):** add when `risk ≥ target×1.3` (as before); **reduce** when `risk ≤ target×0.7` (frees locked margin → available for adds). Applies to periodic BingX/Bybit risk-sync **and** post-trade adjust. Floor: `notional/leverage` (never below exchange min). Bybit `remove-margin` adapter; BingX `direction_type=2`. Journal `action=add|reduce`. Settings help updated.
+
 ## 2026.11.18-002
 - **Hedge ≠ cross margin:** cell `hedge` (key `cross`) now only enables **dual-side keep-loser** on flip. Removed force `set_margin_type(CROSS)` / Bybit `trade_mode=0`. Margin stays **ISOLATED** so BingX risk UI and WHR riskPct/risk-sync work normally. Pre-trade add_margin fail → abort again (isolated semantics). routing.json cells: `marginType` CROSS → ISOLATED.
 

@@ -27,14 +27,17 @@ from schwab_adapter import SchwabBroker
 from bingx_adapter import _bingx_rows
 from execution import (
     RISK_SYNC_GROWTH_RATIO,
+    RISK_SYNC_REDUCE_RATIO,
     _bingx_account_available,
     _bingx_api_ok,
     _bingx_position_isolated,
     _bingx_position_qty,
     bingx_risk_pct_by_symbol,
     execute_route_sync,
+    risk_sync_action,
     risk_sync_default_pct,
     risk_sync_should_adjust,
+    risk_sync_should_reduce,
     risk_sync_target_isolated,
 )
 from analytics import analytics_overview, init_analytics_db, performance_stats, record_execution_analytics, rebuild_analytics, rebuild_analytics_today, sync_account_fills, sync_exchange_fills, sync_exchange_income
@@ -206,7 +209,7 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_RECV_WINDOW', 'label': 'BingX recvWindow', 'section': 'bingx', 'type': 'text', 'default': '5000'},
     {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × бары ТФ ячейки с последней сделки по тикеру на бирже). 0 в тот же бар: skip, либо avg-tol добивка, если средняя вне tol. Работает при включённом чекбоксе smart-inc (BingX и Bybit, target-direction). Общая настройка для обеих бирж.'},
     {'key': 'SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart bars (legacy key)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: простой в барах ТФ ячейки (ключ SMART_INC_RESTART_HOURS, значение = бары), после которого множитель сбрасывается в ×1. Без истории сделок тоже ×1. Применяется без перезапуска сервиса. Общая настройка для BingX и Bybit.'},
-    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска (BingX/Bybit)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS проверять риск (riskRate) открытых позиций BingX и Bybit. Если риск вырос на 30% и более относительно цели — добавляется isolated margin. Цель: riskPct ячейки роутинга, иначе «default risk %». Маржа только добавляется. Журнал kind=risk-sync. Общая настройка для обеих бирж.'},
+    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска (BingX/Bybit)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS подстраивать риск (riskRate) открытых позиций BingX и Bybit к цели. Окно ±30%: risk ≥ target×1.3 → add margin; risk ≤ target×0.7 → reduce margin (освободить available). Цель: riskPct ячейки, иначе default risk %. Журнал kind=risk-sync. Общая настройка для обеих бирж.'},
     {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск открытых позиций BingX/Bybit. Минимум 10. Применяется без перезапуска сервиса. Общая настройка для обеих бирж.'},
     {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'float', 'default': '12', 'help': 'Целевой риск % для позиций BingX/Bybit без riskPct в ячейке. 0 = только позиции с настроенным riskPct. Общая настройка для обеих бирж.'},
     {'key': 'ALOR_CONFIG_PATH', 'label': 'Alor config JSON path', 'section': 'alor', 'type': 'path'},
@@ -3711,7 +3714,7 @@ def _trade_sync_loop() -> None:
 
 
 def _bybit_risk_sync_once() -> None:
-    """Periodic risk check for open Bybit positions (add margin when risk ≥ target×1.3)."""
+    """Periodic risk check: add when risk ≥ target×1.3, reduce when ≤ target×0.7."""
     config = load_config()
     bybit_cfg = (config.get('brokers', {}).get('bybit', {}) or {}).get('defaultDestination', {}) or {}
     if bybit_cfg.get('dryRun'):
@@ -3722,6 +3725,7 @@ def _bybit_risk_sync_once() -> None:
         _BYBIT_RISK_ERR_AT = {}
     from execution import (
         bingx_risk_pct_by_symbol,
+        risk_sync_action,
         risk_sync_default_pct,
         risk_sync_should_adjust,
         risk_sync_target_isolated,
@@ -3750,15 +3754,16 @@ def _bybit_risk_sync_once() -> None:
             continue
         current_rr = _bybit_position_risk_rate(row)
         current_pct = current_rr * 100.0
-        if not risk_sync_should_adjust(current_pct, target_pct):
+        action = risk_sync_action(current_pct, target_pct)
+        if not action:
             continue
-        needed.append((row, symbol, target_pct, current_rr, current_pct, qty))
+        needed.append((row, symbol, target_pct, current_rr, current_pct, qty, action))
     if not needed:
         return
     wallet = client.get_wallet_balance()
     available = _bybit_account_available(wallet)
     equity = _bybit_account_equity(wallet)
-    for row, symbol, target_pct, current_rr, current_pct, qty in needed:
+    for row, symbol, target_pct, current_rr, current_pct, qty, action in needed:
         position_side = str(row.get('side') or 'BOTH')
         try:
             position_idx = int(row.get('positionIdx') or 0)
@@ -3768,8 +3773,15 @@ def _bybit_risk_sync_once() -> None:
         notional = _bybit_position_notional(row)
         target_margin = risk_sync_target_isolated(current_rr, isolated, notional, target_pct)
         delta = target_margin - isolated
+        try:
+            leverage = max(1.0, float(row.get('leverage') or 1))
+        except Exception:
+            leverage = 1.0
+        min_margin = (abs(notional) / leverage) if notional > 0 else 0.0
         details = (
-            f"risk {current_pct:.6g}% → target {target_pct:.6g}% (trigger ≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}%)"
+            f"risk {current_pct:.6g}% → target {target_pct:.6g}% "
+            f"(action={action} add≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}% "
+            f"reduce≤{target_pct * RISK_SYNC_REDUCE_RATIO:.6g}%)"
             f" | margin {isolated:.8g} → target {target_margin:.8g} | positionSide={position_side}"
             f" | notional={notional:.8g} available={available:.8g} equity={equity:.8g}"
         )
@@ -3786,25 +3798,52 @@ def _bybit_risk_sync_once() -> None:
                 'details': details + ' | skip=' + reason,
             })
 
-        if target_margin <= 0 or delta <= 1e-8:
+        if target_margin <= 0:
             _log_err('target_not_computable')
             continue
-        if available <= 1e-8:
-            _log_err('insufficient_available_balance')
-            continue
-        add = min(delta, available)
-        try:
-            resp = client.add_margin(
-                symbol, add, category='linear',
-                position_idx=position_idx if position_idx else None,
-            )
-        except Exception as exc:
-            append_journal({
-                'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
-                'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
-                'details': details + f' | add={add:.8g} | error={exc}',
-            })
-            continue
+
+        if action == 'add':
+            if delta <= 1e-8:
+                _log_err('target_not_computable')
+                continue
+            if available <= 1e-8:
+                _log_err('insufficient_available_balance')
+                continue
+            amount = min(delta, available)
+            try:
+                resp = client.add_margin(
+                    symbol, amount, category='linear',
+                    position_idx=position_idx if position_idx else None,
+                )
+            except Exception as exc:
+                append_journal({
+                    'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
+                    'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
+                    'details': details + f' | add={amount:.8g} | error={exc}',
+                })
+                continue
+            op_label = 'add'
+        else:
+            # reduce: free excess margin down to target, keep min_margin floor
+            reduce_amt = max(0.0, isolated - max(target_margin, min_margin))
+            if reduce_amt <= 1e-8:
+                _log_err('already_at_floor')
+                continue
+            try:
+                resp = client.remove_margin(
+                    symbol, reduce_amt, category='linear',
+                    position_idx=position_idx if position_idx else None,
+                )
+            except Exception as exc:
+                append_journal({
+                    'time': _utcnow_iso(), 'kind': 'risk-sync', 'ticker': symbol,
+                    'side': position_side, 'qty': '', 'brokers': ['bybit'], 'status': 'error',
+                    'details': details + f' | reduce={reduce_amt:.8g} | error={exc}',
+                })
+                continue
+            amount = reduce_amt
+            op_label = 'reduce'
+
         ret = (resp or {}).get('retCode') if isinstance(resp, dict) else None
         ok = ret in (None, 0, '0')
         api_msg = str((resp or {}).get('retMsg') or '') if isinstance(resp, dict) else str(resp)
@@ -3826,17 +3865,17 @@ def _bybit_risk_sync_once() -> None:
             'status': 'ok' if ok else 'error',
             'details': (
                 details
-                + f' | add={add:.8g} | apiCode={ret}'
+                + f' | {op_label}={amount:.8g} | apiCode={ret}'
                 + (f' | apiMsg={api_msg}' if not ok and api_msg else '')
                 + (f' | riskAfter={after_pct:.6g}%' if after_pct is not None else '')
             ),
         })
-        if ok:
-            available = max(0.0, available - add)
+        if ok and op_label == 'add':
+            available = max(0.0, available - amount)
 
 
 def _bingx_risk_sync_once() -> None:
-    """Check risk of every open BingX position; add margin when it grew ≥30% over target."""
+    """Periodic risk check: add when risk ≥ target×1.3, reduce when ≤ target×0.7."""
     config = load_config()
     bingx_cfg = (config.get('brokers', {}).get('bingx', {}) or {}).get('defaultDestination', {}) or {}
     if bingx_cfg.get('dryRun'):
@@ -3865,14 +3904,15 @@ def _bingx_risk_sync_once() -> None:
         except Exception:
             current_rr = 0.0
         current_pct = current_rr * 100.0
-        if not risk_sync_should_adjust(current_pct, target_pct):
+        action = risk_sync_action(current_pct, target_pct)
+        if not action:
             continue
-        needed.append((row, symbol, target_pct, current_rr, current_pct))
+        needed.append((row, symbol, target_pct, current_rr, current_pct, action))
     if not needed:
         return
     balance = client.get_balance()
     available = _bingx_account_available(balance)
-    for row, symbol, target_pct, current_rr, current_pct in needed:
+    for row, symbol, target_pct, current_rr, current_pct, action in needed:
         position_side = str(row.get('positionSide') or row.get('side') or 'BOTH').upper()
         isolated = _bingx_position_isolated(row)
         qty = _bingx_position_qty(row)
@@ -3887,14 +3927,22 @@ def _bingx_risk_sync_once() -> None:
             except Exception:
                 continue
         notional = mark_price * qty
+        try:
+            leverage = max(1.0, float(row.get('leverage') or 1))
+        except Exception:
+            leverage = 1.0
+        min_margin = (abs(notional) / leverage) if notional > 0 else 0.0
         target_margin = risk_sync_target_isolated(current_rr, isolated, notional, target_pct)
         delta = target_margin - isolated
         details = (
-            f"risk {current_pct:.6g}% → target {target_pct:.6g}% (trigger ≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}%)"
+            f"risk {current_pct:.6g}% → target {target_pct:.6g}% "
+            f"(action={action} add≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}% "
+            f"reduce≤{target_pct * RISK_SYNC_REDUCE_RATIO:.6g}%)"
             f" | margin {isolated:.8g} → target {target_margin:.8g} | positionSide={position_side}"
             f" | notional={notional:.8g} available={available:.8g}"
         )
-        if target_margin <= 0 or delta <= 1e-8:
+
+        def _bingx_skip(reason: str) -> None:
             append_journal({
                 'time': _utcnow_iso(),
                 'kind': 'risk-sync',
@@ -3903,24 +3951,34 @@ def _bingx_risk_sync_once() -> None:
                 'qty': '',
                 'brokers': ['bingx'],
                 'status': 'error',
-                'details': details + ' | skip=target_not_computable',
+                'details': details + ' | skip=' + reason,
             })
+
+        if target_margin <= 0:
+            _bingx_skip('target_not_computable')
             continue
-        if available <= 1e-8:
-            append_journal({
-                'time': _utcnow_iso(),
-                'kind': 'risk-sync',
-                'ticker': symbol,
-                'side': position_side,
-                'qty': '',
-                'brokers': ['bingx'],
-                'status': 'error',
-                'details': details + ' | skip=insufficient_available_balance',
-            })
-            continue
-        add = min(delta, available)
+
+        if action == 'add':
+            if delta <= 1e-8:
+                _bingx_skip('target_not_computable')
+                continue
+            if available <= 1e-8:
+                _bingx_skip('insufficient_available_balance')
+                continue
+            amount = min(delta, available)
+            direction = 1
+            op_label = 'add'
+        else:
+            reduce_amt = max(0.0, isolated - max(target_margin, min_margin))
+            if reduce_amt <= 1e-8:
+                _bingx_skip('already_at_floor')
+                continue
+            amount = reduce_amt
+            direction = 2
+            op_label = 'reduce'
+
         try:
-            resp = client.adjust_isolated_margin(symbol, position_side, add, direction_type=1)
+            resp = client.adjust_isolated_margin(symbol, position_side, amount, direction_type=direction)
         except Exception as exc:
             append_journal({
                 'time': _utcnow_iso(),
@@ -3930,7 +3988,7 @@ def _bingx_risk_sync_once() -> None:
                 'qty': '',
                 'brokers': ['bingx'],
                 'status': 'error',
-                'details': details + f' | add={add:.8g} | error={exc}',
+                'details': details + f' | {op_label}={amount:.8g} | error={exc}',
             })
             continue
         ok = _bingx_api_ok(resp)
@@ -3964,13 +4022,13 @@ def _bingx_risk_sync_once() -> None:
             'status': 'ok' if ok else 'error',
             'details': (
                 details
-                + f' | add={add:.8g} | apiCode={api_code}'
+                + f' | {op_label}={amount:.8g} | apiCode={api_code}'
                 + (f' | apiMsg={api_msg}' if not ok and api_msg else '')
                 + (f' | riskAfter={after_pct:.6g}%' if after_pct is not None else '')
             ),
         })
-        if ok:
-            available = max(0.0, available - add)
+        if ok and op_label == 'add':
+            available = max(0.0, available - amount)
 
 
 def _bingx_risk_sync_loop() -> None:

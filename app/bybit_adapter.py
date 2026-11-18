@@ -254,6 +254,25 @@ class BybitBroker:
             body['positionIdx'] = int(position_idx)
         return self._request('POST', '/v5/position/add-margin', body=body)
 
+    def remove_margin(self, symbol: str, margin: Any, category: str = 'linear', position_idx: Optional[int] = None) -> Dict[str, Any]:
+        """Remove isolated margin (POST /v5/position/remove-margin). margin > 0 only."""
+        from decimal import Decimal, ROUND_HALF_UP
+        try:
+            q = Decimal(str(margin)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+            margin_text = format(q, 'f').rstrip('0').rstrip('.') if q == q.to_integral() else format(q.normalize(), 'f')
+            if not margin_text or Decimal(margin_text) <= 0:
+                margin_text = '0.0001'
+        except Exception:
+            margin_text = str(margin)
+        body: Dict[str, Any] = {
+            'category': category,
+            'symbol': symbol,
+            'margin': margin_text,
+        }
+        if position_idx is not None:
+            body['positionIdx'] = int(position_idx)
+        return self._request('POST', '/v5/position/remove-margin', body=body)
+
     def set_margin_mode(self, symbol: str, trade_mode: int = 1, position_idx: Optional[int] = None, category: str = 'linear') -> Dict[str, Any]:
         """trade_mode: 0=cross, 1=isolated (Bybit linear)."""
         body: Dict[str, Any] = {

@@ -17,9 +17,12 @@ sys.path.insert(0, str(ROOT / 'app'))
 import execution  # noqa: E402
 from execution import (  # noqa: E402
     RISK_SYNC_GROWTH_RATIO,
+    RISK_SYNC_REDUCE_RATIO,
     bingx_risk_pct_by_symbol,
+    risk_sync_action,
     risk_sync_default_pct,
     risk_sync_should_adjust,
+    risk_sync_should_reduce,
     risk_sync_target_isolated,
 )
 
@@ -27,6 +30,9 @@ from execution import (  # noqa: E402
 class RiskSyncTriggerTest(unittest.TestCase):
     def test_growth_ratio_constant(self):
         self.assertEqual(RISK_SYNC_GROWTH_RATIO, 1.30)
+
+    def test_reduce_ratio_constant(self):
+        self.assertEqual(RISK_SYNC_REDUCE_RATIO, 0.70)
 
     def test_adjust_at_exact_threshold(self):
         # 12% target → trigger at 15.6% (exactly +30%)
@@ -44,6 +50,43 @@ class RiskSyncTriggerTest(unittest.TestCase):
 
     def test_no_adjust_without_current_reading(self):
         self.assertFalse(risk_sync_should_adjust(0.0, 12.0))
+
+
+class RiskSyncReduceTest(unittest.TestCase):
+    def test_reduce_at_exact_threshold(self):
+        # 20% target → reduce at ≤14%
+        self.assertTrue(risk_sync_should_reduce(14.0, 20.0))
+
+    def test_no_reduce_above_threshold(self):
+        self.assertFalse(risk_sync_should_reduce(14.1, 20.0))
+
+    def test_no_reduce_when_risk_high(self):
+        self.assertFalse(risk_sync_should_reduce(30.0, 20.0))
+
+    def test_no_reduce_without_target(self):
+        self.assertFalse(risk_sync_should_reduce(5.0, 0.0))
+
+    def test_no_reduce_without_current(self):
+        self.assertFalse(risk_sync_should_reduce(0.0, 20.0))
+
+
+class RiskSyncActionTest(unittest.TestCase):
+    def test_add_when_high(self):
+        self.assertEqual(risk_sync_action(26.0, 20.0), 'add')
+
+    def test_reduce_when_low(self):
+        self.assertEqual(risk_sync_action(13.0, 20.0), 'reduce')
+
+    def test_none_inside_window(self):
+        self.assertIsNone(risk_sync_action(18.0, 20.0))
+        self.assertIsNone(risk_sync_action(22.0, 20.0))
+
+    def test_symmetric_window_boundaries(self):
+        # 20%: add ≥26, reduce ≤14, inside (14, 26) exclusive-ish
+        self.assertEqual(risk_sync_action(26.0, 20.0), 'add')
+        self.assertEqual(risk_sync_action(14.0, 20.0), 'reduce')
+        self.assertIsNone(risk_sync_action(14.01, 20.0))
+        self.assertIsNone(risk_sync_action(25.99, 20.0))
 
 
 class RiskSyncTargetIsolatedTest(unittest.TestCase):

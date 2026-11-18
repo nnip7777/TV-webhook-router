@@ -206,9 +206,11 @@ def smart_inc_open_qty(need_contracts: float, mark_price: float, open_qty_kind: 
     return float(need_contracts)
 
 
-# Periodic BingX risk sync: correct margin only once terminal risk grew
-# by this relative amount over the target (avoids micro-adjusting every cycle).
+# Periodic risk sync: symmetric window around the target.
+# add when risk grew by this relative amount; reduce when risk fell below
+# target × (1/RISK_SYNC_GROWTH_RATIO) ≡ target × 0.70 for 1.30 (avoids micro-adjust).
 RISK_SYNC_GROWTH_RATIO = 1.30
+RISK_SYNC_REDUCE_RATIO = 0.70
 
 
 def risk_sync_default_pct() -> float:
@@ -227,6 +229,22 @@ def risk_sync_should_adjust(current_risk_pct: float, target_pct: float) -> bool:
         return False
     # epsilon: 12.0 * 1.3 == 15.600000000000001, exact-threshold must still fire
     return current_risk_pct + 1e-9 >= target_pct * RISK_SYNC_GROWTH_RATIO
+
+
+def risk_sync_should_reduce(current_risk_pct: float, target_pct: float) -> bool:
+    """True when risk fell to target × RISK_SYNC_REDUCE_RATIO (excess margin)."""
+    if target_pct <= 0 or current_risk_pct <= 0:
+        return False
+    return current_risk_pct <= target_pct * RISK_SYNC_REDUCE_RATIO + 1e-9
+
+
+def risk_sync_action(current_risk_pct: float, target_pct: float) -> str | None:
+    """'add' | 'reduce' | None — symmetric window around target."""
+    if risk_sync_should_adjust(current_risk_pct, target_pct):
+        return 'add'
+    if risk_sync_should_reduce(current_risk_pct, target_pct):
+        return 'reduce'
+    return None
 
 
 def risk_sync_target_isolated(current_risk_rate: float, current_isolated: float, notional: float, target_pct: float) -> float:
@@ -1030,7 +1048,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 order_result = _bybit_walk_ioc(side, order_qty, order_qty_kind, reduce_only, margin_idx)
 
             # Post-trade: if position already open and risk above target, top-up margin.
-            # Cross cells also try add_margin (cell riskPct); failures are journaled only.
+            # Also reduce when risk fell to target×0.7 (excess margin frees available).
             if risk_control_enabled and not reduce_only:
                 try:
                     time.sleep(0.25)
@@ -1043,12 +1061,14 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     if after_rr > 0 and risk_pct > 0:
                         target_iso = risk_sync_target_isolated(after_rr, after_iso, _bybit_position_notional(after_pos), risk_pct)
                         delta = target_iso - after_iso
+                        after_pct = after_rr * 100.0
                         available2 = _bybit_account_available(wallet2)
                         request_payload['riskControl']['postTrade'] = {
                             'riskRate': after_rr,
                             'isolated': after_iso,
                             'targetIsolated': target_iso,
                             'delta': delta,
+                            'action': risk_sync_action(after_pct, risk_pct),
                         }
                         if delta > 1e-8 and available2 > 1e-8:
                             add2 = min(delta, available2)
@@ -1061,6 +1081,20 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 request_payload['riskControl']['riskRateAfterAdjust'] = _bybit_position_risk_rate(vpos)
                             except Exception:
                                 pass
+                        elif delta < -1e-8 and risk_sync_should_reduce(after_pct, risk_pct):
+                            notional2 = _bybit_position_notional(after_pos)
+                            try:
+                                lev2 = max(1.0, float(after_pos.get('leverage') or 1))
+                            except Exception:
+                                lev2 = 1.0
+                            min2 = (abs(notional2) / lev2) if notional2 > 0 else 0.0
+                            reduce2 = max(0.0, after_iso - max(target_iso, min2))
+                            if reduce2 > 1e-8:
+                                post_r = client.remove_margin(symbol, reduce2, category=category, position_idx=margin_idx)
+                                request_payload['riskControl']['postTradeReduceMargin'] = reduce2
+                                request_payload['riskControl']['postTradeReduceMarginResult'] = post_r
+                        elif delta < -1e-8:
+                            request_payload['riskControl']['postTradeReduceSkipped'] = 'within_window'
                 except Exception as exc:
                     request_payload['riskControl']['postTradeError'] = str(exc)
 
@@ -3130,45 +3164,50 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             margin_ops['addMarginError'] = str(add_err)
                             request_payload['riskControl']['addMarginError'] = str(add_err)
                     else:
-                        _set_stage('reduce_margin')
-                        effective_target = target_margin
-                        if estimated_min_margin > target_margin + 0.00000001:
-                            effective_target = estimated_min_margin
-                            request_payload['riskControl']['targetMarginFallback'] = 'below_exchange_min'
-                            request_payload['riskControl']['targetMarginRequested'] = target_margin
-                            request_payload['riskControl']['targetMarginFloor'] = estimated_min_margin
-                        reduce_amount = max(0.0, current_margin - effective_target)
-                        request_payload['riskControl']['reduceMarginTarget'] = effective_target
-                        if reduce_amount <= 0.00000001:
-                            request_payload['riskControl']['reduceMarginSkipped'] = 'already_at_or_below_floor'
+                        # Reduce only when risk fell to target×0.7 (symmetric window).
+                        current_pct = current_rr * 100.0
+                        if not risk_sync_should_reduce(current_pct, risk_pct):
+                            request_payload['riskControl']['reduceMarginSkipped'] = 'within_window'
                         else:
-                            reduce_resp = None
-                            reduce_err_text = ''
-                            try:
-                                reduce_resp = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, reduce_amount, direction_type=2)
-                                margin_ops['reduceMargin'] = reduce_resp
-                                request_payload['riskControl']['reduceMargin'] = reduce_amount
-                                request_payload['riskControl']['reduceMarginApiCode'] = reduce_resp.get('code') if isinstance(reduce_resp, dict) else None
-                                if not _bingx_api_ok(reduce_resp):
-                                    request_payload['riskControl']['reduceMarginFailed'] = True
-                                    request_payload['riskControl']['reduceMarginApiMsg'] = str(reduce_resp.get('msg') or '') if isinstance(reduce_resp, dict) else str(reduce_resp)
-                                    # Fallback: retry a smaller chunk (half), still above floor.
-                                    retry_amount = reduce_amount / 2.0
-                                    if retry_amount > 0.00000001 and current_margin - retry_amount >= effective_target - 0.00000001:
-                                        try:
-                                            retry_resp = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, retry_amount, direction_type=2)
-                                            margin_ops['reduceMarginRetry'] = retry_resp
-                                            request_payload['riskControl']['reduceMarginRetry'] = retry_amount
-                                            request_payload['riskControl']['reduceMarginRetryApiCode'] = retry_resp.get('code') if isinstance(retry_resp, dict) else None
-                                            if _bingx_api_ok(retry_resp):
-                                                request_payload['riskControl']['reduceMarginFailed'] = False
-                                                request_payload['riskControl']['reduceMargin'] = retry_amount
-                                        except Exception as retry_err:
-                                            margin_ops['reduceMarginRetryError'] = str(retry_err)
-                            except Exception as reduce_err:
-                                reduce_err_text = str(reduce_err)
-                                margin_ops['reduceMarginError'] = reduce_err_text
-                                request_payload['riskControl']['reduceMarginError'] = reduce_err_text
+                            _set_stage('reduce_margin')
+                            effective_target = target_margin
+                            if estimated_min_margin > target_margin + 0.00000001:
+                                effective_target = estimated_min_margin
+                                request_payload['riskControl']['targetMarginFallback'] = 'below_exchange_min'
+                                request_payload['riskControl']['targetMarginRequested'] = target_margin
+                                request_payload['riskControl']['targetMarginFloor'] = estimated_min_margin
+                            reduce_amount = max(0.0, current_margin - effective_target)
+                            request_payload['riskControl']['reduceMarginTarget'] = effective_target
+                            if reduce_amount <= 0.00000001:
+                                request_payload['riskControl']['reduceMarginSkipped'] = 'already_at_or_below_floor'
+                            else:
+                                reduce_resp = None
+                                reduce_err_text = ''
+                                try:
+                                    reduce_resp = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, reduce_amount, direction_type=2)
+                                    margin_ops['reduceMargin'] = reduce_resp
+                                    request_payload['riskControl']['reduceMargin'] = reduce_amount
+                                    request_payload['riskControl']['reduceMarginApiCode'] = reduce_resp.get('code') if isinstance(reduce_resp, dict) else None
+                                    if not _bingx_api_ok(reduce_resp):
+                                        request_payload['riskControl']['reduceMarginFailed'] = True
+                                        request_payload['riskControl']['reduceMarginApiMsg'] = str(reduce_resp.get('msg') or '') if isinstance(reduce_resp, dict) else str(reduce_resp)
+                                        # Fallback: retry a smaller chunk (half), still above floor.
+                                        retry_amount = reduce_amount / 2.0
+                                        if retry_amount > 0.00000001 and current_margin - retry_amount >= effective_target - 0.00000001:
+                                            try:
+                                                retry_resp = client.adjust_isolated_margin(prepared['symbol'], effective_position_side, retry_amount, direction_type=2)
+                                                margin_ops['reduceMarginRetry'] = retry_resp
+                                                request_payload['riskControl']['reduceMarginRetry'] = retry_amount
+                                                request_payload['riskControl']['reduceMarginRetryApiCode'] = retry_resp.get('code') if isinstance(retry_resp, dict) else None
+                                                if _bingx_api_ok(retry_resp):
+                                                    request_payload['riskControl']['reduceMarginFailed'] = False
+                                                    request_payload['riskControl']['reduceMargin'] = retry_amount
+                                            except Exception as retry_err:
+                                                margin_ops['reduceMarginRetryError'] = str(retry_err)
+                                except Exception as reduce_err:
+                                    reduce_err_text = str(reduce_err)
+                                    margin_ops['reduceMarginError'] = reduce_err_text
+                                    request_payload['riskControl']['reduceMarginError'] = reduce_err_text
                 request_payload['riskControl'].update({
                     'marginDeltaPctOfEquity': add_margin_pct_of_equity,
                     'marginDirection': 'add' if margin_delta > 0 else ('reduce' if margin_delta < 0 else 'none'),
