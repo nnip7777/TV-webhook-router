@@ -2519,7 +2519,14 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     return _pretrade_abort(f'pre-trade margin: cannot read position: {e} — order not placed')
                 same_side_qty = _bingx_position_qty(pos)
                 pos_side = str((pos or {}).get('positionSide') or (pos or {}).get('side') or '').upper()
-                if str(position_side or '').upper() and pos_side and pos_side != str(position_side).upper():
+                # extract may fall back to the opposite leg (keep-loser: SHORT open, no LONG yet).
+                # Margin/top-up must only count the TARGET side — never the opposite leg's iso.
+                side_mismatch = bool(
+                    str(position_side or '').upper()
+                    and pos_side
+                    and pos_side != str(position_side).upper()
+                )
+                if side_mismatch:
                     same_side_qty = 0.0
                 try:
                     mark_now = abs(float(prepared.get('price') or 0))
@@ -2533,7 +2540,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 rc['preTradeTargetIsolated'] = target_iso
                 if target_iso <= 0:
                     return None
-                current_iso = _bingx_position_isolated(pos)
+                current_iso = 0.0 if side_mismatch else _bingx_position_isolated(pos)
+                if side_mismatch:
+                    rc['preTradePositionSideMismatch'] = pos_side
                 rc['preTradeIsolated'] = current_iso
                 need_add = max(0.0, target_iso - current_iso)
                 rc['preTradeNeedAdd'] = need_add

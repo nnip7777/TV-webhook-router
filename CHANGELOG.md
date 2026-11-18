@@ -1,3 +1,6 @@
+## 2026.11.18-004
+- **BingX keep-loser pre-trade margin fix:** `_ensure_pretrade_margin` no longer reads isolated margin from the **opposite** leg when `_bingx_extract_position` falls back (SHORT open, opening LONG). Side mismatch → `current_iso=0` → new-position path (balance check only), not `adjust_isolated_margin(LONG)` → no more `109400 position not exist`. Journal `preTradePositionSideMismatch`.
+
 ## 2026.11.18-003
 - **Risk-sync bidirectional (±30% window):** add when `risk ≥ target×1.3` (as before); **reduce** when `risk ≤ target×0.7` (frees locked margin → available for adds). Applies to periodic BingX/Bybit risk-sync **and** post-trade adjust. Floor: `notional/leverage` (never below exchange min). Bybit `remove-margin` adapter; BingX `direction_type=2`. Journal `action=add|reduce`. Settings help updated.
 
