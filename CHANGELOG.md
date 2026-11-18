@@ -1,3 +1,6 @@
+## 2026.11.18-002
+- **Hedge ≠ cross margin:** cell `hedge` (key `cross`) now only enables **dual-side keep-loser** on flip. Removed force `set_margin_type(CROSS)` / Bybit `trade_mode=0`. Margin stays **ISOLATED** so BingX risk UI and WHR riskPct/risk-sync work normally. Pre-trade add_margin fail → abort again (isolated semantics). routing.json cells: `marginType` CROSS → ISOLATED.
+
 ## 2026.11.18-001
 - Routing UI SAVE: dirty-signature and POST FormData now include `select[name]` (was `input` only) — changing **smartIncTf** enables Save and persists the value. Broker-cell disable also covers `select`.
 

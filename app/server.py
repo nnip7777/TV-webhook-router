@@ -2672,13 +2672,16 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
             risk_pct_value = float(risk_pct_raw)
             if risk_pct_value > 0:
                 destination['riskPct'] = risk_pct_value
-                destination['marginType'] = 'CROSS' if options.get('cross') else 'ISOLATED'
+                # Hedge does not imply cross margin — keep isolated so risk UI works.
+                destination['marginType'] = 'ISOLATED'
         except Exception:
             pass
 
     if broker_name in ('bingx', 'bybit') and options.get('cross'):
+        # Hedge flag only: dual-side keep-loser on flip. Does NOT switch margin to CROSS.
         destination['cross'] = True
-        destination['marginType'] = 'CROSS'
+        if not destination.get('marginType'):
+            destination['marginType'] = 'ISOLATED'
 
     if broker_name in ('bingx', 'bybit') and options.get('smartInc'):
         destination['smartInc'] = True
