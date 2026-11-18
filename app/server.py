@@ -4456,7 +4456,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
       }});
     }}
     function rowSignature(row) {{
-      const fields = Array.from(row.querySelectorAll('input[name]')).map(function(el) {{
+      const fields = Array.from(row.querySelectorAll('input[name], select[name]')).map(function(el) {{
         const value = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
         return el.name + '=' + value;
       }});
@@ -4485,7 +4485,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
       if (!checkbox) return;
       const enabled = checkbox.checked;
       cell.classList.toggle('broker-disabled', !enabled);
-      cell.querySelectorAll('input, button').forEach(function(el) {{
+      cell.querySelectorAll('input, select, button').forEach(function(el) {{
         if (el === checkbox) return;
         if (el.type === 'hidden') return;
         el.disabled = !enabled;
@@ -4502,7 +4502,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
       if (atomicInput) atomicInput.disabled = !enabled;
       row.querySelectorAll('.broker-cell').forEach(function(cell) {{
         cell.classList.add('broker-disabled');
-        cell.querySelectorAll('input, button').forEach(function(el) {{
+        cell.querySelectorAll('input, select, button').forEach(function(el) {{
           if (el.type === 'hidden') return;
           el.disabled = true;
         }});
@@ -4568,7 +4568,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
           const formData = new FormData();
           formData.append('ticker', ticker);
           formData.append('saveTicker', ticker);
-          row.querySelectorAll('input[name]').forEach(function(el) {{
+          row.querySelectorAll('input[name], select[name]').forEach(function(el) {{
             if (el.disabled) return;
             const name = el.name;
             if (name === 'ticker' || name === 'manualTicker' || name === 'manualRowEnabled') return;

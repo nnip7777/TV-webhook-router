@@ -1,3 +1,6 @@
+## 2026.11.18-001
+- Routing UI SAVE: dirty-signature and POST FormData now include `select[name]` (was `input` only) — changing **smartIncTf** enables Save and persists the value. Broker-cell disable also covers `select`.
+
 ## 2026.11.17-001
 - **smart-inc TF (per-cell):** new cell select `smartIncTf` = `1м 5м 8м 10м 15м 20м 60м 280м День` (default **60** = prior hour-like behavior). Multiplier = **completed bars of that TF** since last fill (not clock-hours); same-bar skip (`smart_inc_same_bar`); restart threshold `SMART_INC_RESTART_HOURS` now means **bars of cell TF** (legacy env key); cap `SMART_INC_MAX_MULTIPLIER` unchanged. Journal `smartInc.mode=bars` + `tf` + `barsSinceLastFill`.
 
