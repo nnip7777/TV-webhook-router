@@ -2333,6 +2333,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
 
             margin_ops: Dict[str, Any] = {}
             pretrade_aborted = False
+            # A: caches filled by flip-after-close so _ensure_pretrade_margin skips re-GET
+            _pretrade_pos_cache = None
+            _pretrade_bal_cache = None
             requested_position_side = position_side
             if requested_position_side == 'BOTH':
                 requested_position_side = 'LONG' if side == 'buy' else 'SHORT'
@@ -2455,15 +2458,21 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 request_payload['riskControlMode'] = 'enabled_for_non_crypto'
 
             if risk_control_enabled:
-                _set_stage('get_balance_before')
-                balance = client.get_balance()
-                equity = _bingx_account_equity(balance)
-                margin_ops['balance'] = balance
+                # A/C: reuse netting snapshot when dual; else parallel GET balance ∥ positions.
                 if current_position_mode is True:
+                    _set_stage('get_balance_before')
+                    balance = client.get_balance()
                     positions_before = positions_before_for_netting
                 else:
-                    _set_stage('get_positions_before')
-                    positions_before = client.get_positions(prepared['symbol'])
+                    _set_stage('get_balance_before')
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                        fut_bal = pool.submit(client.get_balance)
+                        fut_pos = pool.submit(client.get_positions, prepared['symbol'])
+                        balance = fut_bal.result()
+                        positions_before = fut_pos.result()
+                equity = _bingx_account_equity(balance)
+                margin_ops['balance'] = balance
                 before_position = _bingx_extract_position(positions_before, prepared['symbol'], requested_position_side)
                 before_qty = _bingx_position_qty(before_position)
                 # Target leg only: extract may fall back to the opposite (flip) leg
@@ -2547,12 +2556,22 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         '_riskControl': margin_ops,
                     }
 
-                # Recompute from THIS order + live target-side position:
-                # flip close→open invalidates the pre-close snapshot, and
-                # quoteOrderQty is already USDT (must not × mark).
+                # A: reuse positions/balance from earlier in this job when valid.
+                # Flip close→open must refetch (caller sets _pretrade_*_cache after close).
                 _set_stage('pre_trade_get_position')
+                if _pretrade_pos_cache is not None:
+                    pos_rows = _pretrade_pos_cache
+                    rc['preTradePositionsSource'] = 'flip_after_close_cache'
+                elif not target_mode_close_then_open and positions_before is not None:
+                    pos_rows = positions_before
+                    rc['preTradePositionsSource'] = 'before_snapshot'
+                else:
+                    try:
+                        pos_rows = client.get_positions(prepared['symbol'])
+                        rc['preTradePositionsSource'] = 'fresh'
+                    except Exception as e:
+                        return _pretrade_abort(f'pre-trade margin: cannot read position: {e} — order not placed')
                 try:
-                    pos_rows = client.get_positions(prepared['symbol'])
                     pos = _bingx_extract_position(pos_rows, prepared['symbol'], position_side)
                 except Exception as e:
                     return _pretrade_abort(f'pre-trade margin: cannot read position: {e} — order not placed')
@@ -2610,10 +2629,18 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     return None
 
                 _set_stage('pre_trade_get_balance')
-                try:
-                    pre_bal = client.get_balance()
-                except Exception as e:
-                    return _pretrade_abort(f'pre-trade margin: cannot read balance: {e} — order not placed')
+                if _pretrade_bal_cache is not None:
+                    pre_bal = _pretrade_bal_cache
+                    rc['preTradeBalanceSource'] = 'flip_after_close_cache'
+                elif not target_mode_close_then_open and margin_ops.get('balance') is not None:
+                    pre_bal = margin_ops['balance']
+                    rc['preTradeBalanceSource'] = 'before_snapshot'
+                else:
+                    try:
+                        pre_bal = client.get_balance()
+                        rc['preTradeBalanceSource'] = 'fresh'
+                    except Exception as e:
+                        return _pretrade_abort(f'pre-trade margin: cannot read balance: {e} — order not placed')
                 available = _bingx_account_available(pre_bal)
                 rc['preTradeAvailable'] = available
 
@@ -3023,6 +3050,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     # Flip: close just freed isolated margin — refresh balance before
                     # the open pre-trade check (BingX available can lag a beat).
                     time.sleep(0.35)
+                    fresh_bal = None
                     try:
                         fresh_bal = client.get_balance()
                         margin_ops['balance'] = fresh_bal
@@ -3044,6 +3072,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     except Exception as mt_exc:
                         request_payload['marginTypeEnsureBeforeTargetOpenFailed'] = True
                         request_payload['marginTypeEnsureBeforeTargetOpenErrorMsg'] = str(mt_exc)
+                    # A: post-close snapshots for pre-trade — skip duplicate GETs
+                    _pretrade_pos_cache = positions_before_open
+                    _pretrade_bal_cache = fresh_bal if fresh_bal is not None else margin_ops.get('balance')
                     target_open_qty_kind = 'usdt'
                     open_prepared = client.prepare_limit_order(symbol=symbol, side=open_side, qty=quantity, price=None, qty_kind=target_open_qty_kind)
                     request_payload['targetOpenQtyKind'] = target_open_qty_kind

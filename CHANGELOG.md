@@ -1,3 +1,6 @@
+## 2026.11.19-004
+- **BingX pre-trade faster (A+C):** (C) parallel `get_balance ∥ get_positions` when no dual-mode snapshot; (A) reuse `before_snapshot` / post-close cache instead of duplicate GETs in `_ensure_pretrade_margin` (`preTradePositionsSource`, `preTradeBalanceSource`). Cuts ~2 RTT from webhook→place.
+
 ## 2026.11.19-003
 - **BingX flip re-ensure ISOLATED after close:** when opposite is closed and symbol is flat, call `set_margin_type(ISOLATED)` before opening target (`set_margin_type_before_target_open`). Fail → journal `marginTypeEnsureBeforeTargetOpenFailed`, **order continues** (does not abort). Enables isolated mode on the new leg after a hedge flip while the old position still blocked the switch.
 
