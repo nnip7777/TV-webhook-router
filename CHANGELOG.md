@@ -1,3 +1,6 @@
+## 2026.11.19-003
+- **BingX flip re-ensure ISOLATED after close:** when opposite is closed and symbol is flat, call `set_margin_type(ISOLATED)` before opening target (`set_margin_type_before_target_open`). Fail → journal `marginTypeEnsureBeforeTargetOpenFailed`, **order continues** (does not abort). Enables isolated mode on the new leg after a hedge flip while the old position still blocked the switch.
+
 ## 2026.11.19-002
 - **Settings split BingX vs Bybit** (no more shared `alsoIn` fields): per-broker keys `BINGX_SMART_INC_*`, `BINGX_RISK_SYNC_*`, `BYBIT_SMART_INC_*`, `BYBIT_RISK_SYNC_*`. Readers use `env_*_per_broker` with fallback to legacy `SMART_INC_*` / `RISK_SYNC_*` (migration). `.env` seeded with both prefixes from current values. Each section edits only its own keys.
 
