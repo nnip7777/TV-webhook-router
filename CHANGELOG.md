@@ -1,3 +1,6 @@
+## 2026.11.19-006
+- **Risk-sync window is a live per-broker Settings:** `BINGX_RISK_SYNC_WINDOW_PCT` / `BYBIT_RISK_SYNC_WINDOW_PCT` (default **30**). add when `risk ≥ target×(1+window/100)`, reduce when `risk ≤ target×(1−window/100)` — applies without restart. Journal shows `win±N%`. Hardcoded 30% constants remain only as defaults/tests.
+
 ## 2026.11.19-005
 - **Timeout journal B:** on `timeout after 25s`, report live `stage`/`stageTrace`/`nettingAction`/`smartInc` from in-flight `request_payload` (`_LIVE_REQUEST`) instead of empty `destination.request` (`stage=null`).
 

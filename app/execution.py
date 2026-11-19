@@ -204,11 +204,31 @@ def smart_inc_open_qty(need_contracts: float, mark_price: float, open_qty_kind: 
     return float(need_contracts)
 
 
-# Periodic risk sync: symmetric window around the target.
-# add when risk grew by this relative amount; reduce when risk fell below
-# target × (1/RISK_SYNC_GROWTH_RATIO) ≡ target × 0.70 for 1.30 (avoids micro-adjust).
+# Default ±window around target (Settings: BINGX_/BYBIT_RISK_SYNC_WINDOW_PCT).
+# 30% → add ≥ target×1.30, reduce ≤ target×0.70 (legacy constants for tests).
 RISK_SYNC_GROWTH_RATIO = 1.30
 RISK_SYNC_REDUCE_RATIO = 0.70
+RISK_SYNC_WINDOW_PCT_DEFAULT = 30.0
+
+
+def risk_sync_window_pct(broker: str = 'bingx') -> float:
+    """Live ±window percent around target risk. Per-broker Settings key."""
+    v = env_float_per_broker('RISK_SYNC_WINDOW_PCT', broker, RISK_SYNC_WINDOW_PCT_DEFAULT)
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        v = RISK_SYNC_WINDOW_PCT_DEFAULT
+    return min(99.0, max(1.0, v))
+
+
+def risk_sync_growth_ratio(broker: str = 'bingx') -> float:
+    """Add when risk ≥ target × (1 + window/100)."""
+    return 1.0 + risk_sync_window_pct(broker) / 100.0
+
+
+def risk_sync_reduce_ratio(broker: str = 'bingx') -> float:
+    """Reduce when risk ≤ target × (1 − window/100)."""
+    return 1.0 - risk_sync_window_pct(broker) / 100.0
 
 
 def risk_sync_default_pct(broker: str = 'bingx') -> float:
@@ -221,26 +241,26 @@ def risk_sync_default_pct(broker: str = 'bingx') -> float:
     return value if value > 0 else 0.0
 
 
-def risk_sync_should_adjust(current_risk_pct: float, target_pct: float) -> bool:
-    """True when the terminal Risk field grew to target × RISK_SYNC_GROWTH_RATIO."""
+def risk_sync_should_adjust(current_risk_pct: float, target_pct: float, broker: str = 'bingx') -> bool:
+    """True when risk grew to target × growth_ratio (live window)."""
     if target_pct <= 0 or current_risk_pct <= 0:
         return False
-    # epsilon: 12.0 * 1.3 == 15.600000000000001, exact-threshold must still fire
-    return current_risk_pct + 1e-9 >= target_pct * RISK_SYNC_GROWTH_RATIO
+    # epsilon: exact threshold must still fire
+    return current_risk_pct + 1e-9 >= target_pct * risk_sync_growth_ratio(broker)
 
 
-def risk_sync_should_reduce(current_risk_pct: float, target_pct: float) -> bool:
-    """True when risk fell to target × RISK_SYNC_REDUCE_RATIO (excess margin)."""
+def risk_sync_should_reduce(current_risk_pct: float, target_pct: float, broker: str = 'bingx') -> bool:
+    """True when risk fell to target × reduce_ratio (live window)."""
     if target_pct <= 0 or current_risk_pct <= 0:
         return False
-    return current_risk_pct <= target_pct * RISK_SYNC_REDUCE_RATIO + 1e-9
+    return current_risk_pct <= target_pct * risk_sync_reduce_ratio(broker) + 1e-9
 
 
-def risk_sync_action(current_risk_pct: float, target_pct: float) -> str | None:
-    """'add' | 'reduce' | None — symmetric window around target."""
-    if risk_sync_should_adjust(current_risk_pct, target_pct):
+def risk_sync_action(current_risk_pct: float, target_pct: float, broker: str = 'bingx') -> str | None:
+    """'add' | 'reduce' | None — window around target for this broker."""
+    if risk_sync_should_adjust(current_risk_pct, target_pct, broker):
         return 'add'
-    if risk_sync_should_reduce(current_risk_pct, target_pct):
+    if risk_sync_should_reduce(current_risk_pct, target_pct, broker):
         return 'reduce'
     return None
 
@@ -1085,7 +1105,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             'isolated': after_iso,
                             'targetIsolated': target_iso,
                             'delta': delta,
-                            'action': risk_sync_action(after_pct, risk_pct),
+                            'action': risk_sync_action(after_pct, risk_pct, 'bybit'),
                         }
                         if delta > 1e-8 and available2 > 1e-8:
                             add2 = min(delta, available2)
@@ -1098,7 +1118,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 request_payload['riskControl']['riskRateAfterAdjust'] = _bybit_position_risk_rate(vpos)
                             except Exception:
                                 pass
-                        elif delta < -1e-8 and risk_sync_should_reduce(after_pct, risk_pct):
+                        elif delta < -1e-8 and risk_sync_should_reduce(after_pct, risk_pct, 'bybit'):
                             notional2 = _bybit_position_notional(after_pos)
                             try:
                                 lev2 = max(1.0, float(after_pos.get('leverage') or 1))
@@ -3284,7 +3304,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     else:
                         # Reduce only when risk fell to target×0.7 (symmetric window).
                         current_pct = current_rr * 100.0
-                        if not risk_sync_should_reduce(current_pct, risk_pct):
+                        if not risk_sync_should_reduce(current_pct, risk_pct, 'bingx'):
                             request_payload['riskControl']['reduceMarginSkipped'] = 'within_window'
                         else:
                             _set_stage('reduce_margin')

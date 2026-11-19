@@ -36,9 +36,12 @@ from execution import (
     execute_route_sync,
     risk_sync_action,
     risk_sync_default_pct,
+    risk_sync_growth_ratio,
+    risk_sync_reduce_ratio,
     risk_sync_should_adjust,
     risk_sync_should_reduce,
     risk_sync_target_isolated,
+    risk_sync_window_pct,
 )
 from analytics import analytics_overview, init_analytics_db, performance_stats, record_execution_analytics, rebuild_analytics, rebuild_analytics_today, sync_account_fills, sync_exchange_fills, sync_exchange_income
 from settings import (
@@ -214,11 +217,13 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_RISK_SYNC_ENABLED', 'label': 'risk-sync (BingX)', 'section': 'bingx', 'type': 'bool', 'default': 'true', 'help': 'Подстраивать риск открытых позиций BingX: ≥target×1.3 → add, ≤target×0.7 → reduce. Только BingX.'},
     {'key': 'BINGX_RISK_SYNC_INTERVAL_SECONDS', 'label': 'risk-sync интервал, сек (BingX)', 'section': 'bingx', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск BingX. Мин 10, без рестарта. Только BingX.'},
     {'key': 'BINGX_RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % без riskPct (BingX)', 'section': 'bingx', 'type': 'float', 'default': '12', 'help': 'Цель риска для позиций BingX без riskPct в ячейке. 0 = только ячейки с riskPct. Только BingX.'},
+    {'key': 'BINGX_RISK_SYNC_WINDOW_PCT', 'label': 'risk-sync окно ±% (BingX)', 'section': 'bingx', 'type': 'float', 'default': '30', 'help': 'Живое окно вокруг цели: add при risk ≥ target×(1+окно/100), reduce при risk ≤ target×(1−окно/100). 30 → ≥26% / ≤14% при цели 20%. Применяется без рестарта. Только BingX.'},
     {'key': 'BYBIT_SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '36', 'help': 'Потолок множителя smart-inc для Bybit. Только Bybit; BingX — в своей секции.'},
     {'key': 'BYBIT_SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart bars (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '36', 'help': 'Простой в барах ТФ ячейки Bybit, после ×1. Только Bybit.'},
     {'key': 'BYBIT_RISK_SYNC_ENABLED', 'label': 'risk-sync (Bybit)', 'section': 'bybit', 'type': 'bool', 'default': 'true', 'help': 'Подстраивать риск открытых позиций Bybit: ≥target×1.3 → add, ≤target×0.7 → reduce. Только Bybit.'},
     {'key': 'BYBIT_RISK_SYNC_INTERVAL_SECONDS', 'label': 'risk-sync интервал, сек (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск Bybit. Мин 10, без рестарта. Только Bybit.'},
     {'key': 'BYBIT_RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % без riskPct (Bybit)', 'section': 'bybit', 'type': 'float', 'default': '12', 'help': 'Цель риска для позиций Bybit без riskPct в ячейке. 0 = только ячейки с riskPct. Только Bybit.'},
+    {'key': 'BYBIT_RISK_SYNC_WINDOW_PCT', 'label': 'risk-sync окно ±% (Bybit)', 'section': 'bybit', 'type': 'float', 'default': '30', 'help': 'Живое окно вокруг цели: add при risk ≥ target×(1+окно/100), reduce при risk ≤ target×(1−окно/100). 30 → ≥26% / ≤14% при цели 20%. Применяется без рестарта. Только Bybit.'},
     {'key': 'ALOR_CONFIG_PATH', 'label': 'Alor config JSON path', 'section': 'alor', 'type': 'path'},
     {'key': 'ALOR_OAUTH_URL', 'label': 'Alor OAuth URL', 'section': 'alor', 'type': 'text'},
     {'key': 'ALOR_API_BASE_URL', 'label': 'Alor API base URL', 'section': 'alor', 'type': 'text'},
@@ -3764,7 +3769,7 @@ def _bybit_risk_sync_once() -> None:
             continue
         current_rr = _bybit_position_risk_rate(row)
         current_pct = current_rr * 100.0
-        action = risk_sync_action(current_pct, target_pct)
+        action = risk_sync_action(current_pct, target_pct, 'bybit')
         if not action:
             continue
         needed.append((row, symbol, target_pct, current_rr, current_pct, qty, action))
@@ -3790,8 +3795,9 @@ def _bybit_risk_sync_once() -> None:
         min_margin = (abs(notional) / leverage) if notional > 0 else 0.0
         details = (
             f"risk {current_pct:.6g}% → target {target_pct:.6g}% "
-            f"(action={action} add≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}% "
-            f"reduce≤{target_pct * RISK_SYNC_REDUCE_RATIO:.6g}%)"
+            f"(action={action} win±{risk_sync_window_pct('bybit'):.6g}% "
+            f"add≥{target_pct * risk_sync_growth_ratio('bybit'):.6g}% "
+            f"reduce≤{target_pct * risk_sync_reduce_ratio('bybit'):.6g}%)"
             f" | margin {isolated:.8g} → target {target_margin:.8g} | positionSide={position_side}"
             f" | notional={notional:.8g} available={available:.8g} equity={equity:.8g}"
         )
@@ -3917,7 +3923,7 @@ def _bingx_risk_sync_once() -> None:
         except Exception:
             current_rr = 0.0
         current_pct = current_rr * 100.0
-        action = risk_sync_action(current_pct, target_pct)
+        action = risk_sync_action(current_pct, target_pct, 'bingx')
         if not action:
             continue
         needed.append((row, symbol, target_pct, current_rr, current_pct, action))
@@ -3949,8 +3955,9 @@ def _bingx_risk_sync_once() -> None:
         delta = target_margin - isolated
         details = (
             f"risk {current_pct:.6g}% → target {target_pct:.6g}% "
-            f"(action={action} add≥{target_pct * RISK_SYNC_GROWTH_RATIO:.6g}% "
-            f"reduce≤{target_pct * RISK_SYNC_REDUCE_RATIO:.6g}%)"
+            f"(action={action} win±{risk_sync_window_pct('bingx'):.6g}% "
+            f"add≥{target_pct * risk_sync_growth_ratio('bingx'):.6g}% "
+            f"reduce≤{target_pct * risk_sync_reduce_ratio('bingx'):.6g}%)"
             f" | margin {isolated:.8g} → target {target_margin:.8g} | positionSide={position_side}"
             f" | notional={notional:.8g} available={available:.8g}"
         )

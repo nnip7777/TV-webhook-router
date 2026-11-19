@@ -89,6 +89,52 @@ class RiskSyncActionTest(unittest.TestCase):
         self.assertIsNone(risk_sync_action(25.99, 20.0))
 
 
+class RiskSyncWindowLiveTest(unittest.TestCase):
+    def setUp(self):
+        self._saved = {}
+        for k in (
+            'BINGX_RISK_SYNC_WINDOW_PCT', 'BYBIT_RISK_SYNC_WINDOW_PCT',
+            'RISK_SYNC_WINDOW_PCT',
+        ):
+            self._saved[k] = os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_default_window_30(self):
+        from execution import risk_sync_window_pct, risk_sync_growth_ratio, risk_sync_reduce_ratio
+        self.assertEqual(risk_sync_window_pct('bingx'), 30.0)
+        self.assertAlmostEqual(risk_sync_growth_ratio('bingx'), 1.30)
+        self.assertAlmostEqual(risk_sync_reduce_ratio('bingx'), 0.70)
+
+    def test_per_broker_window_independent(self):
+        from execution import risk_sync_window_pct, risk_sync_action
+        os.environ['BINGX_RISK_SYNC_WINDOW_PCT'] = '50'
+        os.environ['BYBIT_RISK_SYNC_WINDOW_PCT'] = '20'
+        # bingx 50%: target20 → add ≥30, reduce ≤10
+        self.assertEqual(risk_sync_window_pct('bingx'), 50.0)
+        self.assertEqual(risk_sync_action(28.0, 20.0, 'bingx'), None)
+        self.assertEqual(risk_sync_action(30.0, 20.0, 'bingx'), 'add')
+        self.assertEqual(risk_sync_action(10.0, 20.0, 'bingx'), 'reduce')
+        # bybit 20%: target20 → add ≥24, reduce ≤16
+        self.assertEqual(risk_sync_window_pct('bybit'), 20.0)
+        self.assertEqual(risk_sync_action(24.0, 20.0, 'bybit'), 'add')
+        self.assertEqual(risk_sync_action(16.0, 20.0, 'bybit'), 'reduce')
+        self.assertEqual(risk_sync_action(23.99, 20.0, 'bybit'), None)
+        self.assertEqual(risk_sync_action(16.01, 20.0, 'bybit'), None)
+
+    def test_live_change_without_restart(self):
+        from execution import risk_sync_action
+        os.environ['BINGX_RISK_SYNC_WINDOW_PCT'] = '10'
+        self.assertEqual(risk_sync_action(22.0, 20.0, 'bingx'), 'add')  # ≥22
+        os.environ['BINGX_RISK_SYNC_WINDOW_PCT'] = '30'
+        self.assertEqual(risk_sync_action(22.0, 20.0, 'bingx'), None)
+
+
 class RiskSyncTargetIsolatedTest(unittest.TestCase):
     def test_target_from_current_risk_and_isolated(self):
         # maintenance = 0.20 × 10 = 2 → target = 2 / 0.12 = 16.666...
