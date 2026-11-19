@@ -1,3 +1,6 @@
+## 2026.11.19-005
+- **Timeout journal B:** on `timeout after 25s`, report live `stage`/`stageTrace`/`nettingAction`/`smartInc` from in-flight `request_payload` (`_LIVE_REQUEST`) instead of empty `destination.request` (`stage=null`).
+
 ## 2026.11.19-004
 - **BingX pre-trade faster (A+C):** (C) parallel `get_balance ∥ get_positions` when no dual-mode snapshot; (A) reuse `before_snapshot` / post-close cache instead of duplicate GETs in `_ensure_pretrade_margin` (`preTradePositionsSource`, `preTradeBalanceSource`). Cuts ~2 RTT from webhook→place.
 

@@ -363,6 +363,9 @@ class ExecutionResult:
 
 
 DESTINATION_TIMEOUT_SECONDS = 25
+# Live request_payload of the in-flight destination (cleared per call) so the
+# 25s timeout journal can report stage/stageTrace instead of empty/null.
+_LIVE_REQUEST: Dict[str, Any] = {}
 
 _smart_executor_cache = None
 _smart_executor_mtime = 0.0
@@ -674,6 +677,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'targetDirection': target_direction,
         'cross': bool(destination.get('cross')),
     }
+    _LIVE_REQUEST['payload'] = request_payload
     if smart_inc_applied is not None:
         request_payload['smartInc'] = smart_inc_applied
     if risk_control_enabled:
@@ -2190,6 +2194,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
         'stage': 'init',
         'stageTrace': ['init'],
     }
+    _LIVE_REQUEST['payload'] = request_payload
     if smart_inc_applied is not None:
         request_payload['smartInc'] = smart_inc_applied
     if bingx_hedged_mode is not None:
@@ -3508,13 +3513,18 @@ async def _execute_destination(payload: Dict[str, Any], destination: Dict[str, A
 
 
 async def _execute_destination_with_timeout(payload: Dict[str, Any], destination: Dict[str, Any]) -> Dict[str, Any]:
+    _LIVE_REQUEST.clear()
     try:
         return await asyncio.wait_for(_execute_destination(payload, destination), timeout=DESTINATION_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         broker = destination.get('broker')
         symbol = destination.get('symbol')
         venue = destination.get('category') or destination.get('exchange') or destination.get('account')
-        request_payload = destination.get('request') or {}
+        # Prefer the in-flight request_payload (has stage/stageTrace) over empty destination.request
+        live = _LIVE_REQUEST.get('payload')
+        request_payload = live if isinstance(live, dict) else (destination.get('request') or {})
+        stage = request_payload.get('stage') if isinstance(request_payload, dict) else None
+        stage_trace = request_payload.get('stageTrace') if isinstance(request_payload, dict) else []
         return {
             'broker': broker,
             'symbol': symbol,
@@ -3525,16 +3535,19 @@ async def _execute_destination_with_timeout(payload: Dict[str, Any], destination
             'request': {
                 'symbol': symbol,
                 'side': destination.get('side', payload.get('side')),
-                'qty': destination.get('qty', payload.get('qty')),
+                'qty': request_payload.get('qty') if isinstance(request_payload, dict) else destination.get('qty', payload.get('qty')),
                 'venue': venue,
-                'stage': request_payload.get('stage'),
-                'stageTrace': request_payload.get('stageTrace', []),
+                'stage': stage,
+                'stageTrace': stage_trace,
+                'cross': request_payload.get('cross') if isinstance(request_payload, dict) else None,
+                'nettingAction': request_payload.get('nettingAction') if isinstance(request_payload, dict) else None,
+                'smartInc': request_payload.get('smartInc') if isinstance(request_payload, dict) else None,
             },
             'error': f"timeout after {DESTINATION_TIMEOUT_SECONDS}s",
             'results': {
                 'error': f"timeout after {DESTINATION_TIMEOUT_SECONDS}s",
-                'stage': request_payload.get('stage'),
-                'stageTrace': request_payload.get('stageTrace', []),
+                'stage': stage,
+                'stageTrace': stage_trace,
             },
         }
 
