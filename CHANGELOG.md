@@ -1,3 +1,6 @@
+## 2026.11.19-002
+- **Settings split BingX vs Bybit** (no more shared `alsoIn` fields): per-broker keys `BINGX_SMART_INC_*`, `BINGX_RISK_SYNC_*`, `BYBIT_SMART_INC_*`, `BYBIT_RISK_SYNC_*`. Readers use `env_*_per_broker` with fallback to legacy `SMART_INC_*` / `RISK_SYNC_*` (migration). `.env` seeded with both prefixes from current values. Each section edits only its own keys.
+
 ## 2026.11.19-001
 - **Pre-trade margin uses exchange leverage** (BingX + Bybit): gate = `expected_notional / leverage` when position leverage known (e.g. 99x → ~1.01% notional), fallback risk% formula only if leverage unknown. Prevents risk formula (1.5% at 20%) from blocking adds that fit available×lev. Journal `preTradeTargetSource=leverage:N|risk_formula`.
 

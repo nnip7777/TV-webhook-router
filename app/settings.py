@@ -86,6 +86,46 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value in ('1', 'true', 'yes', 'on')
 
 
+def _broker_env_key(base: str, broker: str) -> str:
+    """BINGX_* / BYBIT_* prefixed key for a shared base name."""
+    prefix = 'BINGX' if str(broker or '').strip().lower() == 'bingx' else 'BYBIT'
+    return f'{prefix}_{base}'
+
+
+def env_int_per_broker(base: str, broker: str, default: int) -> int:
+    """Per-broker int: BINGX_X / BYBIT_X first, then legacy X (migration)."""
+    for key in (_broker_env_key(base, broker), base):
+        value = os.getenv(key)
+        if value in (None, ''):
+            continue
+        try:
+            return int(value)
+        except Exception:
+            continue
+    return default
+
+
+def env_float_per_broker(base: str, broker: str, default: float) -> float:
+    for key in (_broker_env_key(base, broker), base):
+        value = os.getenv(key)
+        if value in (None, ''):
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return default
+
+
+def env_bool_per_broker(base: str, broker: str, default: bool = False) -> bool:
+    for key in (_broker_env_key(base, broker), base):
+        raw = str(os.getenv(key, '')).strip().lower()
+        if not raw:
+            continue
+        return raw in ('1', 'true', 'yes', 'on')
+    return default
+
+
 def env_path(name: str, default: str, root: Path = None) -> Path:
     raw = env_str(name, default) or default
     path = Path(raw).expanduser()

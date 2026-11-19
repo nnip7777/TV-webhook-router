@@ -151,29 +151,41 @@ class BingXRiskTargetsTest(unittest.TestCase):
 
 class RiskSyncDefaultPctTest(unittest.TestCase):
     def test_env_value(self):
-        os.environ['RISK_SYNC_DEFAULT_PCT'] = '10.5'
+        os.environ['BINGX_RISK_SYNC_DEFAULT_PCT'] = '10.5'
         try:
-            self.assertEqual(risk_sync_default_pct(), 10.5)
+            self.assertEqual(risk_sync_default_pct('bingx'), 10.5)
         finally:
-            os.environ.pop('RISK_SYNC_DEFAULT_PCT', None)
+            os.environ.pop('BINGX_RISK_SYNC_DEFAULT_PCT', None)
 
     def test_missing_key_falls_back_to_field_default(self):
+        os.environ.pop('BINGX_RISK_SYNC_DEFAULT_PCT', None)
         os.environ.pop('RISK_SYNC_DEFAULT_PCT', None)
-        self.assertEqual(risk_sync_default_pct(), 12.0)
+        self.assertEqual(risk_sync_default_pct('bingx'), 12.0)
 
     def test_zero_disables_positions_without_cell(self):
-        os.environ['RISK_SYNC_DEFAULT_PCT'] = '0'
+        os.environ['BINGX_RISK_SYNC_DEFAULT_PCT'] = '0'
         try:
-            self.assertEqual(risk_sync_default_pct(), 0.0)
+            self.assertEqual(risk_sync_default_pct('bingx'), 0.0)
         finally:
-            os.environ.pop('RISK_SYNC_DEFAULT_PCT', None)
+            os.environ.pop('BINGX_RISK_SYNC_DEFAULT_PCT', None)
 
     def test_invalid_value_falls_back_to_default(self):
-        os.environ['RISK_SYNC_DEFAULT_PCT'] = 'abc'
+        os.environ['BINGX_RISK_SYNC_DEFAULT_PCT'] = 'abc'
+        os.environ.pop('RISK_SYNC_DEFAULT_PCT', None)
         try:
-            self.assertEqual(risk_sync_default_pct(), 12.0)
+            self.assertEqual(risk_sync_default_pct('bingx'), 12.0)
         finally:
-            os.environ.pop('RISK_SYNC_DEFAULT_PCT', None)
+            os.environ.pop('BINGX_RISK_SYNC_DEFAULT_PCT', None)
+
+    def test_per_broker_independent(self):
+        os.environ['BINGX_RISK_SYNC_DEFAULT_PCT'] = '15'
+        os.environ['BYBIT_RISK_SYNC_DEFAULT_PCT'] = '8'
+        try:
+            self.assertEqual(risk_sync_default_pct('bingx'), 15.0)
+            self.assertEqual(risk_sync_default_pct('bybit'), 8.0)
+        finally:
+            os.environ.pop('BINGX_RISK_SYNC_DEFAULT_PCT', None)
+            os.environ.pop('BYBIT_RISK_SYNC_DEFAULT_PCT', None)
 
 
 class SettingsFieldHelpersTest(unittest.TestCase):

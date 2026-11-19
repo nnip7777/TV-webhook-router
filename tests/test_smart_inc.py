@@ -155,6 +155,22 @@ class BingxOrderStatusTest(unittest.TestCase):
 
 
 class SmartIncMultiplierTest(unittest.TestCase):
+    def setUp(self):
+        self._saved = {}
+        for k in (
+            'BINGX_SMART_INC_MAX_MULTIPLIER', 'BYBIT_SMART_INC_MAX_MULTIPLIER',
+            'BINGX_SMART_INC_RESTART_HOURS', 'BYBIT_SMART_INC_RESTART_HOURS',
+            'SMART_INC_MAX_MULTIPLIER', 'SMART_INC_RESTART_HOURS',
+        ):
+            self._saved[k] = os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
     def test_no_history_means_start(self):
         self.assertEqual(smart_inc_multiplier(None), 1)
 
@@ -168,29 +184,41 @@ class SmartIncMultiplierTest(unittest.TestCase):
         self.assertEqual(smart_inc_multiplier(35.9), 35)
 
     def test_restart_window_resets_to_one(self):
-        # SMART_INC_RESTART_HOURS is now bars (legacy key)
+        # default restart bars = 36 when env cleared
         self.assertEqual(smart_inc_multiplier(36), 1)
         self.assertEqual(smart_inc_multiplier(100), 1)
 
     def test_cap_from_settings(self):
-        os.environ['SMART_INC_MAX_MULTIPLIER'] = '10'
+        os.environ['BINGX_SMART_INC_MAX_MULTIPLIER'] = '10'
         try:
-            self.assertEqual(smart_inc_max_multiplier(), 10)
-            self.assertEqual(smart_inc_multiplier(25), 10)
+            self.assertEqual(smart_inc_max_multiplier('bingx'), 10)
+            self.assertEqual(smart_inc_multiplier(25, 'bingx'), 10)
         finally:
-            os.environ.pop('SMART_INC_MAX_MULTIPLIER', None)
+            os.environ.pop('BINGX_SMART_INC_MAX_MULTIPLIER', None)
 
     def test_cap_floor_and_invalid_fallback(self):
-        os.environ['SMART_INC_MAX_MULTIPLIER'] = '0'
+        os.environ['BINGX_SMART_INC_MAX_MULTIPLIER'] = '0'
         try:
-            self.assertEqual(smart_inc_max_multiplier(), 1)
+            self.assertEqual(smart_inc_max_multiplier('bingx'), 1)
         finally:
-            os.environ.pop('SMART_INC_MAX_MULTIPLIER', None)
-        os.environ['SMART_INC_MAX_MULTIPLIER'] = 'abc'
+            os.environ.pop('BINGX_SMART_INC_MAX_MULTIPLIER', None)
+        os.environ['BINGX_SMART_INC_MAX_MULTIPLIER'] = 'abc'
+        os.environ.pop('SMART_INC_MAX_MULTIPLIER', None)
         try:
-            self.assertEqual(smart_inc_max_multiplier(), 36)
+            # invalid per-broker + no legacy → field default 36
+            self.assertEqual(smart_inc_max_multiplier('bingx'), 36)
         finally:
-            os.environ.pop('SMART_INC_MAX_MULTIPLIER', None)
+            os.environ.pop('BINGX_SMART_INC_MAX_MULTIPLIER', None)
+
+    def test_per_broker_keys_independent(self):
+        os.environ['BINGX_SMART_INC_MAX_MULTIPLIER'] = '7'
+        os.environ['BYBIT_SMART_INC_MAX_MULTIPLIER'] = '3'
+        try:
+            self.assertEqual(smart_inc_max_multiplier('bingx'), 7)
+            self.assertEqual(smart_inc_max_multiplier('bybit'), 3)
+        finally:
+            os.environ.pop('BINGX_SMART_INC_MAX_MULTIPLIER', None)
+            os.environ.pop('BYBIT_SMART_INC_MAX_MULTIPLIER', None)
 
 
 class SmartIncTfMinutesTest(unittest.TestCase):
@@ -414,12 +442,15 @@ class ExecuteBingXSmartIncTest(unittest.TestCase):
         self.assertEqual(result['request']['smartInc']['multiplier'], 1)
 
     def test_cap_from_settings_applied(self):
-        os.environ['SMART_INC_MAX_MULTIPLIER'] = '3'
-        execution.bars_since_last_fill = lambda b, s, tf: 20.0
-        import asyncio
-        result = asyncio.run(execution._execute_bingx(self._payload(), self._destination()))
-        self.assertEqual(result['request']['smartInc']['multiplier'], 3)
-        self.assertEqual(FakeBingXBroker.last_prepared_qty, 225)
+        os.environ['BINGX_SMART_INC_MAX_MULTIPLIER'] = '3'
+        try:
+            execution.bars_since_last_fill = lambda b, s, tf: 20.0
+            import asyncio
+            result = asyncio.run(execution._execute_bingx(self._payload(), self._destination()))
+            self.assertEqual(result['request']['smartInc']['multiplier'], 3)
+            self.assertEqual(FakeBingXBroker.last_prepared_qty, 225)
+        finally:
+            os.environ.pop('BINGX_SMART_INC_MAX_MULTIPLIER', None)
 
     def test_flag_off_leaves_quantity_untouched(self):
         execution.bars_since_last_fill = lambda b, s, tf: 10.0

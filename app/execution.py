@@ -15,7 +15,7 @@ from bingx_adapter import BingXBroker
 from bybit_adapter import BybitBroker
 from finam_adapter import FinamBroker
 from schwab_adapter import SchwabBroker
-from settings import SMART_EXECUTOR_PATH, env_float, env_int
+from settings import SMART_EXECUTOR_PATH, env_bool_per_broker, env_float, env_float_per_broker, env_int, env_int_per_broker
 
 # smart-inc: multiplier = bars of the cell TF since last fill (not raw hours).
 
@@ -24,22 +24,21 @@ SMART_INC_TF_MINUTES = (1, 5, 8, 10, 15, 20, 60, 280, 1440)
 SMART_INC_TF_DEFAULT = 60
 
 
-def smart_inc_max_multiplier() -> int:
-    """Potolok for the smart-inc multiplier from Settings (BingX section).
+def smart_inc_max_multiplier(broker: str = 'bingx') -> int:
+    """Cap for smart-inc multiplier. Per-broker: BINGX_/BYBIT_ + legacy fallback.
 
-    Read per call so a Settings save (reload_env updates os.environ) applies
-    without a server restart. Floor at 1: 0/invalid would mean "never trade".
+    Read per call so a Settings save applies without a server restart.
+    Floor at 1: 0/invalid would mean "never trade".
     """
-    return max(1, env_int('SMART_INC_MAX_MULTIPLIER', 36))
+    return max(1, env_int_per_broker('SMART_INC_MAX_MULTIPLIER', broker, 36))
 
 
-def smart_inc_restart_bars() -> float:
+def smart_inc_restart_bars(broker: str = 'bingx') -> float:
     """Idle gap in bars of the cell TF that resets multiplier to ×1.
 
-    Env key stays SMART_INC_RESTART_HOURS (legacy) but the value is now
-    interpreted as bars of the per-cell timeframe (default 36).
+    Per-broker: BINGX_/BYBIT_SMART_INC_RESTART_HOURS (value = bars), legacy fallback.
     """
-    return float(max(1, env_int('SMART_INC_RESTART_HOURS', 36)))
+    return float(max(1, env_int_per_broker('SMART_INC_RESTART_HOURS', broker, 36)))
 
 
 def smart_inc_tf_minutes(destination: Dict[str, Any] | None) -> int:
@@ -60,16 +59,15 @@ def smart_inc_tf_minutes(destination: Dict[str, Any] | None) -> int:
     return nearest if abs(nearest - v) <= max(1, v // 4) else SMART_INC_TF_DEFAULT
 
 
-def smart_inc_multiplier(bars: float | None) -> int:
+def smart_inc_multiplier(bars: float | None, broker: str = 'bingx') -> int:
     """Multiplier for smart-inc sizing from completed bars of the cell TF.
 
-    None (no fill history) or a gap >= smart_inc_restart_bars() means a fresh
-    start → 1. Otherwise the bar count itself: 0 = another source already
-    traded this ticker in the current bar → caller must skip or avg_tol.
+    None (no fill history) or a gap >= restart_bars means a fresh start → 1.
+    Otherwise the bar count itself: 0 = same bar → skip or avg_tol.
     """
-    if bars is None or bars >= smart_inc_restart_bars():
+    if bars is None or bars >= smart_inc_restart_bars(broker):
         return 1
-    return min(smart_inc_max_multiplier(), max(0, int(bars)))
+    return min(smart_inc_max_multiplier(broker), max(0, int(bars)))
 
 
 def should_keep_opposite_on_cross(unrealised_pnl) -> bool:
@@ -213,13 +211,13 @@ RISK_SYNC_GROWTH_RATIO = 1.30
 RISK_SYNC_REDUCE_RATIO = 0.70
 
 
-def risk_sync_default_pct() -> float:
-    """Target risk % for open BingX positions without a routing-cell riskPct.
+def risk_sync_default_pct(broker: str = 'bingx') -> float:
+    """Target risk % for open positions without a routing-cell riskPct.
 
-    Read per call so a Settings save applies without restart. Missing key →
-    field default 12; <=0 (explicit 0) → 0.0 = such positions are untouched.
+    Per-broker: BINGX_/BYBIT_RISK_SYNC_DEFAULT_PCT, legacy fallback.
+    Read per call so a Settings save applies without restart. <=0 → 0.0 (untouched).
     """
-    value = env_float('RISK_SYNC_DEFAULT_PCT', 12.0)
+    value = env_float_per_broker('RISK_SYNC_DEFAULT_PCT', broker, 12.0)
     return value if value > 0 else 0.0
 
 
@@ -497,7 +495,7 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 pass
             tf_min = smart_inc_tf_minutes(destination)
             bars = bars_since_last_fill(broker, symbol, tf_min)
-            multiplier = smart_inc_multiplier(bars)
+            multiplier = smart_inc_multiplier(bars, broker)
             same_bar = multiplier == 0
             # same-bar does NOT skip yet: avg_tol catch-up may still apply.
             add_mode = False
@@ -2018,7 +2016,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 pass
             tf_min = smart_inc_tf_minutes(destination)
             bars = bars_since_last_fill(broker, symbol, tf_min)
-            multiplier = smart_inc_multiplier(bars)
+            multiplier = smart_inc_multiplier(bars, broker)
             same_bar = multiplier == 0
             # same-bar does NOT skip yet: avg_tol catch-up may still apply.
             add_mode = False

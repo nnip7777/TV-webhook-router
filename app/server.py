@@ -65,7 +65,9 @@ from settings import (
     reload_env,
     save_env_file,
     env_bool,
+    env_bool_per_broker,
     env_int,
+    env_int_per_broker,
 )
 TEMPLATE_RE = re.compile(r'\{\{\s*([a-zA-Z0-9_\.]+)\s*\}\}')
 METRICS_CACHE: Dict[str, Any] = {
@@ -207,11 +209,16 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_BIND_INTERFACE', 'label': 'BingX bind interface (optional, e.g. bingx-egress)', 'section': 'bingx', 'type': 'text'},
     {'key': 'BINGX_SOURCE_KEY', 'label': 'BingX source key', 'section': 'bingx', 'type': 'text', 'default': 'BX-AI-SKILL'},
     {'key': 'BINGX_RECV_WINDOW', 'label': 'BingX recvWindow', 'section': 'bingx', 'type': 'text', 'default': '5000'},
-    {'key': 'SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: потолок множителя размера ордера (qty ячейки × бары ТФ ячейки с последней сделки по тикеру на бирже). 0 в тот же бар: skip, либо avg-tol добивка, если средняя вне tol. Работает при включённом чекбоксе smart-inc (BingX и Bybit, target-direction). Общая настройка для обеих бирж.'},
-    {'key': 'SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart bars (legacy key)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '36', 'help': 'smart-inc: простой в барах ТФ ячейки (ключ SMART_INC_RESTART_HOURS, значение = бары), после которого множитель сбрасывается в ×1. Без истории сделок тоже ×1. Применяется без перезапуска сервиса. Общая настройка для BingX и Bybit.'},
-    {'key': 'RISK_SYNC_ENABLED', 'label': 'Периодическая проверка риска (BingX/Bybit)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'bool', 'default': 'true', 'help': 'Каждые RISK_SYNC_INTERVAL_SECONDS подстраивать риск (riskRate) открытых позиций BingX и Bybit к цели. Окно ±30%: risk ≥ target×1.3 → add margin; risk ≤ target×0.7 → reduce margin (освободить available). Цель: riskPct ячейки, иначе default risk %. Журнал kind=risk-sync. Общая настройка для обеих бирж.'},
-    {'key': 'RISK_SYNC_INTERVAL_SECONDS', 'label': 'Интервал проверки риска, сек', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск открытых позиций BingX/Bybit. Минимум 10. Применяется без перезапуска сервиса. Общая настройка для обеих бирж.'},
-    {'key': 'RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % (без riskPct в ячейке)', 'section': 'bingx', 'alsoIn': ['bybit'], 'type': 'float', 'default': '12', 'help': 'Целевой риск % для позиций BingX/Bybit без riskPct в ячейке. 0 = только позиции с настроенным riskPct. Общая настройка для обеих бирж.'},
+    {'key': 'BINGX_SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier (BingX)', 'section': 'bingx', 'type': 'int', 'default': '36', 'help': 'Потолок множителя smart-inc для BingX: qty ячейки × бары ТФ. 0 в тот же бар → skip/avg-tol. Только BingX; Bybit — в своей секции.'},
+    {'key': 'BINGX_SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart bars (BingX)', 'section': 'bingx', 'type': 'int', 'default': '36', 'help': 'Простой в барах ТФ ячейки BingX, после ×1. Только BingX.'},
+    {'key': 'BINGX_RISK_SYNC_ENABLED', 'label': 'risk-sync (BingX)', 'section': 'bingx', 'type': 'bool', 'default': 'true', 'help': 'Подстраивать риск открытых позиций BingX: ≥target×1.3 → add, ≤target×0.7 → reduce. Только BingX.'},
+    {'key': 'BINGX_RISK_SYNC_INTERVAL_SECONDS', 'label': 'risk-sync интервал, сек (BingX)', 'section': 'bingx', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск BingX. Мин 10, без рестарта. Только BingX.'},
+    {'key': 'BINGX_RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % без riskPct (BingX)', 'section': 'bingx', 'type': 'float', 'default': '12', 'help': 'Цель риска для позиций BingX без riskPct в ячейке. 0 = только ячейки с riskPct. Только BingX.'},
+    {'key': 'BYBIT_SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '36', 'help': 'Потолок множителя smart-inc для Bybit. Только Bybit; BingX — в своей секции.'},
+    {'key': 'BYBIT_SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart bars (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '36', 'help': 'Простой в барах ТФ ячейки Bybit, после ×1. Только Bybit.'},
+    {'key': 'BYBIT_RISK_SYNC_ENABLED', 'label': 'risk-sync (Bybit)', 'section': 'bybit', 'type': 'bool', 'default': 'true', 'help': 'Подстраивать риск открытых позиций Bybit: ≥target×1.3 → add, ≤target×0.7 → reduce. Только Bybit.'},
+    {'key': 'BYBIT_RISK_SYNC_INTERVAL_SECONDS', 'label': 'risk-sync интервал, сек (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск Bybit. Мин 10, без рестарта. Только Bybit.'},
+    {'key': 'BYBIT_RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % без riskPct (Bybit)', 'section': 'bybit', 'type': 'float', 'default': '12', 'help': 'Цель риска для позиций Bybit без riskPct в ячейке. 0 = только ячейки с riskPct. Только Bybit.'},
     {'key': 'ALOR_CONFIG_PATH', 'label': 'Alor config JSON path', 'section': 'alor', 'type': 'path'},
     {'key': 'ALOR_OAUTH_URL', 'label': 'Alor OAuth URL', 'section': 'alor', 'type': 'text'},
     {'key': 'ALOR_API_BASE_URL', 'label': 'Alor API base URL', 'section': 'alor', 'type': 'text'},
@@ -3737,8 +3744,11 @@ def _bybit_risk_sync_once() -> None:
         _bybit_position_notional,
         _bybit_position_rows,
     )
+    from settings import env_bool_per_broker, env_int_per_broker
+    if not env_bool_per_broker('RISK_SYNC_ENABLED', 'bybit', True):
+        return
     targets = bingx_risk_pct_by_symbol(config, broker='bybit')
-    default_pct = risk_sync_default_pct()
+    default_pct = risk_sync_default_pct('bybit')
     if not targets and default_pct <= 0:
         return
     client = BybitBroker(testnet=bool(bybit_cfg.get('testnet', False)))
@@ -3880,8 +3890,11 @@ def _bingx_risk_sync_once() -> None:
     bingx_cfg = (config.get('brokers', {}).get('bingx', {}) or {}).get('defaultDestination', {}) or {}
     if bingx_cfg.get('dryRun'):
         return
+    from settings import env_bool_per_broker
+    if not env_bool_per_broker('RISK_SYNC_ENABLED', 'bingx', True):
+        return
     targets = bingx_risk_pct_by_symbol(config)
-    default_pct = risk_sync_default_pct()
+    default_pct = risk_sync_default_pct('bingx')
     if not targets and default_pct <= 0:
         return
     client = BingXBroker(testnet=bool(bingx_cfg.get('testnet', False)))
@@ -4032,18 +4045,22 @@ def _bingx_risk_sync_once() -> None:
 
 
 def _bingx_risk_sync_loop() -> None:
-    """Periodic risk check for open BingX + Bybit positions."""
+    """Periodic risk check for BingX + Bybit (per-broker enable/interval)."""
+    from settings import env_bool_per_broker, env_int_per_broker
     while True:
-        if env_bool('RISK_SYNC_ENABLED', True):
-            try:
+        try:
+            if env_bool_per_broker('RISK_SYNC_ENABLED', 'bingx', True):
                 _bingx_risk_sync_once()
-            except Exception:
-                print(f'[bingx-risk-sync] {traceback.format_exc()}', flush=True)
-            try:
+        except Exception:
+            print(f'[bingx-risk-sync] {traceback.format_exc()}', flush=True)
+        try:
+            if env_bool_per_broker('RISK_SYNC_ENABLED', 'bybit', True):
                 _bybit_risk_sync_once()
-            except Exception:
-                print(f'[bybit-risk-sync] {traceback.format_exc()}', flush=True)
-        time.sleep(max(10, env_int('RISK_SYNC_INTERVAL_SECONDS', 90)))
+        except Exception:
+            print(f'[bybit-risk-sync] {traceback.format_exc()}', flush=True)
+        iv_b = env_int_per_broker('RISK_SYNC_INTERVAL_SECONDS', 'bingx', 90)
+        iv_y = env_int_per_broker('RISK_SYNC_INTERVAL_SECONDS', 'bybit', 90)
+        time.sleep(max(10, min(iv_b, iv_y)))
 
 
 async def _alor_get_access_token(refresh_token: str) -> str:
