@@ -1,15 +1,15 @@
 {
-  "version": "2026.11.19-007",
-  "builtAt": "2026-11-20T04:59:39.636923+00:00",
+  "version": "2026.11.19-008",
+  "builtAt": "2026-11-20T05:04:48.203016+00:00",
   "fileCount": 17,
   "files": {
     "VERSION": {
-      "sha256": "36b87a37c45e2602252ee6949679d48d0c2ecf503e61eed779e42749b81c6642",
+      "sha256": "396f430dd00e794fe998d2e9366d8db032ba5a12baf3fe5459d0b0dfcab81bab",
       "bytes": 15
     },
     "CHANGELOG.md": {
-      "sha256": "007c6eab4def7b5dc7437908669a1af2c3b10b5333058334ba6584b51d588ef0",
-      "bytes": 49805
+      "sha256": "4d350b28f06be2b624001887ab309db8467be17b0aa221b53e30505faaf7d74f",
+      "bytes": 49979
     },
     "README.md": {
       "sha256": "e606c7da89ccad1618da80f8ac0c0da32099d21620609a24f078fe2f9c222997",
@@ -40,8 +40,8 @@
       "bytes": 121495
     },
     "app/execution.py": {
-      "sha256": "910bd47577fca0a0860cba26cd9a2d30facc3b894cdc2a2718eb77ca9be21be5",
-      "bytes": 177469
+      "sha256": "6a710e8ba9b3f894c58fc12b10923198ba9f5fdfdc33b9230bcf5a61c4a939e3",
+      "bytes": 176434
     },
     "app/bybit_adapter.py": {
       "sha256": "620d531ed256d78bd8b7e591b1893527643edf2c06a52207f902ad98a394b668",

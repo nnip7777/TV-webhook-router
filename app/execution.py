@@ -3100,20 +3100,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         request_payload['riskControl']['availableAfterClose'] = _bingx_account_available(fresh_bal)
                     except Exception as refresh_exc:
                         request_payload['riskControl']['balanceRefreshAfterCloseError'] = str(refresh_exc)
-                    # Symbol is flat after close: BingX allows marginType switch.
-                    # Re-ensure ISOLATED before opening target — journal only, never abort.
-                    _set_stage('set_margin_type_before_target_open')
-                    try:
-                        mt_open = client.set_margin_type(prepared['symbol'], 'ISOLATED')
-                        margin_ops['setMarginTypeBeforeTargetOpen'] = mt_open
-                        request_payload['marginTypeEnsureBeforeTargetOpen'] = mt_open
-                        if not _bingx_api_ok(mt_open):
-                            mt_open_msg = str((mt_open or {}).get('msg') or (mt_open or {}).get('code') or '')
-                            request_payload['marginTypeEnsureBeforeTargetOpenFailed'] = True
-                            request_payload['marginTypeEnsureBeforeTargetOpenErrorMsg'] = mt_open_msg
-                    except Exception as mt_exc:
-                        request_payload['marginTypeEnsureBeforeTargetOpenFailed'] = True
-                        request_payload['marginTypeEnsureBeforeTargetOpenErrorMsg'] = str(mt_exc)
+                    # Always isolated — no set_margin_type re-ensure after close.
                     # A: post-close snapshots for pre-trade — skip duplicate GETs
                     _pretrade_pos_cache = positions_before_open
                     _pretrade_bal_cache = fresh_bal if fresh_bal is not None else margin_ops.get('balance')
