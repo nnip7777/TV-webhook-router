@@ -26,8 +26,28 @@ from execution import (  # noqa: E402
     risk_sync_target_isolated,
 )
 
+_WINDOW_KEYS = (
+    'BINGX_RISK_SYNC_WINDOW_PCT',
+    'BYBIT_RISK_SYNC_WINDOW_PCT',
+    'RISK_SYNC_WINDOW_PCT',
+)
 
-class RiskSyncTriggerTest(unittest.TestCase):
+
+class _WindowDefault30(unittest.TestCase):
+    """Isolate live window env; force default ±30% for threshold tests."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.pop(k, None) for k in _WINDOW_KEYS}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+class RiskSyncTriggerTest(_WindowDefault30):
     def test_growth_ratio_constant(self):
         self.assertEqual(RISK_SYNC_GROWTH_RATIO, 1.30)
 
@@ -52,7 +72,7 @@ class RiskSyncTriggerTest(unittest.TestCase):
         self.assertFalse(risk_sync_should_adjust(0.0, 12.0))
 
 
-class RiskSyncReduceTest(unittest.TestCase):
+class RiskSyncReduceTest(_WindowDefault30):
     def test_reduce_at_exact_threshold(self):
         # 20% target → reduce at ≤14%
         self.assertTrue(risk_sync_should_reduce(14.0, 20.0))
@@ -70,7 +90,7 @@ class RiskSyncReduceTest(unittest.TestCase):
         self.assertFalse(risk_sync_should_reduce(0.0, 20.0))
 
 
-class RiskSyncActionTest(unittest.TestCase):
+class RiskSyncActionTest(_WindowDefault30):
     def test_add_when_high(self):
         self.assertEqual(risk_sync_action(26.0, 20.0), 'add')
 
@@ -311,6 +331,8 @@ class BingXRiskSyncOnceTest(unittest.TestCase):
         self._orig_append = server.append_journal
         self._orig_broker = server.BingXBroker
         self._orig_load_config = server.load_config
+        # Isolate live window from .env (thresholds below assume default ±30%).
+        self._saved_window = {k: os.environ.pop(k, None) for k in _WINDOW_KEYS}
         server.append_journal = lambda entry: self.journal.append(entry)
         server.load_config = lambda: {
             'routes': [{'destinations': [
@@ -323,6 +345,11 @@ class BingXRiskSyncOnceTest(unittest.TestCase):
         self.server.append_journal = self._orig_append
         self.server.BingXBroker = self._orig_broker
         self.server.load_config = self._orig_load_config
+        for k, v in self._saved_window.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def test_adds_margin_when_risk_grew_over_threshold(self):
         # 20% ≥ 12×1.3 → add margin: maint = 0.20×10 = 2 → target = 16.666…, delta ≈ 6.666

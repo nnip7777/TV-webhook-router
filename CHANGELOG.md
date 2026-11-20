@@ -1,3 +1,6 @@
+## 2026.11.19-007
+- **BingX fewer `set_margin_type` calls:** only on brand-new open (no target leg, not flip/keep). Adds and keep-loser skip the extra POST (BingX rejects it while positions are open anyway); flip still re-ensures ISOLATED after close. Journal `marginTypeEnsureSkipped=add_existing|flip_or_keep_path`. Cuts one RTT from add/keep latency.
+
 ## 2026.11.19-006
 - **Risk-sync window is a live per-broker Settings:** `BINGX_RISK_SYNC_WINDOW_PCT` / `BYBIT_RISK_SYNC_WINDOW_PCT` (default **30**). add when `risk ≥ target×(1+window/100)`, reduce when `risk ≤ target×(1−window/100)` — applies without restart. Journal shows `win±N%`. Hardcoded 30% constants remain only as defaults/tests.
 

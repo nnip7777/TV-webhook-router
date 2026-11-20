@@ -2545,8 +2545,21 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 }
 
             # Isolated margin type only (hedge does not force CROSS).
-            # Never abort the order on margin-type reject — journal only.
-            if risk_control_enabled:
+            # Skip redundant set_margin_type: only when establishing mode on a
+            # brand-new open (no target leg yet). Adds / keep-loser / flip-close
+            # already have a position or re-ensure after close — extra POST only
+            # burns latency and BingX rejects it while positions are open.
+            # Never abort on reject — journal only.
+            _netting_action = str(request_payload.get('nettingAction') or '')
+            _need_mode_set = bool(
+                risk_control_enabled
+                and before_qty <= 0
+                and _netting_action not in (
+                    'target_direction_close_opposite_then_open_target',
+                    'target_direction_keep_opposite_then_open_target',
+                )
+            )
+            if _need_mode_set:
                 _set_stage('set_margin_type')
                 mt_resp = client.set_margin_type(prepared['symbol'], 'ISOLATED')
                 margin_ops['setMarginType'] = mt_resp
@@ -2555,6 +2568,10 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     mt_msg = str((mt_resp or {}).get('msg') or (mt_resp or {}).get('code') or '')
                     request_payload['marginTypeEnsureFailed'] = True
                     request_payload['marginTypeEnsureErrorMsg'] = mt_msg
+            elif risk_control_enabled:
+                request_payload['marginTypeEnsureSkipped'] = (
+                    'add_existing' if before_qty > 0 else 'flip_or_keep_path'
+                )
 
             effective_position_side = api_position_side if api_position_side != 'BOTH' else requested_position_side
 
