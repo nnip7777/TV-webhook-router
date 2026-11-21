@@ -5289,20 +5289,23 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
             break
     if real_qty in (None, ''):
         real_qty, real_unit = _journal_order_qty({}, payload)
-    qty_txt = str(real_qty)
-    if real_unit:
-        qty_txt = f'{real_qty} {real_unit}'
+    # Header: bingx:NATURALGASNGUSDT.P 2short qty=17.0044usdt src=TV
+    qty_txt = str(real_qty) + str(real_unit or '')
+    brokers_hdr = []
+    for dest in destinations:
+        b = str(dest.get('broker') or '').strip().lower()
+        if b and b not in brokers_hdr:
+            brokers_hdr.append(b)
+    broker_prefix = (','.join(brokers_hdr) + ':') if brokers_hdr else ''
+    src_part = f' src={source}' if source else ''
+    header = f'{broker_prefix}{ticker} {side} qty={qty_txt}{src_part}'
 
     details = []
-    brokers = set()
     for dest in destinations:
         err = str(dest.get('error') or _result_error_text(dest.get('results') or {}) or '')
         broker = str(dest.get('broker') or '?')
-        if broker and broker != '?':
-            brokers.add(broker)
         symbol = str(dest.get('symbol') or '')
         if err and not str(dest.get('skipReason') or ''):
-            # Single dest: bare error (readable); multi: broker:symbol prefix.
             if len(destinations) <= 1:
                 details.append(err[:220])
             else:
@@ -5310,7 +5313,7 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
 
     if status == 'route_not_found':
         lines = [
-            f'{ticker} {side} qty={qty_txt}' + (f' · src={source}' if source else ''),
+            header,
             '🚫 <b>Route not found</b>',
             'Нет настроенного роутинга — сигнал проигнорирован.',
         ]
@@ -5318,14 +5321,14 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
         return
     if status == 'invalid_json':
         _notify_telegram(
-            f'{ticker} {side} qty={qty_txt}\n'
+            header + '\n'
             '🚫 <b>Invalid JSON webhook</b>\n'
             + str(decision.get('error') or decision.get('details') or '')[:200]
         )
         return
     if status == 'missing_fields':
         _notify_telegram(
-            f'{ticker} {side} qty={qty_txt}\n'
+            header + '\n'
             '🚫 <b>Missing webhook fields</b>\n'
             + str(decision.get('error') or decision.get('details') or '')[:200]
         )
@@ -5333,16 +5336,14 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
     if not error and not details and status != 'worker_error':
         return
     title = 'Execution error' if status != 'worker_error' else 'Worker error'
-    # Prefer the destination's concrete error (e.g. pre-trade abort) over generic decision.error.
     primary_err = details[0] if details else error
     if not primary_err:
         primary_err = error
     lines = [
-        f'{ticker} {side} qty={qty_txt}' + (f' · src={source}' if source else ''),
+        header,
         f'⚠️ <b>{title}</b> ({status})',
         primary_err[:240],
     ]
-    # Multi-dest: append remaining dest errors (with broker prefix).
     if len(destinations) > 1 and len(details) > 1:
         lines.extend(details[1:4])
     _notify_telegram('\n'.join(lines))

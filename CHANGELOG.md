@@ -1,3 +1,6 @@
+## 2026.11.21-001
+- **TG alert header format:** `bingx:NATURALGASNGUSDT.P 2short qty=17.0044usdt src=TV` (broker prefix, real qty+unit glued, space-separated src). Then status + bare error.
+
 ## 2026.11.20-001
 - **Telegram error alerts:** compact format — `TICKER side qty=<real wire size> src=TV` / `Execution error (status)` / bare error (no `brokers:` / `broker:symbol` on single dest). Qty from `destination.request` (post smart-inc), not TV flag `qty=1`.
 - **Journal summary qty:** webhook/quick summary rows use executed `request.qty` (`_journal_order_qty` on exec dest), not route-config payload qty.
