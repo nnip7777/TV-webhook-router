@@ -1,3 +1,7 @@
+## 2026.11.20-001
+- **Telegram error alerts:** compact format — `TICKER side qty=<real wire size> src=TV` / `Execution error (status)` / bare error (no `brokers:` / `broker:symbol` on single dest). Qty from `destination.request` (post smart-inc), not TV flag `qty=1`.
+- **Journal summary qty:** webhook/quick summary rows use executed `request.qty` (`_journal_order_qty` on exec dest), not route-config payload qty.
+
 ## 2026.11.19-008
 - **BingX: drop post-flip `set_margin_type` re-ensure** — positions stay isolated; only remaining call is on brand-new open. One less RTT on every flip.
 

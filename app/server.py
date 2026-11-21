@@ -5205,6 +5205,8 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
     summary_needed = bool(decision.get('error')) or len(destinations) <= 1
     if summary_needed:
         route_destinations = _route_destinations(materialized)
+        # Real size lives on the EXECUTED destination.request, not the route config.
+        exec_dest = destinations[0] if destinations else (route_destinations[:1] or [{}])[0]
         single_destination = route_destinations[:1]
         skip_txt = ''
         dest_err = ''
@@ -5223,7 +5225,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
         # Summary error first too (webhook row when single destination).
         if not skip_txt and dest_err:
             summary_detail_parts.append(f'error: {dest_err[:240]}')
-        units_hint = _journal_units_hint(single_destination[0] if single_destination else {}, str((single_destination[0] if single_destination else {}).get('symbol') or ''))
+        units_hint = _journal_units_hint(exec_dest, str(exec_dest.get('symbol') or ''))
         if units_hint:
             summary_detail_parts.append(units_hint)
         summary_detail_parts.append(f"payload={_short_json(payload)}")
@@ -5233,9 +5235,7 @@ def _record_webhook_decision(decision: Dict[str, Any], payload: Dict[str, Any], 
             summary_detail_parts.append(f"exec={' || '.join(destination_debug)}")
         if dest_err and not skip_txt:
             summary_detail_parts.append(f"error={dest_err}")
-        summary_qty, summary_unit = _journal_order_qty(
-            single_destination[0] if single_destination else {}, payload
-        )
+        summary_qty, summary_unit = _journal_order_qty(exec_dest, payload)
         append_journal({
             'time': decision.get('receivedAt'),
             'kind': summary_kind,
@@ -5277,10 +5277,22 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
         return
     ticker = str(payload.get('sourceTicker') or payload.get('ticker') or '?')
     side = str(payload.get('side') or '?')
-    qty = payload.get('qty', '')
     source = _payload_signal_source(payload)
     error = str(decision.get('error') or '')
     destinations = (decision.get('executionResult') or {}).get('destinations') or []
+    # Real wire size from executed request (TV qty=1 is only a flag).
+    real_qty, real_unit = '', ''
+    for dest in destinations:
+        q, u = _journal_order_qty(dest, payload)
+        if q not in (None, ''):
+            real_qty, real_unit = q, u
+            break
+    if real_qty in (None, ''):
+        real_qty, real_unit = _journal_order_qty({}, payload)
+    qty_txt = str(real_qty)
+    if real_unit:
+        qty_txt = f'{real_qty} {real_unit}'
+
     details = []
     brokers = set()
     for dest in destinations:
@@ -5290,41 +5302,49 @@ def _notify_execution_error(payload: Dict[str, Any], decision: Dict[str, Any]) -
             brokers.add(broker)
         symbol = str(dest.get('symbol') or '')
         if err and not str(dest.get('skipReason') or ''):
-            details.append(f'{broker}:{symbol} — {err[:120]}')
+            # Single dest: bare error (readable); multi: broker:symbol prefix.
+            if len(destinations) <= 1:
+                details.append(err[:220])
+            else:
+                details.append(f'{broker}:{symbol} — {err[:160]}')
+
     if status == 'route_not_found':
         lines = [
+            f'{ticker} {side} qty={qty_txt}' + (f' · src={source}' if source else ''),
             '🚫 <b>Route not found</b>',
-            f'{ticker} {side} qty={qty}' + (f' · src={source}' if source else ''),
-            'Нет настроенного роутинга для этого тикера — сигнал проигнорирован.',
+            'Нет настроенного роутинга — сигнал проигнорирован.',
         ]
         _notify_telegram('\n'.join(lines))
         return
     if status == 'invalid_json':
         _notify_telegram(
+            f'{ticker} {side} qty={qty_txt}\n'
             '🚫 <b>Invalid JSON webhook</b>\n'
             + str(decision.get('error') or decision.get('details') or '')[:200]
         )
         return
     if status == 'missing_fields':
         _notify_telegram(
+            f'{ticker} {side} qty={qty_txt}\n'
             '🚫 <b>Missing webhook fields</b>\n'
-            f'{ticker} {side} qty={qty}\n'
             + str(decision.get('error') or decision.get('details') or '')[:200]
         )
         return
     if not error and not details and status != 'worker_error':
         return
     title = 'Execution error' if status != 'worker_error' else 'Worker error'
+    # Prefer the destination's concrete error (e.g. pre-trade abort) over generic decision.error.
+    primary_err = details[0] if details else error
+    if not primary_err:
+        primary_err = error
     lines = [
+        f'{ticker} {side} qty={qty_txt}' + (f' · src={source}' if source else ''),
         f'⚠️ <b>{title}</b> ({status})',
-        f'{ticker} {side} qty={qty}' + (f' · src={source}' if source else ''),
+        primary_err[:240],
     ]
-    if brokers:
-        lines.append('brokers: ' + ', '.join(sorted(brokers)))
-    if error:
-        lines.append(f'Error: {error[:200]}')
-    if details:
-        lines.extend(details[:5])
+    # Multi-dest: append remaining dest errors (with broker prefix).
+    if len(destinations) > 1 and len(details) > 1:
+        lines.extend(details[1:4])
     _notify_telegram('\n'.join(lines))
 
 
