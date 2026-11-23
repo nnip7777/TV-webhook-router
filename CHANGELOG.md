@@ -1,3 +1,6 @@
+## 2026.11.21-004
+- **Routing cell layout:** `tal` on the **risk** line, `w_tal` on the **smart-inc ×бары** line (two compact rows, not four). Checkbox rows `padding-left:8px` so smart-inc/hedge are not flush to the cell edge. Flex inputs override `.quick-qty` so pairs fit 180px.
+
 ## 2026.11.21-003
 - **Routing cell UI:** smart-inc lines stacked — `smart-inc ×бары [TF]` / `tal [ ]` / `w_tal [ ]` (was one overflowing row). Label `Wind_tal` → **w_tal** (form key stays `Wind_tal`).
 

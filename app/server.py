@@ -4338,30 +4338,44 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 limit_parts.append(f"pxStep {limits.get('priceStep')}")
             if limit_parts:
                 margin_hint = ((margin_hint + ' · ') if margin_hint else '') + ', '.join(limit_parts)
-            risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name in ('bingx', 'bybit') else ''
             smart_inc_checked = 'checked' if current.get('smartInc') else ''
             smart_inc_tol_value = html.escape(str(current.get('smartIncTol') or ''))
             smart_inc_wind_value = html.escape(str(current.get('Wind_tal') or ''))
             smart_inc_tf_value = str(current.get('smartIncTf') or '60')
+            # Compact inputs: flex override of .quick-qty so pairs fit 180px.
+            _px_in = "autocomplete='off' class='mini-input' type='text' style='flex:1 1 40px; min-width:40px; width:auto; margin:0; padding:4px 4px; text-align:center; font-size:12px;'"
+            if broker_name in ('bingx', 'bybit'):
+                risk_line = (
+                    f"<div class='quick-line' style='padding-left:8px;'>"
+                    f"<span class='muted' style='flex:0 0 auto;'>risk</span>"
+                    f"<input {_px_in} name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'>"
+                    f"<span class='muted' style='flex:0 0 auto;'>%</span>"
+                    f"<span class='muted' style='flex:0 0 auto; margin-left:4px;'>tal</span>"
+                    f"<input {_px_in} name='smartIncTol|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_tol_value}' placeholder='—'>"
+                    f"</div>"
+                )
+            else:
+                risk_line = ''
             _tf_opts = [(1, '1м'), (5, '5м'), (8, '8м'), (10, '10м'), (15, '15м'), (20, '20м'), (60, '60м'), (280, '280м'), (1440, 'День')]
             _tf_select = ''.join(
                 f"<option value='{v}'{' selected' if str(v) == smart_inc_tf_value else ''}>{lab}</option>"
                 for v, lab in _tf_opts
             )
-            # Three stacked lines: checkbox+TF, then tal, then w_tal (fits 180px cell).
+            # Row2: smart-inc + TF + w_tal (checkbox nudged right off the cell edge).
             smart_inc_line = (
-                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label>"
-                f"<span class='muted'>×бары</span>"
-                f"<select name='smartIncTf|{html.escape(ticker)}|{html.escape(broker_name)}' class='mini-input quick-qty' style='width:64px;'>{_tf_select}</select></div>"
-                f"<div class='quick-line'><span class='muted' style='min-width:34px;'>tal</span>"
-                f"<input autocomplete='off' class='mini-input quick-qty' type='text' name='smartIncTol|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_tol_value}' placeholder='—' style='width:64px;'></div>"
-                f"<div class='quick-line'><span class='muted' style='min-width:34px;'>w_tal</span>"
-                f"<input autocomplete='off' class='mini-input quick-qty' type='text' name='Wind_tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_wind_value}' placeholder='—' style='width:64px;'></div>"
+                f"<div class='quick-line' style='padding-left:8px;'>"
+                f"<label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label>"
+                f"<span class='muted' style='flex:0 0 auto;'>×бары</span>"
+                f"<select name='smartIncTf|{html.escape(ticker)}|{html.escape(broker_name)}' class='mini-input quick-qty' style='width:58px; flex:0 0 58px;'>{_tf_select}</select>"
+                f"<span class='muted' style='flex:0 0 auto; margin-left:2px;'>w_tal</span>"
+                f"<input {_px_in} name='Wind_tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_wind_value}' placeholder='—'>"
+                f"</div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
             cross_checked = 'checked' if current.get('cross') else ''
             cross_line = (
-                f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='cross|{html.escape(ticker)}|{html.escape(broker_name)}' {cross_checked}><span class='muted'>hedge</span></label>"
+                f"<div class='quick-line' style='padding-left:8px;'>"
+                f"<label class='checkline-inline'><input type='checkbox' name='cross|{html.escape(ticker)}|{html.escape(broker_name)}' {cross_checked}><span class='muted'>hedge</span></label>"
                 f"<span class='muted'>keep loser + reverse</span></div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
