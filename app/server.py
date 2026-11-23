@@ -5108,19 +5108,70 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
       refreshBrokerMetrics();
       setInterval(tickHeaderClock, 1000);
       setInterval(refreshBrokerMetrics, 15000);
-      // Auto-refresh admin page (settings: WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS, 0=off).
-      // Skip while dirty rows, focused inputs, or open book modal — don't lose edits.
+      // Soft auto-refresh: patch changed cell fields in place (no full reload / blink).
+      // Settings: WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS, 0=off.
       const autoRefreshSec = {int(ui_autorefresh_sec)};
       if (autoRefreshSec > 0) {{
-        setInterval(function() {{
-          if (document.querySelector('.row-dirty')) return;
-          if (document.querySelector('.book-modal.open')) return;
-          const ae = document.activeElement;
-          if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return;
-          location.reload();
-        }}, autoRefreshSec * 1000);
+        setInterval(refreshAdminCells, autoRefreshSec * 1000);
       }}
     }});
+
+    function _patchInput(el, nextRaw) {{
+      if (!el) return false;
+      if (document.activeElement === el) return false;
+      const next = String(nextRaw == null ? '' : nextRaw);
+      const cur = String(el.value == null ? '' : el.value);
+      if (cur === next) return false;
+      el.value = next;
+      return true;
+    }}
+
+    async function refreshAdminCells() {{
+      try {{
+        if (document.querySelector('.book-modal.open')) return;
+        const res = await fetch('/api/admin/cells', {{cache: 'no-store'}});
+        if (!res.ok) return;
+        const data = await res.json();
+        const cells = (data && data.cells) || {{}};
+        Object.keys(cells).forEach(function(ticker) {{
+          const row = document.querySelector(`.mapping-row[data-ticker="${{ticker}}"]`);
+          if (!row) return;
+          const brokerMap = cells[ticker] || {{}};
+          Object.keys(brokerMap).forEach(function(broker) {{
+            const cell = row.querySelector(`[data-broker-cell="${{broker}}"]`);
+            if (!cell) return;
+            const payload = brokerMap[broker] || {{}};
+            // Wind_tal is readonly/info — always safe to patch when not focused.
+            _patchInput(cell.querySelector('input[name^="Wind_tal|"]'), payload.Wind_tal);
+            // Editable fields: only if row is clean (not mid-edit).
+            const dirty = row.classList.contains('row-dirty');
+            if (dirty) return;
+            _patchInput(cell.querySelector('input[name^="riskPct|"]'), payload.riskPct);
+            _patchInput(cell.querySelector('input[name^="smartIncTol|"]'), payload.smartIncTol);
+            _patchInput(cell.querySelector('input[name^="symbol|"]'), payload.symbol);
+            _patchInput(cell.querySelector('input[name^="venue|"]'), payload.venue);
+            _patchInput(cell.querySelector('input[name^="qty|"]'), payload.qty);
+            const tf = cell.querySelector('select[name^="smartIncTf|"]');
+            if (tf && document.activeElement !== tf) {{
+              const want = String(payload.smartIncTf == null ? '60' : payload.smartIncTf);
+              if (String(tf.value) !== want) {{
+                const opt = Array.from(tf.options).find(function(o) {{ return String(o.value) === want; }});
+                if (opt) tf.value = want;
+              }}
+            }}
+            const smartInc = cell.querySelector('input[name^="smartInc|"]');
+            if (smartInc) smartInc.checked = !!payload.smartInc;
+            const cross = cell.querySelector('input[name^="cross|"]');
+            if (cross) cross.checked = !!payload.cross;
+          }});
+        }});
+        // Recompute dirty flags after soft patch (values may match initial again).
+        document.querySelectorAll('.mapping-row').forEach(function(row) {{
+          refreshRowDirtyState(row);
+        }});
+      }} catch (e) {{
+      }}
+    }}
   </script>
 </head>
 <body>
@@ -5133,7 +5184,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             <h1>Webhook Router Admin</h1>
             <div class='muted'>Компактный режим: строка = тикер, колонка = брокер, внутри on + symbol + qty.</div>
             <div class='muted'>Текущее время: <span id='current-time'>{current_time}</span></div>
-            <div class='muted'>Авто-refresh: {'выкл' if ui_autorefresh_sec <= 0 else f'{ui_autorefresh_sec}с'}</div>
+            <div class='muted'>Авто-refresh: {'выкл' if ui_autorefresh_sec <= 0 else f'{ui_autorefresh_sec}с (ячейки, без reload)'}</div>
             <div class='muted'>build {html.escape(_build_summary().get('version','unknown'))} / server.py {html.escape(_build_summary().get('serverHash',''))}</div>
             <div id='flash-status' class='flash-status'></div>
           </div>
@@ -5691,6 +5742,32 @@ class Handler(BaseHTTPRequestHandler):
             for name in allowed:
                 filtered[name] = metrics.get(name)
             return self._json(200, filtered)
+        if route_path == '/api/admin/cells':
+            # Soft auto-refresh payload: cell fields that can change server-side
+            # (Wind_tal from webhook, mapping after save). Client patches inputs in place.
+            config = load_config()
+            mapping = _current_mapping(config)
+            visible = [name for name in _available_brokers(config) if _can_access_broker(current_user, name)]
+            out: Dict[str, Any] = {}
+            for ticker, broker_map in mapping.items():
+                cell_out: Dict[str, Any] = {}
+                for broker, payload in broker_map.items():
+                    if broker not in visible:
+                        continue
+                    cell_out[broker] = {
+                        'Wind_tal': payload.get('Wind_tal', ''),
+                        'smartIncTol': payload.get('smartIncTol', ''),
+                        'smartIncTf': payload.get('smartIncTf', '60'),
+                        'smartInc': bool(payload.get('smartInc')),
+                        'cross': bool(payload.get('cross')),
+                        'riskPct': payload.get('riskPct', ''),
+                        'qty': payload.get('qty', ''),
+                        'symbol': payload.get('symbol', ''),
+                        'venue': payload.get('venue', ''),
+                    }
+                if cell_out:
+                    out[ticker] = cell_out
+            return self._json(200, {'cells': out})
         if route_path == '/api/effectiveness-overview':
             if not _has_permission(current_user, 'canViewJournal'):
                 return self._json(403, {'error': 'forbidden'})

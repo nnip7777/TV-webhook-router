@@ -1,3 +1,6 @@
+## 2026.11.21-007
+- **Admin soft auto-refresh (no page blink):** replace full `location.reload()` with `GET /api/admin/cells` + in-place input patches (Wind_tal always; symbol/qty/risk/tol/tf/flags only when row is clean and field not focused). Same interval setting `WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS`.
+
 ## 2026.11.21-006
 - **Admin auto-refresh setting:** `WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS` (Settings → admin, default **5**, 0=off). Admin page reloads on that interval; **skips** while a row is dirty, an input is focused, or the book modal is open. Header shows `Авто-refresh: Nс`.
 
