@@ -1,3 +1,6 @@
+## 2026.11.21-003
+- **Routing cell UI:** smart-inc lines stacked — `smart-inc ×бары [TF]` / `tal [ ]` / `w_tal [ ]` (was one overflowing row). Label `Wind_tal` → **w_tal** (form key stays `Wind_tal`).
+
 ## 2026.11.21-002
 - **Wind_tal window for avg_tol** (BingX + Bybit): new per-cell field `Wind_tal` (absolute points). avg_tol catch-up runs only when `|avg−mark| > Wind_tal`; inside the window no pull-to-tal (micro-flicker does not inflate the position). `smartIncTol` stays the pull target (tal). Base bars/hours add unchanged. Empty Wind_tal = gate off. Journal `smartInc.windGate=within_window` + `windTal`/`windGap`. UI: `tal` + `Wind_tal` inputs on smart-inc line.
 
