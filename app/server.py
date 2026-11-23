@@ -1447,7 +1447,8 @@ _SKIP_REASON_TEXT = {
     'smart_inc_same_bar': 'skip: уже был ордер по этому символу в текущем баре ТФ',
     'smart_inc_same_hour': 'skip: уже был ордер по этому символу в текущем часе',
     'smart_inc_avg_in_range': 'skip: средняя цена уже в диапазоне tol',
-    'avg_already_in_range': 'skip: средняя цена уже в диапазоне tol',
+    'avg_already_in_range': 'skip: средняя цена уже в диапазоне tal',
+    'avg_within_window': 'skip: gap внутри окна Wind_tal — avg_tol не подтягиваем',
     'smart_inc_need_below_min': 'skip: объём add меньше минимума биржи',
     'smart_inc_need_below_min_qty': 'skip: объём add меньше minQty',
     'need_below_min_qty': 'skip: объём add меньше minQty',
@@ -2584,6 +2585,7 @@ def _current_mapping(config: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, An
                     'riskPct': destination.get('riskPct', ''),
                     'smartInc': bool(destination.get('smartInc')),
                     'smartIncTol': destination.get('smartIncTol', ''),
+                    'Wind_tal': destination.get('Wind_tal', ''),
                     'smartIncTf': destination.get('smartIncTf', '60'),
                     'cross': bool(destination.get('cross')),
                     'limits': copy.deepcopy(destination.get('limits', {})),
@@ -2708,6 +2710,15 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
                 tol_val = float(tol_raw)
                 if tol_val > 0:
                     destination['smartIncTol'] = tol_val
+            except Exception:
+                pass
+        # Wind_tal window (absolute points): avg_tol only if |avg−mark| > Wind_tal.
+        wind_raw = str(options.get('Wind_tal', '')).strip().replace('%', '')
+        if wind_raw:
+            try:
+                wind_val = float(wind_raw)
+                if wind_val > 0:
+                    destination['Wind_tal'] = wind_val
             except Exception:
                 pass
         # Per-cell TF for smart-inc bars (minutes: 1,5,8,10,15,20,60,280,1440).
@@ -4124,6 +4135,8 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
             bucket['smartInc'] = bool(destination.get('smartInc'))
         if 'smartIncTol' not in bucket:
             bucket['smartIncTol'] = destination.get('smartIncTol', '')
+        if 'Wind_tal' not in bucket:
+            bucket['Wind_tal'] = destination.get('Wind_tal', '')
         if 'smartIncTf' not in bucket:
             bucket['smartIncTf'] = destination.get('smartIncTf', '60')
         if 'cross' not in bucket:
@@ -4328,6 +4341,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             risk_line = f"<div class='quick-line'><span class='muted' style='min-width:34px;'>risk</span><input autocomplete='off' class='mini-input quick-qty' type='text' name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'><span class='muted'>%</span></div>" if broker_name in ('bingx', 'bybit') else ''
             smart_inc_checked = 'checked' if current.get('smartInc') else ''
             smart_inc_tol_value = html.escape(str(current.get('smartIncTol') or ''))
+            smart_inc_wind_value = html.escape(str(current.get('Wind_tal') or ''))
             smart_inc_tf_value = str(current.get('smartIncTf') or '60')
             _tf_opts = [(1, '1м'), (5, '5м'), (8, '8м'), (10, '10м'), (15, '15м'), (20, '20м'), (60, '60м'), (280, '280м'), (1440, 'День')]
             _tf_select = ''.join(
@@ -4338,9 +4352,11 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<div class='quick-line'><label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label>"
                 f"<span class='muted'>×бары</span>"
                 f"<select name='smartIncTf|{html.escape(ticker)}|{html.escape(broker_name)}' class='mini-input quick-qty' style='width:64px;'>{_tf_select}</select>"
-                f"<span class='muted' style='margin-left:4px;'>tol</span>"
+                f"<span class='muted' style='margin-left:4px;'>tal</span>"
                 f"<input autocomplete='off' class='mini-input quick-qty' type='text' name='smartIncTol|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_tol_value}' placeholder='—' style='width:48px;'>"
-                f"<span class='muted'>avg±</span></div>"
+                f"<span class='muted'>Wind_tal</span>"
+                f"<input autocomplete='off' class='mini-input quick-qty' type='text' name='Wind_tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_wind_value}' placeholder='—' style='width:48px;'>"
+                f"</div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
             cross_checked = 'checked' if current.get('cross') else ''
@@ -5897,6 +5913,7 @@ class Handler(BaseHTTPRequestHandler):
                     'riskPct': '',
                     'smartInc': False,
                     'smartIncTol': '',
+                    'Wind_tal': '',
                     'smartIncTf': '60',
                     'cross': False,
                     'limits': {},
@@ -5917,6 +5934,8 @@ class Handler(BaseHTTPRequestHandler):
                     bucket['smartInc'] = True
                 elif field == 'smartIncTol':
                     bucket['smartIncTol'] = form.get(key, [''])[0]
+                elif field == 'Wind_tal':
+                    bucket['Wind_tal'] = form.get(key, [''])[0]
                 elif field == 'smartIncTf':
                     bucket['smartIncTf'] = form.get(key, [''])[0]
                 elif field == 'cross':

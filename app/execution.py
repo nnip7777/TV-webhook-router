@@ -96,6 +96,36 @@ def smart_inc_avg_tol(destination: Dict[str, Any]) -> float | None:
     return v if v > 0 else None
 
 
+def smart_inc_wind_tal(destination: Dict[str, Any]) -> float | None:
+    """Wind_tal window (absolute points): avg_tol catch-up only if |avg−mark| > Wind_tal.
+
+    Empty/missing/≤0 → None = gate off (avg_tol runs whenever outside smartIncTol).
+    Blocks micro-flicker adds when price sits inside the window.
+    """
+    raw = destination.get('Wind_tal')
+    if raw in (None, ''):
+        return None
+    try:
+        v = float(str(raw).replace('%', '').strip())
+    except Exception:
+        return None
+    return v if v > 0 else None
+
+
+def smart_inc_avg_tol_allowed(avg_price: float, mark_price: float, wind: float | None) -> bool:
+    """True when avg_tol catch-up may run (outside Wind_tal, or gate off)."""
+    if wind is None or wind <= 0:
+        return True
+    try:
+        a = float(avg_price)
+        p = float(mark_price)
+    except (TypeError, ValueError):
+        return True
+    if a <= 0 or p <= 0:
+        return True
+    return abs(a - p) > wind
+
+
 def smart_inc_required_add_qty(
     base_qty: float,
     avg_price: float,
@@ -563,88 +593,104 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             avg_handled = False
             if add_mode and pos_qty > 0 and smart_inc_tol is not None:
-                need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
-                if need is not None and need <= 1e-12:
-                    # In tol range: same-hour → skip; otherwise hours growth.
-                    if same_bar:
-                        smart_inc_skip = True
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': 0.0,
-                            'reason': 'avg_already_in_range',
-                            'qty': quantity,
-                        }
-                    else:
-                        add_mode = False
-                elif need is not None:
-                    # Outside tol → catch up (works even same-hour).
-                    avg_handled = True
-                    from decimal import Decimal as _D, ROUND_UP as _RU
-                    try:
-                        _need_q = _D(str(need)).quantize(_D('0.001'), rounding=_RU)
-                        if _need_q > 0:
-                            need = float(_need_q)
-                    except Exception:
-                        pass
-                    limits = (destination or {}).get('limits') or {}
-                    min_qty = 0.0
-                    try:
-                        min_qty = float(limits.get('minQty') or 0)
-                    except (TypeError, ValueError):
-                        min_qty = 0.0
-                    if min_qty <= 0 and str(symbol).upper() == 'XAUTUSDT':
-                        min_qty = 0.002
-                    min_usdt = 0.0
-                    try:
-                        min_usdt = float(limits.get('minUsdt') or 0)
-                    except (TypeError, ValueError):
-                        min_usdt = 0.0
-                    if min_usdt <= 0 and str(symbol).upper() == 'XAUTUSDT':
-                        min_usdt = 5.0
-                    mark_for_min = pos_mark or pos_avg
-                    if min_qty > 0 and need < min_qty:
-                        smart_inc_skip = True
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'reason': 'need_below_min_qty',
-                            'qty': quantity,
-                        }
-                    elif min_usdt > 0 and mark_for_min > 0 and need * mark_for_min < min_usdt:
-                        smart_inc_skip = True
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'reason': 'need_below_min_usdt',
-                            'qty': quantity,
-                        }
-                    else:
-                        quantity = need  # contracts — Bybit wire unit (already step-snapped)
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': need,
-                            'qty': quantity,
-                            'qtyKind': 'contracts',
-                        }
+                _wind = smart_inc_wind_tal(destination)
+                _mark = pos_mark or pos_avg
+                if not smart_inc_avg_tol_allowed(pos_avg, _mark, _wind):
+                    # Inside Wind_tal: no avg_tol catch-up; base/hours path unchanged.
+                    if smart_inc_applied is None:
+                        smart_inc_applied = {}
+                    smart_inc_applied.update({
+                        'windTal': _wind,
+                        'windGap': round(abs(pos_avg - _mark), 10),
+                        'windGate': 'within_window',
+                        'tol': smart_inc_tol,
+                        'posQty': pos_qty,
+                        'avgPrice': pos_avg,
+                        'markPrice': pos_mark,
+                    })
                 else:
-                    # avg/mark unavailable → fall back to hours
-                    add_mode = False
+                    need = smart_inc_required_add_qty(pos_qty, pos_avg, _mark, target_direction, smart_inc_tol)
+                    if need is not None and need <= 1e-12:
+                        # In tol range: same-hour → skip; otherwise hours growth.
+                        if same_bar:
+                            smart_inc_skip = True
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddQty': 0.0,
+                                'reason': 'avg_already_in_range',
+                                'qty': quantity,
+                            }
+                        else:
+                            add_mode = False
+                    elif need is not None:
+                        # Outside tol → catch up (works even same-hour).
+                        avg_handled = True
+                        from decimal import Decimal as _D, ROUND_UP as _RU
+                        try:
+                            _need_q = _D(str(need)).quantize(_D('0.001'), rounding=_RU)
+                            if _need_q > 0:
+                                need = float(_need_q)
+                        except Exception:
+                            pass
+                        limits = (destination or {}).get('limits') or {}
+                        min_qty = 0.0
+                        try:
+                            min_qty = float(limits.get('minQty') or 0)
+                        except (TypeError, ValueError):
+                            min_qty = 0.0
+                        if min_qty <= 0 and str(symbol).upper() == 'XAUTUSDT':
+                            min_qty = 0.002
+                        min_usdt = 0.0
+                        try:
+                            min_usdt = float(limits.get('minUsdt') or 0)
+                        except (TypeError, ValueError):
+                            min_usdt = 0.0
+                        if min_usdt <= 0 and str(symbol).upper() == 'XAUTUSDT':
+                            min_usdt = 5.0
+                        mark_for_min = pos_mark or pos_avg
+                        if min_qty > 0 and need < min_qty:
+                            smart_inc_skip = True
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddQty': need,
+                                'reason': 'need_below_min_qty',
+                                'qty': quantity,
+                            }
+                        elif min_usdt > 0 and mark_for_min > 0 and need * mark_for_min < min_usdt:
+                            smart_inc_skip = True
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddQty': need,
+                                'reason': 'need_below_min_usdt',
+                                'qty': quantity,
+                            }
+                        else:
+                            quantity = need  # contracts — Bybit wire unit (already step-snapped)
+                            smart_inc_applied = {
+                                'mode': 'avg_tol',
+                                'tol': smart_inc_tol,
+                                'posQty': pos_qty,
+                                'avgPrice': pos_avg,
+                                'markPrice': pos_mark,
+                                'requiredAddQty': need,
+                                'qty': quantity,
+                                'qtyKind': 'contracts',
+                            }
+                    else:
+                        # avg/mark unavailable → fall back to hours
+                        add_mode = False
             # Hours path (cell × hours) — not same-hour and no avg_tol size.
             if not smart_inc_skip and not avg_handled and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol' and smart_inc_applied.get('requiredAddQty')):
                 if same_bar:
@@ -2081,49 +2127,26 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             avg_handled = False
             if add_mode and pos_qty > 0 and smart_inc_tol is not None:
-                need = smart_inc_required_add_qty(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
-                if need is not None and need <= 1e-12:
-                    # In tol range: same-hour → skip; otherwise hours growth.
-                    if same_bar:
-                        smart_inc_skip = True
-                        smart_inc_applied = {
-                            'mode': 'avg_tol',
-                            'tol': smart_inc_tol,
-                            'posQty': pos_qty,
-                            'avgPrice': pos_avg,
-                            'markPrice': pos_mark,
-                            'requiredAddQty': 0.0,
-                            'reason': 'avg_already_in_range',
-                            'qty': quantity,
-                        }
-                    else:
-                        add_mode = False
-                elif need is not None:
-                    # Outside tol → catch up (works even same-hour).
-                    avg_handled = True
-                    # Open/add is placed in USDT — compute notional directly, no contract qty on the wire.
-                    need_usdt = smart_inc_required_add_usdt(pos_qty, pos_avg, pos_mark or pos_avg, target_direction, smart_inc_tol)
-                    if need_usdt is None:
-                        add_mode = False
-                        avg_handled = False
-                    else:
-                        # min check: minUsdt (preferred) or minQty*price; skip tiny residuals.
-                        limits = (destination or {}).get('limits') or {}
-                        min_usdt = 0.0
-                        try:
-                            min_usdt = float(limits.get('minUsdt') or 0)
-                        except (TypeError, ValueError):
-                            min_usdt = 0.0
-                        if min_usdt <= 0 and limits.get('minQty'):
-                            try:
-                                min_usdt = float(limits['minQty']) * (pos_mark or pos_avg)
-                            except (TypeError, ValueError):
-                                min_usdt = 0.0
-                        if need_usdt <= 0:
-                            # Numerically in range after usdt conversion — fall through to hours.
-                            add_mode = False
-                            avg_handled = False
-                        elif min_usdt > 0 and need_usdt < min_usdt:
+                _wind = smart_inc_wind_tal(destination)
+                _mark = pos_mark or pos_avg
+                if not smart_inc_avg_tol_allowed(pos_avg, _mark, _wind):
+                    # Inside Wind_tal: no avg_tol catch-up; base/hours path unchanged.
+                    if smart_inc_applied is None:
+                        smart_inc_applied = {}
+                    smart_inc_applied.update({
+                        'windTal': _wind,
+                        'windGap': round(abs(pos_avg - _mark), 10),
+                        'windGate': 'within_window',
+                        'tol': smart_inc_tol,
+                        'posQty': pos_qty,
+                        'avgPrice': pos_avg,
+                        'markPrice': pos_mark,
+                    })
+                else:
+                    need = smart_inc_required_add_qty(pos_qty, pos_avg, _mark, target_direction, smart_inc_tol)
+                    if need is not None and need <= 1e-12:
+                        # In tol range: same-hour → skip; otherwise hours growth.
+                        if same_bar:
                             smart_inc_skip = True
                             smart_inc_applied = {
                                 'mode': 'avg_tol',
@@ -2131,25 +2154,64 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 'posQty': pos_qty,
                                 'avgPrice': pos_avg,
                                 'markPrice': pos_mark,
-                                'requiredAddUsdt': need_usdt,
-                                'reason': 'need_below_min_usdt',
+                                'requiredAddQty': 0.0,
+                                'reason': 'avg_already_in_range',
                                 'qty': quantity,
                             }
                         else:
-                            quantity = need_usdt
-                            smart_inc_applied = {
-                                'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
-                                'posQty': pos_qty,
-                                'avgPrice': pos_avg,
-                                'markPrice': pos_mark,
-                                'requiredAddUsdt': need_usdt,
-                                'qty': quantity,
-                                'qtyKind': 'usdt',
-                            }
-                            open_qty_kind = 'usdt'
-                else:
-                    add_mode = False
+                            add_mode = False
+                    elif need is not None:
+                        # Outside tol → catch up (works even same-hour).
+                        avg_handled = True
+                        # Open/add is placed in USDT — compute notional directly, no contract qty on the wire.
+                        need_usdt = smart_inc_required_add_usdt(pos_qty, pos_avg, _mark, target_direction, smart_inc_tol)
+                        if need_usdt is None:
+                            add_mode = False
+                            avg_handled = False
+                        else:
+                            # min check: minUsdt (preferred) or minQty*price; skip tiny residuals.
+                            limits = (destination or {}).get('limits') or {}
+                            min_usdt = 0.0
+                            try:
+                                min_usdt = float(limits.get('minUsdt') or 0)
+                            except (TypeError, ValueError):
+                                min_usdt = 0.0
+                            if min_usdt <= 0 and limits.get('minQty'):
+                                try:
+                                    min_usdt = float(limits['minQty']) * _mark
+                                except (TypeError, ValueError):
+                                    min_usdt = 0.0
+                            if need_usdt <= 0:
+                                # Numerically in range after usdt conversion — fall through to hours.
+                                add_mode = False
+                                avg_handled = False
+                            elif min_usdt > 0 and need_usdt < min_usdt:
+                                smart_inc_skip = True
+                                smart_inc_applied = {
+                                    'mode': 'avg_tol',
+                                    'tol': smart_inc_tol,
+                                    'posQty': pos_qty,
+                                    'avgPrice': pos_avg,
+                                    'markPrice': pos_mark,
+                                    'requiredAddUsdt': need_usdt,
+                                    'reason': 'need_below_min_usdt',
+                                    'qty': quantity,
+                                }
+                            else:
+                                quantity = need_usdt
+                                smart_inc_applied = {
+                                    'mode': 'avg_tol',
+                                    'tol': smart_inc_tol,
+                                    'posQty': pos_qty,
+                                    'avgPrice': pos_avg,
+                                    'markPrice': pos_mark,
+                                    'requiredAddUsdt': need_usdt,
+                                    'qty': quantity,
+                                    'qtyKind': 'usdt',
+                                }
+                                open_qty_kind = 'usdt'
+                    else:
+                        add_mode = False
             # Hours path (cell × hours) — not same-hour and no avg_tol size.
             if not smart_inc_skip and not avg_handled and not (smart_inc_applied and smart_inc_applied.get('mode') == 'avg_tol' and (smart_inc_applied.get('requiredAddQty') is not None or smart_inc_applied.get('requiredAddUsdt') is not None)):
                 if same_bar:

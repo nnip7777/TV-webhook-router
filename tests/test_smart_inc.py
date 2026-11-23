@@ -22,6 +22,8 @@ from execution import (
     smart_inc_max_multiplier,
     smart_inc_multiplier,
     smart_inc_avg_tol,
+    smart_inc_wind_tal,
+    smart_inc_avg_tol_allowed,
     smart_inc_required_add_qty,
     smart_inc_open_qty,
     smart_inc_required_add_usdt,
@@ -44,6 +46,49 @@ class SmartIncAvgTolTest(unittest.TestCase):
     def test_zero_or_invalid(self):
         self.assertIsNone(smart_inc_avg_tol({'smartIncTol': '0'}))
         self.assertIsNone(smart_inc_avg_tol({'smartIncTol': 'abc'}))
+
+
+class SmartIncWindTalTest(unittest.TestCase):
+    def test_empty_is_none(self):
+        self.assertIsNone(smart_inc_wind_tal({}))
+        self.assertIsNone(smart_inc_wind_tal({'Wind_tal': ''}))
+        self.assertIsNone(smart_inc_wind_tal({'Wind_tal': None}))
+
+    def test_positive_float(self):
+        self.assertEqual(smart_inc_wind_tal({'Wind_tal': '0.005'}), 0.005)
+        self.assertEqual(smart_inc_wind_tal({'Wind_tal': '10'}), 10.0)
+        self.assertEqual(smart_inc_wind_tal({'Wind_tal': '0.005%'}), 0.005)
+
+    def test_zero_or_invalid(self):
+        self.assertIsNone(smart_inc_wind_tal({'Wind_tal': '0'}))
+        self.assertIsNone(smart_inc_wind_tal({'Wind_tal': 'abc'}))
+
+
+class SmartIncAvgTolAllowedTest(unittest.TestCase):
+    """Wind_tal gate: avg_tol only when |avg−mark| > window (or gate off)."""
+
+    def test_gate_off_always_allowed(self):
+        self.assertTrue(smart_inc_avg_tol_allowed(3.50, 3.53, None))
+        self.assertTrue(smart_inc_avg_tol_allowed(3.50, 3.53, 0))
+
+    def test_within_window_blocks(self):
+        # Wind_tal=0.005, gap=0.003 → blocked
+        self.assertFalse(smart_inc_avg_tol_allowed(3.500, 3.503, 0.005))
+        # boundary gap == wind → blocked (only strictly outside runs)
+        self.assertFalse(smart_inc_avg_tol_allowed(3.500, 3.505, 0.005))
+
+    def test_outside_window_allows(self):
+        # Wind_tal=0.005, gap=0.006 → allowed (tal still applies after)
+        self.assertTrue(smart_inc_avg_tol_allowed(3.500, 3.506, 0.005))
+
+    def test_abs_gap_both_sides(self):
+        self.assertFalse(smart_inc_avg_tol_allowed(3.510, 3.508, 0.005))
+        self.assertTrue(smart_inc_avg_tol_allowed(3.520, 3.508, 0.005))
+
+    def test_bad_inputs_allow(self):
+        # Fail-open: no avg/mark → don't block the rest of smart-inc
+        self.assertTrue(smart_inc_avg_tol_allowed(0, 3.5, 0.005))
+        self.assertTrue(smart_inc_avg_tol_allowed('x', 3.5, 0.005))
 
 
 class SmartIncRequiredAddQtyTest(unittest.TestCase):

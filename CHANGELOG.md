@@ -1,3 +1,6 @@
+## 2026.11.21-002
+- **Wind_tal window for avg_tol** (BingX + Bybit): new per-cell field `Wind_tal` (absolute points). avg_tol catch-up runs only when `|avg−mark| > Wind_tal`; inside the window no pull-to-tal (micro-flicker does not inflate the position). `smartIncTol` stays the pull target (tal). Base bars/hours add unchanged. Empty Wind_tal = gate off. Journal `smartInc.windGate=within_window` + `windTal`/`windGap`. UI: `tal` + `Wind_tal` inputs on smart-inc line.
+
 ## 2026.11.21-001
 - **TG alert header format:** `bingx:NATURALGASNGUSDT.P 2short qty=17.0044usdt src=TV` (broker prefix, real qty+unit glued, space-separated src). Then status + bare error.
 
