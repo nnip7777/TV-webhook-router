@@ -1145,10 +1145,10 @@ def _render_settings_page(saved: bool = False, error: str = '', message: str = '
     webhook_url = (env_values.get('WEBHOOK_ROUTER_PUBLIC_BASE_URL') or f'http://{env_values.get("WEBHOOK_ROUTER_HOST","127.0.0.1")}:{env_values.get("WEBHOOK_ROUTER_PORT","8787")}').rstrip('/') + '/webhook'
     webhook_examples = [
         ('1) адрес hook сервера', webhook_url),
-        ('2) старый режим: buy', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "buy",\n  "qty": 1\n}'),
-        ('3) старый режим: sell', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "sell",\n  "qty": 1\n}'),
-        ('4) новый режим: 2long', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2long"\n}'),
-        ('5) новый режим: 2short', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2short"\n}'),
+        ('2) 2long + w_tal (множитель окна)', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2long",\n  "w_tal": 2.5\n}'),
+        ('3) 2short + w_tal', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2short",\n  "w_tal": 1\n}'),
+        ('4) старый режим: buy', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "buy",\n  "w_tal": 1\n}'),
+        ('5) старый режим: sell', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "sell",\n  "w_tal": 1\n}'),
     ]
     webhook_examples_html = ''.join(
         f"<label class='settings-field'><span>{html.escape(label)}</span><textarea readonly onclick='this.select()' style='min-height:{'64px' if idx == 0 else '112px'}'>{html.escape(value)}</textarea></label>"
@@ -1448,7 +1448,7 @@ _SKIP_REASON_TEXT = {
     'smart_inc_same_hour': 'skip: уже был ордер по этому символу в текущем часе',
     'smart_inc_avg_in_range': 'skip: средняя цена уже в диапазоне tol',
     'avg_already_in_range': 'skip: средняя цена уже в диапазоне tal',
-    'avg_within_window': 'skip: gap внутри окна w_tal — avg_tol не подтягиваем',
+    'avg_within_window': 'skip: gap внутри окна w_tal×tal — avg_tol не подтягиваем',
     'smart_inc_need_below_min': 'skip: объём add меньше минимума биржи',
     'smart_inc_need_below_min_qty': 'skip: объём add меньше minQty',
     'need_below_min_qty': 'skip: объём add меньше minQty',
@@ -2272,6 +2272,35 @@ def match_route(payload: Dict[str, Any], config: Dict[str, Any]):
     return None
 
 
+def _persist_cell_w_tal(config: Dict[str, Any], route: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    """Save webhook `w_tal` into cell field Wind_tal (informational display only)."""
+    raw = payload.get('w_tal')
+    if raw in (None, ''):
+        return
+    try:
+        val = float(str(raw).replace('%', '').strip())
+    except Exception:
+        return
+    if val <= 0:
+        return
+    changed = False
+    for dest in (route.get('destinations') or []):
+        if str(dest.get('broker') or '').lower() not in ('bingx', 'bybit'):
+            continue
+        try:
+            cur = float(str(dest.get('Wind_tal') or '') or '0')
+        except Exception:
+            cur = 0.0
+        if cur != val:
+            dest['Wind_tal'] = val
+            changed = True
+    if changed:
+        try:
+            save_config(config)
+        except Exception:
+            pass
+
+
 def _render_template(value: Any, context: Dict[str, Any]):
     if isinstance(value, str):
         def replace(match):
@@ -2395,13 +2424,18 @@ def _resolve_qty(payload: Dict[str, Any], destination: Dict[str, Any]) -> Any:
     if mode == 'fixed':
         return destination.get('qty')
     if mode == 'multiplier':
+        if payload_qty in (None, ''):
+            return destination.get('qty')
         multiplier = destination.get('qtyMultiplier', 1)
         return float(payload_qty) * float(multiplier)
     if mode == 'pass-through':
+        # TV no longer sends qty (was atavism == 1); fall back to cell qty.
+        if payload_qty in (None, ''):
+            return destination.get('qty')
         if destination_qty_kind != payload_qty_kind:
             destination['qtyResolutionError'] = f'qty kind mismatch: payload={payload_qty_kind}, destination={destination_qty_kind}'
         return payload_qty
-    return payload_qty
+    return payload_qty if payload_qty not in (None, '') else destination.get('qty')
 
 
 def materialize_route(payload: Dict[str, Any], route: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -2426,6 +2460,9 @@ def materialize_route(payload: Dict[str, Any], route: Dict[str, Any], config: Di
         elif payload_target_mode and str(rendered.get('signalMode') or '').strip().lower() == 'step-side':
             rendered['signalMode'] = 'target-direction'
         rendered['qty'] = _resolve_qty(payload, rendered)
+        # Informational: surface webhook w_tal on the materialized dest (journal/smartInc).
+        if payload.get('w_tal') not in (None, ''):
+            rendered['Wind_tal'] = payload.get('w_tal')
         default_qty_kind = 'usdt' if (payload_target_mode or str(rendered.get('signalMode') or payload.get('signalMode') or '').strip().lower() == 'target-direction') else 'contracts'
         rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or default_qty_kind).strip().lower()
         if (payload_target_mode or str(rendered.get('signalMode') or '').strip().lower() == 'target-direction') and not rendered.get('openQtyKind'):
@@ -2712,7 +2749,7 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
                     destination['smartIncTol'] = tol_val
             except Exception:
                 pass
-        # Wind_tal window (absolute points): avg_tol only if |avg−mark| > Wind_tal.
+        # Cell Wind_tal is informational (last webhook w_tal). Gate uses payload.w_tal × tal.
         wind_raw = str(options.get('Wind_tal', '')).strip().replace('%', '')
         if wind_raw:
             try:
@@ -4361,14 +4398,14 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<option value='{v}'{' selected' if str(v) == smart_inc_tf_value else ''}>{lab}</option>"
                 for v, lab in _tf_opts
             )
-            # Row2: smart-inc + TF + w_tal (checkbox nudged right off the cell edge).
+            # Row2: smart-inc + TF + w_tal (last webhook multiplier — informational, readonly).
             smart_inc_line = (
                 f"<div class='quick-line' style='padding-left:8px;'>"
                 f"<label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label>"
                 f"<span class='muted' style='flex:0 0 auto;'>×бары</span>"
                 f"<select name='smartIncTf|{html.escape(ticker)}|{html.escape(broker_name)}' class='mini-input quick-qty' style='width:58px; flex:0 0 58px;'>{_tf_select}</select>"
                 f"<span class='muted' style='flex:0 0 auto; margin-left:2px;'>w_tal</span>"
-                f"<input {_px_in} name='Wind_tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_wind_value}' placeholder='—'>"
+                f"<input {_px_in} name='Wind_tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_wind_value}' placeholder='—' readonly tabindex='-1' style='flex:1 1 40px; min-width:40px; width:auto; margin:0; padding:4px 4px; text-align:center; font-size:12px; background:#111827; color:#9ca3af;'>"
                 f"</div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
@@ -6311,7 +6348,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return self._json(400, {'error': 'invalid_json', 'details': str(e)})
 
-        missing = [k for k in ['sourceTicker', 'side', 'qty'] if k not in payload]
+        # TV payload: w_tal (multiplier) replaces legacy qty flag (was always 1).
+        missing = [k for k in ['sourceTicker', 'side', 'w_tal'] if k not in payload]
         if missing:
             append_journal({
                 'time': _utcnow_iso(),
@@ -6361,6 +6399,8 @@ class Handler(BaseHTTPRequestHandler):
             # journal/admin still record route_not_found — accept with 202.
             return self._json(202, {'error': 'route_not_found', 'message': 'Ticker observed and added to admin UI'})
 
+        # Informational: persist last webhook w_tal multiplier onto the cell (UI display).
+        _persist_cell_w_tal(config, route, payload)
         materialized = materialize_route(payload, route, config)
         decision = _enqueue_webhook_job(payload, materialized, config.get('defaultExecution', {}))
         return self._json(202, decision)

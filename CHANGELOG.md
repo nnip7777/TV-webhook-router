@@ -1,3 +1,6 @@
+## 2026.11.21-005
+- **Dynamic w_tal window:** webhook field **`w_tal`** (replaces legacy `qty`) is a **multiplier** for cell `tal`: effective window `wind_tal = w_tal × tal`. Gate: `gap ≤ wind_tal` → no avg_tol; else pull to tal. Cell field **w_tal** is **informational/readonly** — last multiplier from the hook (`_persist_cell_w_tal`). Missing `w_tal` in payload → 400 `missing_fields`. Qty falls back to cell when payload has no `qty`.
+
 ## 2026.11.21-004
 - **Routing cell layout:** `tal` on the **risk** line, `w_tal` on the **smart-inc ×бары** line (two compact rows, not four). Checkbox rows `padding-left:8px` so smart-inc/hedge are not flush to the cell edge. Flex inputs override `.quick-qty` so pairs fit 180px.
 

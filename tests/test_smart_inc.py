@@ -23,6 +23,8 @@ from execution import (
     smart_inc_multiplier,
     smart_inc_avg_tol,
     smart_inc_wind_tal,
+    smart_inc_wind_multiplier,
+    smart_inc_effective_window,
     smart_inc_avg_tol_allowed,
     smart_inc_required_add_qty,
     smart_inc_open_qty,
@@ -49,6 +51,8 @@ class SmartIncAvgTolTest(unittest.TestCase):
 
 
 class SmartIncWindTalTest(unittest.TestCase):
+    """Cell Wind_tal = informational last webhook w_tal (not the gate source)."""
+
     def test_empty_is_none(self):
         self.assertIsNone(smart_inc_wind_tal({}))
         self.assertIsNone(smart_inc_wind_tal({'Wind_tal': ''}))
@@ -64,21 +68,54 @@ class SmartIncWindTalTest(unittest.TestCase):
         self.assertIsNone(smart_inc_wind_tal({'Wind_tal': 'abc'}))
 
 
+class SmartIncWindMultiplierTest(unittest.TestCase):
+    """Webhook w_tal is the dynamic multiplier for tal."""
+
+    def test_from_payload(self):
+        self.assertEqual(smart_inc_wind_multiplier({'w_tal': 2.5}), 2.5)
+        self.assertEqual(smart_inc_wind_multiplier({'w_tal': '3'}), 3.0)
+        self.assertEqual(smart_inc_wind_multiplier({'w_tal': '2.5%'}), 2.5)
+
+    def test_missing_or_invalid(self):
+        self.assertIsNone(smart_inc_wind_multiplier({}))
+        self.assertIsNone(smart_inc_wind_multiplier({'w_tal': None}))
+        self.assertIsNone(smart_inc_wind_multiplier({'w_tal': '0'}))
+        self.assertIsNone(smart_inc_wind_multiplier({'w_tal': 'abc'}))
+        self.assertIsNone(smart_inc_wind_multiplier(None))
+
+
+class SmartIncEffectiveWindowTest(unittest.TestCase):
+    """wind_tal = w_tal × tal."""
+
+    def test_product(self):
+        # tal=0.002, w_tal=2.5 → 0.005
+        self.assertAlmostEqual(
+            smart_inc_effective_window(0.002, {'w_tal': 2.5}), 0.005, places=9)
+
+    def test_no_tal_or_no_mult_is_none(self):
+        self.assertIsNone(smart_inc_effective_window(None, {'w_tal': 2.5}))
+        self.assertIsNone(smart_inc_effective_window(0.002, {'w_tal': 0}))
+        self.assertIsNone(smart_inc_effective_window(0.002, {}))
+        self.assertIsNone(smart_inc_effective_window(0.002, None))
+        # w_tal=1 is valid: window equals tal
+        self.assertAlmostEqual(smart_inc_effective_window(0.002, {'w_tal': 1}), 0.002, places=9)
+
+
 class SmartIncAvgTolAllowedTest(unittest.TestCase):
-    """Wind_tal gate: avg_tol only when |avg−mark| > window (or gate off)."""
+    """Gate: avg_tol only when |avg−mark| > effective window (or gate off)."""
 
     def test_gate_off_always_allowed(self):
         self.assertTrue(smart_inc_avg_tol_allowed(3.50, 3.53, None))
         self.assertTrue(smart_inc_avg_tol_allowed(3.50, 3.53, 0))
 
     def test_within_window_blocks(self):
-        # Wind_tal=0.005, gap=0.003 → blocked
+        # window=0.005, gap=0.003 → blocked
         self.assertFalse(smart_inc_avg_tol_allowed(3.500, 3.503, 0.005))
         # boundary gap == wind → blocked (only strictly outside runs)
         self.assertFalse(smart_inc_avg_tol_allowed(3.500, 3.505, 0.005))
 
     def test_outside_window_allows(self):
-        # Wind_tal=0.005, gap=0.006 → allowed (tal still applies after)
+        # window=0.005, gap=0.006 → allowed (tal still applies after)
         self.assertTrue(smart_inc_avg_tol_allowed(3.500, 3.506, 0.005))
 
     def test_abs_gap_both_sides(self):

@@ -97,11 +97,7 @@ def smart_inc_avg_tol(destination: Dict[str, Any]) -> float | None:
 
 
 def smart_inc_wind_tal(destination: Dict[str, Any]) -> float | None:
-    """Wind_tal window (absolute points): avg_tol catch-up only if |avg−mark| > Wind_tal.
-
-    Empty/missing/≤0 → None = gate off (avg_tol runs whenever outside smartIncTol).
-    Blocks micro-flicker adds when price sits inside the window.
-    """
+    """Informational last webhook w_tal multiplier stored on the cell (not the gate)."""
     raw = destination.get('Wind_tal')
     if raw in (None, ''):
         return None
@@ -112,8 +108,30 @@ def smart_inc_wind_tal(destination: Dict[str, Any]) -> float | None:
     return v if v > 0 else None
 
 
+def smart_inc_wind_multiplier(payload: Dict[str, Any] | None) -> float | None:
+    """Webhook field `w_tal` — multiplier for tal (always sent by TV now)."""
+    raw = (payload or {}).get('w_tal')
+    if raw in (None, ''):
+        return None
+    try:
+        v = float(str(raw).replace('%', '').strip())
+    except Exception:
+        return None
+    return v if v > 0 else None
+
+
+def smart_inc_effective_window(tal: float | None, payload: Dict[str, Any] | None) -> float | None:
+    """wind_tal = w_tal (webhook) × tal (cell). None = gate off."""
+    if tal is None or tal <= 0:
+        return None
+    mult = smart_inc_wind_multiplier(payload)
+    if mult is None:
+        return None
+    return mult * tal
+
+
 def smart_inc_avg_tol_allowed(avg_price: float, mark_price: float, wind: float | None) -> bool:
-    """True when avg_tol catch-up may run (outside Wind_tal, or gate off)."""
+    """True when avg_tol catch-up may run (outside effective window, or gate off)."""
     if wind is None or wind <= 0:
         return True
     try:
@@ -593,13 +611,15 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             avg_handled = False
             if add_mode and pos_qty > 0 and smart_inc_tol is not None:
-                _wind = smart_inc_wind_tal(destination)
+                _w_mult = smart_inc_wind_multiplier(payload)
+                _wind = smart_inc_effective_window(smart_inc_tol, payload)
                 _mark = pos_mark or pos_avg
                 if not smart_inc_avg_tol_allowed(pos_avg, _mark, _wind):
-                    # Inside Wind_tal: no avg_tol catch-up; base/hours path unchanged.
+                    # Inside w_tal×tal window: no avg_tol; base/hours path unchanged.
                     if smart_inc_applied is None:
                         smart_inc_applied = {}
                     smart_inc_applied.update({
+                        'windMult': _w_mult,
                         'windTal': _wind,
                         'windGap': round(abs(pos_avg - _mark), 10),
                         'windGate': 'within_window',
@@ -2127,13 +2147,15 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             avg_handled = False
             if add_mode and pos_qty > 0 and smart_inc_tol is not None:
-                _wind = smart_inc_wind_tal(destination)
+                _w_mult = smart_inc_wind_multiplier(payload)
+                _wind = smart_inc_effective_window(smart_inc_tol, payload)
                 _mark = pos_mark or pos_avg
                 if not smart_inc_avg_tol_allowed(pos_avg, _mark, _wind):
-                    # Inside Wind_tal: no avg_tol catch-up; base/hours path unchanged.
+                    # Inside w_tal×tal window: no avg_tol; base/hours path unchanged.
                     if smart_inc_applied is None:
                         smart_inc_applied = {}
                     smart_inc_applied.update({
+                        'windMult': _w_mult,
                         'windTal': _wind,
                         'windGap': round(abs(pos_avg - _mark), 10),
                         'windGate': 'within_window',
