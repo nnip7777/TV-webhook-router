@@ -1,3 +1,6 @@
+## 2026.11.21-006
+- **Admin auto-refresh setting:** `WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS` (Settings → admin, default **5**, 0=off). Admin page reloads on that interval; **skips** while a row is dirty, an input is focused, or the book modal is open. Header shows `Авто-refresh: Nс`.
+
 ## 2026.11.21-005
 - **Dynamic w_tal window:** webhook field **`w_tal`** (replaces legacy `qty`) is a **multiplier** for cell `tal`: effective window `wind_tal = w_tal × tal`. Gate: `gap ≤ wind_tal` → no avg_tol; else pull to tal. Cell field **w_tal** is **informational/readonly** — last multiplier from the hook (`_persist_cell_w_tal`). Missing `w_tal` in payload → 400 `missing_fields`. Qty falls back to cell when payload has no `qty`.
 

@@ -190,6 +190,7 @@ SETTINGS_FIELDS = [
     {'key': 'WEBHOOK_ROUTER_BACKUP_DIR', 'label': 'Backup dir', 'section': 'admin', 'type': 'path'},
     {'key': 'WEBHOOK_ROUTER_BACKUP_KEEP_COUNT', 'label': 'Backup keep count', 'section': 'admin', 'type': 'text'},
     {'key': 'WEBHOOK_ROUTER_JOURNAL_KEEP_WEEKS', 'label': 'Journal keep weeks', 'section': 'admin', 'type': 'text'},
+    {'key': 'WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS', 'label': 'Auto-refresh admin, sec', 'section': 'admin', 'type': 'int', 'default': '5', 'help': 'Автообновление страницы admin раз в N секунд (по умолчанию 5). 0 = выключено. Не перезагружает при несохранённых правках / фокусе в поле.'},
     {'key': 'WEBHOOK_ROUTER_ROOT', 'label': 'Root', 'section': 'paths', 'type': 'path'},
     {'key': 'WEBHOOK_ROUTER_CONFIG_PATH', 'label': 'Routing config path', 'section': 'paths', 'type': 'path'},
     {'key': 'WEBHOOK_ROUTER_OBSERVED_SIGNALS_PATH', 'label': 'Observed signals path', 'section': 'paths', 'type': 'path'},
@@ -4289,6 +4290,12 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
     can_add_tickers = _has_permission(user, 'canAddTickers')
     can_edit_mappings = _has_permission(user, 'canEditMappings')
     can_manage_users = _has_permission(user, 'canManageUsers')
+    try:
+        ui_autorefresh_sec = int(str(_env_values().get('WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS', '5') or '5').strip() or '5')
+    except Exception:
+        ui_autorefresh_sec = 5
+    if ui_autorefresh_sec < 0:
+        ui_autorefresh_sec = 0
 
     header_cells = ''.join(
         f"<th class='broker-head' data-broker-head='{html.escape(name)}'><div class='broker-title'>{html.escape(cfg.get('label', name))}<span class='status-dot {_status_dot_class(cfg.get('status', ''))}'></span>" +
@@ -5101,6 +5108,18 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
       refreshBrokerMetrics();
       setInterval(tickHeaderClock, 1000);
       setInterval(refreshBrokerMetrics, 15000);
+      // Auto-refresh admin page (settings: WEBHOOK_ROUTER_UI_AUTOREFRESH_SECONDS, 0=off).
+      // Skip while dirty rows, focused inputs, or open book modal — don't lose edits.
+      const autoRefreshSec = {int(ui_autorefresh_sec)};
+      if (autoRefreshSec > 0) {{
+        setInterval(function() {{
+          if (document.querySelector('.row-dirty')) return;
+          if (document.querySelector('.book-modal.open')) return;
+          const ae = document.activeElement;
+          if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return;
+          location.reload();
+        }}, autoRefreshSec * 1000);
+      }}
     }});
   </script>
 </head>
@@ -5114,6 +5133,7 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             <h1>Webhook Router Admin</h1>
             <div class='muted'>Компактный режим: строка = тикер, колонка = брокер, внутри on + symbol + qty.</div>
             <div class='muted'>Текущее время: <span id='current-time'>{current_time}</span></div>
+            <div class='muted'>Авто-refresh: {'выкл' if ui_autorefresh_sec <= 0 else f'{ui_autorefresh_sec}с'}</div>
             <div class='muted'>build {html.escape(_build_summary().get('version','unknown'))} / server.py {html.escape(_build_summary().get('serverHash',''))}</div>
             <div id='flash-status' class='flash-status'></div>
           </div>
