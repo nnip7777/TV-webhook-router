@@ -1146,10 +1146,10 @@ def _render_settings_page(saved: bool = False, error: str = '', message: str = '
     webhook_url = (env_values.get('WEBHOOK_ROUTER_PUBLIC_BASE_URL') or f'http://{env_values.get("WEBHOOK_ROUTER_HOST","127.0.0.1")}:{env_values.get("WEBHOOK_ROUTER_PORT","8787")}').rstrip('/') + '/webhook'
     webhook_examples = [
         ('1) адрес hook сервера', webhook_url),
-        ('2) 2long + w_tal (множитель окна)', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2long",\n  "w_tal": 2.5\n}'),
-        ('3) 2short + w_tal', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2short",\n  "w_tal": 1\n}'),
-        ('4) старый режим: buy', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "buy",\n  "w_tal": 1\n}'),
-        ('5) старый режим: sell', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "sell",\n  "w_tal": 1\n}'),
+        ('2) 2long: tal + w_tal множители от tStep', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2long",\n  "tal": 1,\n  "w_tal": 2.5\n}'),
+        ('3) 2short', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "2short",\n  "tal": 1,\n  "w_tal": 1\n}'),
+        ('4) buy', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "buy",\n  "tal": 1,\n  "w_tal": 1\n}'),
+        ('5) sell', '{\n  "sourceTicker": "SPYUSDT.P",\n  "side": "sell",\n  "tal": 1,\n  "w_tal": 1\n}'),
     ]
     webhook_examples_html = ''.join(
         f"<label class='settings-field'><span>{html.escape(label)}</span><textarea readonly onclick='this.select()' style='min-height:{'64px' if idx == 0 else '112px'}'>{html.escape(value)}</textarea></label>"
@@ -1449,7 +1449,7 @@ _SKIP_REASON_TEXT = {
     'smart_inc_same_hour': 'skip: уже был ордер по этому символу в текущем часе',
     'smart_inc_avg_in_range': 'skip: средняя цена уже в диапазоне tol',
     'avg_already_in_range': 'skip: средняя цена уже в диапазоне tal',
-    'avg_within_window': 'skip: gap внутри окна w_tal×tal — avg_tol не подтягиваем',
+    'avg_within_window': 'skip: gap внутри окна w_tal×tStep — avg_tol не подтягиваем',
     'smart_inc_need_below_min': 'skip: объём add меньше минимума биржи',
     'smart_inc_need_below_min_qty': 'skip: объём add меньше minQty',
     'need_below_min_qty': 'skip: объём add меньше minQty',
@@ -2274,27 +2274,49 @@ def match_route(payload: Dict[str, Any], config: Dict[str, Any]):
 
 
 def _persist_cell_w_tal(config: Dict[str, Any], route: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    """Save webhook `w_tal` into cell field Wind_tal (informational display only)."""
-    raw = payload.get('w_tal')
-    if raw in (None, ''):
-        return
+    """Save webhook `tal` / `w_tal` multipliers onto the cell (informational display only)."""
+    tal_raw = payload.get('tal')
+    w_raw = payload.get('w_tal')
+    tal_val = None
+    w_val = None
     try:
-        val = float(str(raw).replace('%', '').strip())
+        if tal_raw not in (None, ''):
+            tal_val = float(str(tal_raw).replace('%', '').strip())
+            if tal_val <= 0:
+                tal_val = None
     except Exception:
-        return
-    if val <= 0:
+        tal_val = None
+    try:
+        if w_raw not in (None, ''):
+            w_val = float(str(w_raw).replace('%', '').strip())
+            if w_val <= 0:
+                w_val = None
+    except Exception:
+        w_val = None
+    if tal_val is None and w_val is None:
         return
     changed = False
     for dest in (route.get('destinations') or []):
         if str(dest.get('broker') or '').lower() not in ('bingx', 'bybit'):
             continue
-        try:
-            cur = float(str(dest.get('Wind_tal') or '') or '0')
-        except Exception:
-            cur = 0.0
-        if cur != val:
-            dest['Wind_tal'] = val
-            changed = True
+        if tal_val is not None:
+            try:
+                cur_t = float(str(dest.get('tal') or '') or '0')
+            except Exception:
+                cur_t = 0.0
+            if cur_t != tal_val:
+                dest['tal'] = tal_val
+                changed = True
+        if w_val is not None:
+            try:
+                cur_w = float(str(dest.get('w_tal') or dest.get('Wind_tal') or '') or '0')
+            except Exception:
+                cur_w = 0.0
+            if cur_w != w_val:
+                dest['w_tal'] = w_val
+                # Legacy key for older UI snapshots
+                dest['Wind_tal'] = w_val
+                changed = True
     if changed:
         try:
             save_config(config)
@@ -2461,9 +2483,12 @@ def materialize_route(payload: Dict[str, Any], route: Dict[str, Any], config: Di
         elif payload_target_mode and str(rendered.get('signalMode') or '').strip().lower() == 'step-side':
             rendered['signalMode'] = 'target-direction'
         rendered['qty'] = _resolve_qty(payload, rendered)
-        # Informational: surface webhook w_tal on the materialized dest (journal/smartInc).
+        # Informational: surface webhook tal/w_tal on the materialized dest (journal/smartInc).
         if payload.get('w_tal') not in (None, ''):
+            rendered['w_tal'] = payload.get('w_tal')
             rendered['Wind_tal'] = payload.get('w_tal')
+        if payload.get('tal') not in (None, ''):
+            rendered['tal'] = payload.get('tal')
         default_qty_kind = 'usdt' if (payload_target_mode or str(rendered.get('signalMode') or payload.get('signalMode') or '').strip().lower() == 'target-direction') else 'contracts'
         rendered['qtyKind'] = str(rendered.get('qtyKind') or payload.get('qtyKind') or payload.get('sizeKind') or default_qty_kind).strip().lower()
         if (payload_target_mode or str(rendered.get('signalMode') or '').strip().lower() == 'target-direction') and not rendered.get('openQtyKind'):
@@ -2623,7 +2648,10 @@ def _current_mapping(config: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, An
                     'riskPct': destination.get('riskPct', ''),
                     'smartInc': bool(destination.get('smartInc')),
                     'smartIncTol': destination.get('smartIncTol', ''),
-                    'Wind_tal': destination.get('Wind_tal', ''),
+                    'tStep': destination.get('tStep', ''),
+                    'tal': destination.get('tal', ''),
+                    'w_tal': destination.get('w_tal', destination.get('Wind_tal', '')),
+                    'Wind_tal': destination.get('Wind_tal', destination.get('w_tal', '')),
                     'smartIncTf': destination.get('smartIncTf', '60'),
                     'cross': bool(destination.get('cross')),
                     'limits': copy.deepcopy(destination.get('limits', {})),
@@ -2750,15 +2778,25 @@ def _build_destination_for_broker(config: Dict[str, Any], broker_name: str, tick
                     destination['smartIncTol'] = tol_val
             except Exception:
                 pass
-        # Cell Wind_tal is informational (last webhook w_tal). Gate uses payload.w_tal × tal.
-        wind_raw = str(options.get('Wind_tal', '')).strip().replace('%', '')
-        if wind_raw:
+        # tStep: absolute base for hook tal/w_tal multipliers (preferred over smartIncTol).
+        tstep_raw = str(options.get('tStep', '')).strip().replace('%', '')
+        if tstep_raw:
             try:
-                wind_val = float(wind_raw)
-                if wind_val > 0:
-                    destination['Wind_tal'] = wind_val
+                tstep_val = float(tstep_raw)
+                if tstep_val > 0:
+                    destination['tStep'] = tstep_val
             except Exception:
                 pass
+        # Informational last multipliers from hook (not used as gate source).
+        for _info_key in ('tal', 'w_tal', 'Wind_tal'):
+            _raw = str(options.get(_info_key, '')).strip().replace('%', '')
+            if _raw:
+                try:
+                    _v = float(_raw)
+                    if _v > 0:
+                        destination[_info_key] = _v
+                except Exception:
+                    pass
         # Per-cell TF for smart-inc bars (minutes: 1,5,8,10,15,20,60,280,1440).
         tf_raw = str(options.get('smartIncTf', '')).strip()
         if tf_raw:
@@ -4173,8 +4211,14 @@ def _merge_previous_broker_options(previous_route: Dict[str, Any], broker_option
             bucket['smartInc'] = bool(destination.get('smartInc'))
         if 'smartIncTol' not in bucket:
             bucket['smartIncTol'] = destination.get('smartIncTol', '')
+        if 'tStep' not in bucket:
+            bucket['tStep'] = destination.get('tStep', '')
+        if 'tal' not in bucket:
+            bucket['tal'] = destination.get('tal', '')
+        if 'w_tal' not in bucket:
+            bucket['w_tal'] = destination.get('w_tal', destination.get('Wind_tal', ''))
         if 'Wind_tal' not in bucket:
-            bucket['Wind_tal'] = destination.get('Wind_tal', '')
+            bucket['Wind_tal'] = destination.get('Wind_tal', destination.get('w_tal', ''))
         if 'smartIncTf' not in bucket:
             bucket['smartIncTf'] = destination.get('smartIncTf', '60')
         if 'cross' not in bucket:
@@ -4383,19 +4427,22 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             if limit_parts:
                 margin_hint = ((margin_hint + ' · ') if margin_hint else '') + ', '.join(limit_parts)
             smart_inc_checked = 'checked' if current.get('smartInc') else ''
-            smart_inc_tol_value = html.escape(str(current.get('smartIncTol') or ''))
-            smart_inc_wind_value = html.escape(str(current.get('Wind_tal') or ''))
+            # tStep = active base; tal/w_tal = informational last hook multipliers.
+            tstep_value = html.escape(str(current.get('tStep') or current.get('smartIncTol') or ''))
+            tal_info_value = html.escape(str(current.get('tal') or ''))
+            wind_info_value = html.escape(str(current.get('w_tal') or current.get('Wind_tal') or ''))
             smart_inc_tf_value = str(current.get('smartIncTf') or '60')
             # Compact inputs: flex override of .quick-qty so pairs fit 180px.
             _px_in = "autocomplete='off' class='mini-input' type='text' style='flex:1 1 40px; min-width:40px; width:auto; margin:0; padding:4px 4px; text-align:center; font-size:12px;'"
+            _px_ro = "autocomplete='off' class='mini-input' type='text' readonly tabindex='-1' style='flex:1 1 32px; min-width:32px; width:auto; margin:0; padding:4px 3px; text-align:center; font-size:11px; background:#111827; color:#9ca3af;'"
             if broker_name in ('bingx', 'bybit'):
                 risk_line = (
                     f"<div class='quick-line' style='padding-left:8px;'>"
                     f"<span class='muted' style='flex:0 0 auto;'>risk</span>"
                     f"<input {_px_in} name='riskPct|{html.escape(ticker)}|{html.escape(broker_name)}' value='{risk_value}' placeholder='%'>"
                     f"<span class='muted' style='flex:0 0 auto;'>%</span>"
-                    f"<span class='muted' style='flex:0 0 auto; margin-left:4px;'>tal</span>"
-                    f"<input {_px_in} name='smartIncTol|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_tol_value}' placeholder='—'>"
+                    f"<span class='muted' style='flex:0 0 auto; margin-left:4px;'>tStep</span>"
+                    f"<input {_px_in} name='tStep|{html.escape(ticker)}|{html.escape(broker_name)}' value='{tstep_value}' placeholder='—'>"
                     f"</div>"
                 )
             else:
@@ -4405,14 +4452,16 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
                 f"<option value='{v}'{' selected' if str(v) == smart_inc_tf_value else ''}>{lab}</option>"
                 for v, lab in _tf_opts
             )
-            # Row2: smart-inc + TF + w_tal (last webhook multiplier — informational, readonly).
+            # Row2: smart-inc + TF + tal/w_tal info (narrow readonly).
             smart_inc_line = (
                 f"<div class='quick-line' style='padding-left:8px;'>"
                 f"<label class='checkline-inline'><input type='checkbox' name='smartInc|{html.escape(ticker)}|{html.escape(broker_name)}' {smart_inc_checked}><span class='muted'>smart-inc</span></label>"
-                f"<span class='muted' style='flex:0 0 auto;'>×бары</span>"
-                f"<select name='smartIncTf|{html.escape(ticker)}|{html.escape(broker_name)}' class='mini-input quick-qty' style='width:58px; flex:0 0 58px;'>{_tf_select}</select>"
-                f"<span class='muted' style='flex:0 0 auto; margin-left:2px;'>w_tal</span>"
-                f"<input {_px_in} name='Wind_tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{smart_inc_wind_value}' placeholder='—' readonly tabindex='-1' style='flex:1 1 40px; min-width:40px; width:auto; margin:0; padding:4px 4px; text-align:center; font-size:12px; background:#111827; color:#9ca3af;'>"
+                f"<span class='muted' style='flex:0 0 auto;'>×</span>"
+                f"<select name='smartIncTf|{html.escape(ticker)}|{html.escape(broker_name)}' class='mini-input quick-qty' style='width:52px; flex:0 0 52px;'>{_tf_select}</select>"
+                f"<span class='muted' style='flex:0 0 auto; margin-left:2px;'>tal</span>"
+                f"<input {_px_ro} name='tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{tal_info_value}' placeholder='—'>"
+                f"<span class='muted' style='flex:0 0 auto;'>w</span>"
+                f"<input {_px_ro} name='w_tal|{html.escape(ticker)}|{html.escape(broker_name)}' value='{wind_info_value}' placeholder='—'>"
                 f"</div>"
                 if broker_name in ('bingx', 'bybit') else ''
             )
@@ -5141,12 +5190,15 @@ def _render_admin_ui(config: Dict[str, Any], observed: Dict[str, Any], user: Dic
             const cell = row.querySelector(`[data-broker-cell="${{broker}}"]`);
             if (!cell) return;
             const payload = brokerMap[broker] || {{}};
-            // Wind_tal is readonly/info — always safe to patch when not focused.
+            // Informational multipliers — always safe to patch when not focused.
+            _patchInput(cell.querySelector('input[name^="tal|"]'), payload.tal);
+            _patchInput(cell.querySelector('input[name^="w_tal|"]'), payload.w_tal);
             _patchInput(cell.querySelector('input[name^="Wind_tal|"]'), payload.Wind_tal);
             // Editable fields: only if row is clean (not mid-edit).
             const dirty = row.classList.contains('row-dirty');
             if (dirty) return;
             _patchInput(cell.querySelector('input[name^="riskPct|"]'), payload.riskPct);
+            _patchInput(cell.querySelector('input[name^="tStep|"]'), payload.tStep);
             _patchInput(cell.querySelector('input[name^="smartIncTol|"]'), payload.smartIncTol);
             _patchInput(cell.querySelector('input[name^="symbol|"]'), payload.symbol);
             _patchInput(cell.querySelector('input[name^="venue|"]'), payload.venue);
@@ -5755,7 +5807,10 @@ class Handler(BaseHTTPRequestHandler):
                     if broker not in visible:
                         continue
                     cell_out[broker] = {
-                        'Wind_tal': payload.get('Wind_tal', ''),
+                        'Wind_tal': payload.get('w_tal', payload.get('Wind_tal', '')),
+                        'w_tal': payload.get('w_tal', payload.get('Wind_tal', '')),
+                        'tal': payload.get('tal', ''),
+                        'tStep': payload.get('tStep', ''),
                         'smartIncTol': payload.get('smartIncTol', ''),
                         'smartIncTf': payload.get('smartIncTf', '60'),
                         'smartInc': bool(payload.get('smartInc')),
@@ -6061,6 +6116,9 @@ class Handler(BaseHTTPRequestHandler):
                     'riskPct': '',
                     'smartInc': False,
                     'smartIncTol': '',
+                    'tStep': '',
+                    'tal': '',
+                    'w_tal': '',
                     'Wind_tal': '',
                     'smartIncTf': '60',
                     'cross': False,
@@ -6082,8 +6140,16 @@ class Handler(BaseHTTPRequestHandler):
                     bucket['smartInc'] = True
                 elif field == 'smartIncTol':
                     bucket['smartIncTol'] = form.get(key, [''])[0]
+                elif field == 'tStep':
+                    bucket['tStep'] = form.get(key, [''])[0]
+                elif field == 'tal':
+                    bucket['tal'] = form.get(key, [''])[0]
+                elif field == 'w_tal':
+                    bucket['w_tal'] = form.get(key, [''])[0]
+                    bucket['Wind_tal'] = form.get(key, [''])[0]
                 elif field == 'Wind_tal':
                     bucket['Wind_tal'] = form.get(key, [''])[0]
+                    bucket['w_tal'] = form.get(key, [''])[0]
                 elif field == 'smartIncTf':
                     bucket['smartIncTf'] = form.get(key, [''])[0]
                 elif field == 'cross':
@@ -6445,8 +6511,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return self._json(400, {'error': 'invalid_json', 'details': str(e)})
 
-        # TV payload: w_tal (multiplier) replaces legacy qty flag (was always 1).
-        missing = [k for k in ['sourceTicker', 'side', 'w_tal'] if k not in payload]
+        # TV payload: tal + w_tal multipliers (replace legacy qty flag).
+        missing = [k for k in ['sourceTicker', 'side', 'tal', 'w_tal'] if k not in payload]
         if missing:
             append_journal({
                 'time': _utcnow_iso(),
@@ -6496,7 +6562,7 @@ class Handler(BaseHTTPRequestHandler):
             # journal/admin still record route_not_found — accept with 202.
             return self._json(202, {'error': 'route_not_found', 'message': 'Ticker observed and added to admin UI'})
 
-        # Informational: persist last webhook w_tal multiplier onto the cell (UI display).
+        # Informational: persist last webhook tal/w_tal multipliers onto the cell.
         _persist_cell_w_tal(config, route, payload)
         materialized = materialize_route(payload, route, config)
         decision = _enqueue_webhook_job(payload, materialized, config.get('defaultExecution', {}))

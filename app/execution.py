@@ -81,12 +81,7 @@ def should_keep_opposite_on_cross(unrealised_pnl) -> bool:
         return False
 
 
-def smart_inc_avg_tol(destination: Dict[str, Any]) -> float | None:
-    """Price tolerance (absolute) for smart-inc add-to-position, from routing cell.
-
-    Empty/missing → None = avg-add mode off (keep hours multiplier).
-    """
-    raw = destination.get('smartIncTol')
+def _parse_positive_float(raw: Any) -> float | None:
     if raw in (None, ''):
         return None
     try:
@@ -94,40 +89,58 @@ def smart_inc_avg_tol(destination: Dict[str, Any]) -> float | None:
     except Exception:
         return None
     return v if v > 0 else None
+
+
+def smart_inc_t_step(destination: Dict[str, Any]) -> float | None:
+    """Cell base tStep (absolute price step) for tal/w_tal multipliers.
+
+    Falls back to legacy smartIncTol when tStep is empty (migration).
+    Empty → None = avg_tol mode off.
+    """
+    v = _parse_positive_float((destination or {}).get('tStep'))
+    if v is not None:
+        return v
+    return _parse_positive_float((destination or {}).get('smartIncTol'))
+
+
+def smart_inc_avg_tol(destination: Dict[str, Any]) -> float | None:
+    """Legacy alias: cell base (tStep / smartIncTol). Prefer smart_inc_t_step."""
+    return smart_inc_t_step(destination)
+
+
+def smart_inc_hook_mult(payload: Dict[str, Any] | None, key: str) -> float | None:
+    """Webhook multiplier field (`tal` or `w_tal`)."""
+    return _parse_positive_float((payload or {}).get(key))
+
+
+def smart_inc_effective_tal(t_step: float | None, payload: Dict[str, Any] | None) -> float | None:
+    """tal_eff = hook.tal × cell.tStep. None = no base or no multiplier."""
+    if t_step is None or t_step <= 0:
+        return None
+    mult = smart_inc_hook_mult(payload, 'tal')
+    if mult is None:
+        return None
+    return mult * t_step
+
+
+def smart_inc_effective_window(t_step: float | None, payload: Dict[str, Any] | None) -> float | None:
+    """wind = hook.w_tal × cell.tStep (each from base). None = gate off."""
+    if t_step is None or t_step <= 0:
+        return None
+    mult = smart_inc_hook_mult(payload, 'w_tal')
+    if mult is None:
+        return None
+    return mult * t_step
 
 
 def smart_inc_wind_tal(destination: Dict[str, Any]) -> float | None:
     """Informational last webhook w_tal multiplier stored on the cell (not the gate)."""
-    raw = destination.get('Wind_tal')
-    if raw in (None, ''):
-        return None
-    try:
-        v = float(str(raw).replace('%', '').strip())
-    except Exception:
-        return None
-    return v if v > 0 else None
+    return _parse_positive_float((destination or {}).get('w_tal') if (destination or {}).get('w_tal') not in (None, '') else (destination or {}).get('Wind_tal'))
 
 
 def smart_inc_wind_multiplier(payload: Dict[str, Any] | None) -> float | None:
-    """Webhook field `w_tal` — multiplier for tal (always sent by TV now)."""
-    raw = (payload or {}).get('w_tal')
-    if raw in (None, ''):
-        return None
-    try:
-        v = float(str(raw).replace('%', '').strip())
-    except Exception:
-        return None
-    return v if v > 0 else None
-
-
-def smart_inc_effective_window(tal: float | None, payload: Dict[str, Any] | None) -> float | None:
-    """wind_tal = w_tal (webhook) × tal (cell). None = gate off."""
-    if tal is None or tal <= 0:
-        return None
-    mult = smart_inc_wind_multiplier(payload)
-    if mult is None:
-        return None
-    return mult * tal
+    """Webhook field `w_tal` — multiplier for window (from tStep)."""
+    return smart_inc_hook_mult(payload, 'w_tal')
 
 
 def smart_inc_avg_tol_allowed(avg_price: float, mark_price: float, wind: float | None) -> bool:
@@ -611,32 +624,42 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             avg_handled = False
             if add_mode and pos_qty > 0 and smart_inc_tol is not None:
-                _w_mult = smart_inc_wind_multiplier(payload)
-                _wind = smart_inc_effective_window(smart_inc_tol, payload)
+                _t_step = smart_inc_tol
+                _t_mult = smart_inc_hook_mult(payload, 'tal')
+                _w_mult = smart_inc_hook_mult(payload, 'w_tal')
+                _eff_tal = smart_inc_effective_tal(_t_step, payload)
+                _wind = smart_inc_effective_window(_t_step, payload)
                 _mark = pos_mark or pos_avg
                 if not smart_inc_avg_tol_allowed(pos_avg, _mark, _wind):
-                    # Inside w_tal×tal window: no avg_tol; base/hours path unchanged.
+                    # Inside w_tal×tStep window: no avg_tol; base/hours path unchanged.
                     if smart_inc_applied is None:
                         smart_inc_applied = {}
                     smart_inc_applied.update({
+                        'tStep': _t_step,
+                        'talMult': _t_mult,
                         'windMult': _w_mult,
                         'windTal': _wind,
                         'windGap': round(abs(pos_avg - _mark), 10),
                         'windGate': 'within_window',
-                        'tol': smart_inc_tol,
+                        'tol': _eff_tal,
                         'posQty': pos_qty,
                         'avgPrice': pos_avg,
                         'markPrice': pos_mark,
                     })
+                elif _eff_tal is None:
+                    # No hook tal multiplier → no avg sizing this signal; hours path.
+                    add_mode = False
                 else:
-                    need = smart_inc_required_add_qty(pos_qty, pos_avg, _mark, target_direction, smart_inc_tol)
+                    need = smart_inc_required_add_qty(pos_qty, pos_avg, _mark, target_direction, _eff_tal)
                     if need is not None and need <= 1e-12:
                         # In tol range: same-hour → skip; otherwise hours growth.
                         if same_bar:
                             smart_inc_skip = True
                             smart_inc_applied = {
                                 'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
+                                'tol': _eff_tal,
+                                'tStep': _t_step,
+                                'talMult': _t_mult,
                                 'posQty': pos_qty,
                                 'avgPrice': pos_avg,
                                 'markPrice': pos_mark,
@@ -676,7 +699,9 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             smart_inc_skip = True
                             smart_inc_applied = {
                                 'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
+                                'tol': _eff_tal,
+                                'tStep': _t_step,
+                                'talMult': _t_mult,
                                 'posQty': pos_qty,
                                 'avgPrice': pos_avg,
                                 'markPrice': pos_mark,
@@ -688,7 +713,9 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             smart_inc_skip = True
                             smart_inc_applied = {
                                 'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
+                                'tol': _eff_tal,
+                                'tStep': _t_step,
+                                'talMult': _t_mult,
                                 'posQty': pos_qty,
                                 'avgPrice': pos_avg,
                                 'markPrice': pos_mark,
@@ -700,7 +727,9 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             quantity = need  # contracts — Bybit wire unit (already step-snapped)
                             smart_inc_applied = {
                                 'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
+                                'tol': _eff_tal,
+                                'tStep': _t_step,
+                                'talMult': _t_mult,
                                 'posQty': pos_qty,
                                 'avgPrice': pos_avg,
                                 'markPrice': pos_mark,
@@ -2147,32 +2176,42 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     add_mode = False
             avg_handled = False
             if add_mode and pos_qty > 0 and smart_inc_tol is not None:
-                _w_mult = smart_inc_wind_multiplier(payload)
-                _wind = smart_inc_effective_window(smart_inc_tol, payload)
+                _t_step = smart_inc_tol
+                _t_mult = smart_inc_hook_mult(payload, 'tal')
+                _w_mult = smart_inc_hook_mult(payload, 'w_tal')
+                _eff_tal = smart_inc_effective_tal(_t_step, payload)
+                _wind = smart_inc_effective_window(_t_step, payload)
                 _mark = pos_mark or pos_avg
                 if not smart_inc_avg_tol_allowed(pos_avg, _mark, _wind):
-                    # Inside w_tal×tal window: no avg_tol; base/hours path unchanged.
+                    # Inside w_tal×tStep window: no avg_tol; base/hours path unchanged.
                     if smart_inc_applied is None:
                         smart_inc_applied = {}
                     smart_inc_applied.update({
+                        'tStep': _t_step,
+                        'talMult': _t_mult,
                         'windMult': _w_mult,
                         'windTal': _wind,
                         'windGap': round(abs(pos_avg - _mark), 10),
                         'windGate': 'within_window',
-                        'tol': smart_inc_tol,
+                        'tol': _eff_tal,
                         'posQty': pos_qty,
                         'avgPrice': pos_avg,
                         'markPrice': pos_mark,
                     })
+                elif _eff_tal is None:
+                    # No hook tal multiplier → no avg sizing this signal; hours path.
+                    add_mode = False
                 else:
-                    need = smart_inc_required_add_qty(pos_qty, pos_avg, _mark, target_direction, smart_inc_tol)
+                    need = smart_inc_required_add_qty(pos_qty, pos_avg, _mark, target_direction, _eff_tal)
                     if need is not None and need <= 1e-12:
                         # In tol range: same-hour → skip; otherwise hours growth.
                         if same_bar:
                             smart_inc_skip = True
                             smart_inc_applied = {
                                 'mode': 'avg_tol',
-                                'tol': smart_inc_tol,
+                                'tol': _eff_tal,
+                                'tStep': _t_step,
+                                'talMult': _t_mult,
                                 'posQty': pos_qty,
                                 'avgPrice': pos_avg,
                                 'markPrice': pos_mark,
@@ -2186,7 +2225,7 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         # Outside tol → catch up (works even same-hour).
                         avg_handled = True
                         # Open/add is placed in USDT — compute notional directly, no contract qty on the wire.
-                        need_usdt = smart_inc_required_add_usdt(pos_qty, pos_avg, _mark, target_direction, smart_inc_tol)
+                        need_usdt = smart_inc_required_add_usdt(pos_qty, pos_avg, _mark, target_direction, _eff_tal)
                         if need_usdt is None:
                             add_mode = False
                             avg_handled = False
@@ -2211,7 +2250,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 smart_inc_skip = True
                                 smart_inc_applied = {
                                     'mode': 'avg_tol',
-                                    'tol': smart_inc_tol,
+                                    'tol': _eff_tal,
+                                    'tStep': _t_step,
+                                    'talMult': _t_mult,
                                     'posQty': pos_qty,
                                     'avgPrice': pos_avg,
                                     'markPrice': pos_mark,
@@ -2223,7 +2264,9 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 quantity = need_usdt
                                 smart_inc_applied = {
                                     'mode': 'avg_tol',
-                                    'tol': smart_inc_tol,
+                                    'tol': _eff_tal,
+                                    'tStep': _t_step,
+                                    'talMult': _t_mult,
                                     'posQty': pos_qty,
                                     'avgPrice': pos_avg,
                                     'markPrice': pos_mark,
