@@ -59,9 +59,15 @@ class FlipCloseNetPnlTest(unittest.TestCase):
         self._saved = {}
         for k in ('BINGX_FLIP_FEE_RATE_PCT', 'BYBIT_FLIP_FEE_RATE_PCT', 'FLIP_FEE_RATE_PCT'):
             self._saved[k] = os.environ.pop(k, None)
-        from execution import _FEE_RATE_CACHE
-        self._cache_backup = dict(_FEE_RATE_CACHE)
-        _FEE_RATE_CACHE.clear()
+        import execution as ex
+        self._cache_backup = dict(ex._FEE_RATE_CACHE)
+        self._path_backup = ex.FEE_RATE_PATH
+        ex._FEE_RATE_CACHE.clear()
+        # Isolate disk store so tests never read/write production fee_rates.json
+        self._tmp_fee = Path(ROOT) / 'data' / 'fee_rates_test_tmp.json'
+        if self._tmp_fee.exists():
+            self._tmp_fee.unlink()
+        ex.FEE_RATE_PATH = self._tmp_fee
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -69,9 +75,15 @@ class FlipCloseNetPnlTest(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        from execution import _FEE_RATE_CACHE
-        _FEE_RATE_CACHE.clear()
-        _FEE_RATE_CACHE.update(self._cache_backup)
+        import execution as ex
+        ex._FEE_RATE_CACHE.clear()
+        ex._FEE_RATE_CACHE.update(self._cache_backup)
+        ex.FEE_RATE_PATH = self._path_backup
+        if self._tmp_fee.exists():
+            try:
+                self._tmp_fee.unlink()
+            except Exception:
+                pass
 
     def test_settings_fallback_when_exchange_unavailable(self):
         os.environ['BINGX_FLIP_FEE_RATE_PCT'] = '0.1'

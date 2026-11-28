@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import math
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_UP
+from pathlib import Path
 from typing import Any, Dict, List
 from dataclasses import dataclass, field
 
@@ -75,9 +77,33 @@ def smart_inc_multiplier(bars: float | None, broker: str = 'bingx') -> int:
     return min(smart_inc_max_multiplier(broker), max(0, int(bars)))
 
 
-# Exchange taker fee cache: key → {'rate_pct': float, 'at': float}. TTL 60s.
+# Exchange taker fee store: memory + data/fee_rates.json.
+# Refresh at most once per day — commissions do not change on every flip.
 _FEE_RATE_CACHE: Dict[str, Dict[str, Any]] = {}
-_FEE_RATE_TTL_SEC = 60.0
+_FEE_RATE_TTL_SEC = 24 * 60 * 60.0  # 24h
+FEE_RATE_PATH = Path(__file__).resolve().parents[1] / 'data' / 'fee_rates.json'
+
+
+def _fee_rate_load_file() -> None:
+    """Hydrate memory cache from disk (survives restart)."""
+    try:
+        if not FEE_RATE_PATH.exists():
+            return
+        raw = json.loads(FEE_RATE_PATH.read_text() or '{}')
+        if isinstance(raw, dict):
+            for key, val in raw.items():
+                if isinstance(val, dict) and val.get('rate_pct') is not None:
+                    _FEE_RATE_CACHE[str(key)] = val
+    except Exception:
+        pass
+
+
+def _fee_rate_save_file() -> None:
+    try:
+        FEE_RATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        FEE_RATE_PATH.write_text(json.dumps(_FEE_RATE_CACHE, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
 
 
 def _parse_taker_rate_pct(broker: str, payload: Any, symbol: str = '') -> float | None:
@@ -120,12 +146,17 @@ def _parse_taker_rate_pct(broker: str, payload: Any, symbol: str = '') -> float 
 
 
 def fetch_taker_fee_rate_pct(broker: str, symbol: str = '', client: Any = None) -> tuple[float, str]:
-    """Live taker fee rate (%) from exchange; fallback Settings FLIP_FEE_RATE_PCT.
+    """Taker fee rate (%) for close: exchange once/day, disk-persisted; else Settings.
 
-    Close is taker (join the book). Cached 60s. Returns (rate_pct, source).
+    Close is taker (join the book). Cached in memory + data/fee_rates.json for 24h
+    so flips do not pay an extra RTT. Returns (rate_pct, source).
     """
     broker = str(broker or '').strip().lower()
+    if not broker:
+        return flip_close_fee_rate_pct(broker), 'settings'
     cache_key = f'{broker}:{str(symbol or "").upper()}' if broker == 'bybit' else broker
+    if not _FEE_RATE_CACHE:
+        _fee_rate_load_file()
     now = time.time()
     hit = _FEE_RATE_CACHE.get(cache_key)
     if hit and (now - float(hit.get('at') or 0)) < _FEE_RATE_TTL_SEC:
@@ -139,18 +170,67 @@ def fetch_taker_fee_rate_pct(broker: str, symbol: str = '', client: Any = None) 
             rate_pct = _parse_taker_rate_pct('bingx', payload, symbol)
         elif broker == 'bybit':
             cli = client if hasattr(client, 'get_fee_rate') else BybitBroker()
-            category = 'linear'
-            payload = cli.get_fee_rate(category=category, symbol=symbol)
+            payload = cli.get_fee_rate(category='linear', symbol=symbol)
             rate_pct = _parse_taker_rate_pct('bybit', payload, symbol)
     except Exception:
         rate_pct = None
 
     if rate_pct is not None and rate_pct >= 0:
-        _FEE_RATE_CACHE[cache_key] = {'rate_pct': rate_pct, 'source': 'exchange', 'at': now}
+        _FEE_RATE_CACHE[cache_key] = {
+            'rate_pct': rate_pct,
+            'source': 'exchange',
+            'at': now,
+            'symbol': str(symbol or ''),
+        }
+        _fee_rate_save_file()
         return rate_pct, 'exchange'
 
-    fallback = flip_close_fee_rate_pct(broker) if broker else 0.05
+    # API failed: use last known value if any (even slightly stale), else settings.
+    if hit and hit.get('rate_pct') is not None:
+        return float(hit.get('rate_pct') or 0.0), str(hit.get('source') or 'exchange')
+    fallback = flip_close_fee_rate_pct(broker)
     return fallback, 'settings'
+
+
+def refresh_taker_fee_rates(symbols: Any = None) -> Dict[str, Any]:
+    """Force-fetch taker fee rates now (server start / manual refresh).
+
+    Clears the in-memory cache first so we do not reuse a 24h-old value after
+    restart. Persists to data/fee_rates.json. symbols: optional iterable of
+    Bybit symbols (BingX is account-wide). Returns {broker: {rate_pct, source}}.
+    """
+    _FEE_RATE_CACHE.clear()
+    _fee_rate_load_file()
+    # Drop 'at' so the next fetch is forced even if file was just loaded.
+    for key in list(_FEE_RATE_CACHE.keys()):
+        _FEE_RATE_CACHE[key]['at'] = 0.0
+
+    results: Dict[str, Any] = {}
+    try:
+        rate, source = fetch_taker_fee_rate_pct('bingx')
+        results['bingx'] = {'rate_pct': rate, 'source': source}
+    except Exception as e:
+        results['bingx'] = {'error': str(e)}
+
+    bybit_symbols: List[str] = []
+    if symbols:
+        for s in symbols:
+            su = str(s or '').strip().upper()
+            if su and su not in bybit_symbols:
+                bybit_symbols.append(su)
+    # Account-level first (no symbol), then per-symbol overrides.
+    try:
+        rate, source = fetch_taker_fee_rate_pct('bybit', symbol='')
+        results['bybit'] = {'rate_pct': rate, 'source': source}
+    except Exception as e:
+        results['bybit'] = {'error': str(e)}
+    for su in bybit_symbols:
+        try:
+            rate, source = fetch_taker_fee_rate_pct('bybit', symbol=su)
+            results[f'bybit:{su}'] = {'rate_pct': rate, 'source': source}
+        except Exception as e:
+            results[f'bybit:{su}'] = {'error': str(e)}
+    return results
 
 
 def flip_close_fee_rate_pct(broker: str) -> float:

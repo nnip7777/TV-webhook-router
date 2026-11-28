@@ -1,3 +1,6 @@
+## 2026.11.21-011
+- **Taker fee store:** refresh on **server start** (background, journal `fee_rates_refresh`) + reuse for **24h**; persisted `data/fee_rates.json`. No RTT per flip. Fallback Settings only if exchange API fails and no last value.
+
 ## 2026.11.21-010
 - **Flip close fee = live exchange taker rate:** BingX `commissionRate.takerCommissionRate`, Bybit `GET /v5/account/fee-rate` → `takerFeeRate` (decimal → %). Cached **60s**. Close is taker (join book). Fallback Settings `BINGX_/BYBIT_FLIP_FEE_RATE_PCT` only if API fails. Journal `feeSource=exchange|settings`. New Bybit `get_fee_rate()`.
 

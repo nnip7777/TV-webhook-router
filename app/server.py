@@ -34,6 +34,7 @@ from execution import (
     _bingx_position_qty,
     bingx_risk_pct_by_symbol,
     execute_route_sync,
+    refresh_taker_fee_rates,
     risk_sync_action,
     risk_sync_default_pct,
     risk_sync_growth_ratio,
@@ -219,14 +220,14 @@ SETTINGS_FIELDS = [
     {'key': 'BINGX_RISK_SYNC_INTERVAL_SECONDS', 'label': 'risk-sync интервал, сек (BingX)', 'section': 'bingx', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск BingX. Мин 10, без рестарта. Только BingX.'},
     {'key': 'BINGX_RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % без riskPct (BingX)', 'section': 'bingx', 'type': 'float', 'default': '12', 'help': 'Цель риска для позиций BingX без riskPct в ячейке. 0 = только ячейки с riskPct. Только BingX.'},
     {'key': 'BINGX_RISK_SYNC_WINDOW_PCT', 'label': 'risk-sync окно ±% (BingX)', 'section': 'bingx', 'type': 'float', 'default': '30', 'help': 'Живое окно вокруг цели: add при risk ≥ target×(1+окно/100), reduce при risk ≤ target×(1−окно/100). 30 → ≥26% / ≤14% при цели 20%. Применяется без рестарта. Только BingX.'},
-    {'key': 'BINGX_FLIP_FEE_RATE_PCT', 'label': 'flip close fee rate % fallback (BingX)', 'section': 'bingx', 'type': 'float', 'default': '0.05', 'help': 'Fallback taker-ставки закрытия в % от notional, если API биржи недоступно. Обычно WHR берёт живой takerFeeRate с биржи (кэш 60с). Только BingX.'},
+    {'key': 'BINGX_FLIP_FEE_RATE_PCT', 'label': 'flip close fee rate % fallback (BingX)', 'section': 'bingx', 'type': 'float', 'default': '0.05', 'help': 'Fallback taker-ставки закрытия в % от notional, если API биржи недоступно. WHR берёт takerFeeRate с биржи: при старте сервера + раз в 24ч (data/fee_rates.json). Только BingX.'},
     {'key': 'BYBIT_SMART_INC_MAX_MULTIPLIER', 'label': 'smart-inc max multiplier (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '36', 'help': 'Потолок множителя smart-inc для Bybit. Только Bybit; BingX — в своей секции.'},
     {'key': 'BYBIT_SMART_INC_RESTART_HOURS', 'label': 'smart-inc restart bars (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '36', 'help': 'Простой в барах ТФ ячейки Bybit, после ×1. Только Bybit.'},
     {'key': 'BYBIT_RISK_SYNC_ENABLED', 'label': 'risk-sync (Bybit)', 'section': 'bybit', 'type': 'bool', 'default': 'true', 'help': 'Подстраивать риск открытых позиций Bybit: ≥target×1.3 → add, ≤target×0.7 → reduce. Только Bybit.'},
     {'key': 'BYBIT_RISK_SYNC_INTERVAL_SECONDS', 'label': 'risk-sync интервал, сек (Bybit)', 'section': 'bybit', 'type': 'int', 'default': '90', 'help': 'Как часто проверять риск Bybit. Мин 10, без рестарта. Только Bybit.'},
     {'key': 'BYBIT_RISK_SYNC_DEFAULT_PCT', 'label': 'default risk % без riskPct (Bybit)', 'section': 'bybit', 'type': 'float', 'default': '12', 'help': 'Цель риска для позиций Bybit без riskPct в ячейке. 0 = только ячейки с riskPct. Только Bybit.'},
     {'key': 'BYBIT_RISK_SYNC_WINDOW_PCT', 'label': 'risk-sync окно ±% (Bybit)', 'section': 'bybit', 'type': 'float', 'default': '30', 'help': 'Живое окно вокруг цели: add при risk ≥ target×(1+окно/100), reduce при risk ≤ target×(1−окно/100). 30 → ≥26% / ≤14% при цели 20%. Применяется без рестарта. Только Bybit.'},
-    {'key': 'BYBIT_FLIP_FEE_RATE_PCT', 'label': 'flip close fee rate % fallback (Bybit)', 'section': 'bybit', 'type': 'float', 'default': '0.05', 'help': 'Fallback taker-ставки закрытия в % от notional, если API биржи недоступно. Обычно WHR берёт живой takerFeeRate с биржи (кэш 60с). Только Bybit.'},
+    {'key': 'BYBIT_FLIP_FEE_RATE_PCT', 'label': 'flip close fee rate % fallback (Bybit)', 'section': 'bybit', 'type': 'float', 'default': '0.05', 'help': 'Fallback taker-ставки закрытия в % от notional, если API биржи недоступно. WHR берёт takerFeeRate с биржи: при старте сервера + раз в 24ч (data/fee_rates.json). Только Bybit.'},
     {'key': 'ALOR_CONFIG_PATH', 'label': 'Alor config JSON path', 'section': 'alor', 'type': 'path'},
     {'key': 'ALOR_OAUTH_URL', 'label': 'Alor OAuth URL', 'section': 'alor', 'type': 'text'},
     {'key': 'ALOR_API_BASE_URL', 'label': 'Alor API base URL', 'section': 'alor', 'type': 'text'},
@@ -6577,6 +6578,43 @@ def main():
         analytics_init = init_analytics_db()
     except Exception as e:
         analytics_init = {'ok': False, 'path': str(ANALYTICS_DB_PATH), 'error': str(e)}
+    # Refresh taker fee rates from exchanges on every server start (async).
+    def _refresh_fees_bg():
+        try:
+            config = load_config()
+            symbols: List[str] = []
+            for route in config.get('routes') or []:
+                for dest in route.get('destinations') or []:
+                    if str(dest.get('broker') or '').lower() == 'bybit':
+                        sym = str(dest.get('symbol') or '').strip().upper()
+                        if sym and sym not in symbols:
+                            symbols.append(sym)
+            results = refresh_taker_fee_rates(symbols)
+            append_journal({
+                'time': _utcnow_iso(),
+                'kind': 'server-start',
+                'ticker': '',
+                'side': '',
+                'qty': '',
+                'brokers': ['bingx', 'bybit'],
+                'status': 'ok',
+                'details': 'fee_rates_refresh ' + json.dumps(results, ensure_ascii=False, default=str),
+            })
+        except Exception as e:
+            try:
+                append_journal({
+                    'time': _utcnow_iso(),
+                    'kind': 'server-start',
+                    'ticker': '',
+                    'side': '',
+                    'qty': '',
+                    'brokers': [],
+                    'status': 'error',
+                    'details': f'fee_rates_refresh_failed {e}',
+                })
+            except Exception:
+                pass
+    threading.Thread(target=_refresh_fees_bg, name='fee-rates-refresh', daemon=True).start()
     server = ThreadingHTTPServer((SERVER_HOST, SERVER_PORT), Handler)
     for idx in range(WEBHOOK_WORKER_COUNT):
         threading.Thread(target=_webhook_worker_loop, name=f'webhook-worker-{idx+1}', daemon=True).start()
