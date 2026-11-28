@@ -10,7 +10,12 @@ from decimal import Decimal, ROUND_UP
 from typing import Any, Dict, List
 from dataclasses import dataclass, field
 
-from analytics import bars_since_last_fill, hours_since_last_fill, sync_exchange_fills
+from analytics import (
+    bars_since_last_fill,
+    hours_since_last_fill,
+    open_lot_entry_fees,
+    sync_exchange_fills,
+)
 from bingx_adapter import BingXBroker
 from bybit_adapter import BybitBroker
 from finam_adapter import FinamBroker
@@ -70,13 +75,54 @@ def smart_inc_multiplier(bars: float | None, broker: str = 'bingx') -> int:
     return min(smart_inc_max_multiplier(broker), max(0, int(bars)))
 
 
-def should_keep_opposite_on_cross(unrealised_pnl) -> bool:
-    """True when opposite leg is in loss → keep it under cross flip mode.
+def flip_close_fee_rate_pct(broker: str) -> float:
+    """Expected close-fee rate (% of notional), live per-broker Settings."""
+    return max(0.0, env_float_per_broker('FLIP_FEE_RATE_PCT', broker, 0.05))
 
-    Profit or flat (0) → normal close→open. Unknown PnL fails toward close→open.
+
+def flip_close_net_pnl(
+    unrealised_pnl: Any,
+    entry_fees: Any = 0.0,
+    notional: Any = 0.0,
+    broker: str = '',
+) -> Dict[str, float]:
+    """Net PnL if we close now: upnl − entry fees already paid − est. exit fee.
+
+    BingX/Bybit charge open+close. Unrealised from exchange does not include
+    entry fees already paid; exit fee is estimated as notional × rate%.
     """
     try:
-        return float(unrealised_pnl or 0) < 0
+        upnl = float(unrealised_pnl or 0)
+    except (TypeError, ValueError):
+        upnl = 0.0
+    try:
+        entry = abs(float(entry_fees or 0))
+    except (TypeError, ValueError):
+        entry = 0.0
+    try:
+        notional_abs = abs(float(notional or 0))
+    except (TypeError, ValueError):
+        notional_abs = 0.0
+    rate_pct = flip_close_fee_rate_pct(broker) if broker else 0.05
+    exit_fee = notional_abs * rate_pct / 100.0
+    net = upnl - entry - exit_fee
+    return {
+        'upnl': upnl,
+        'entryFees': entry,
+        'exitFeeEst': exit_fee,
+        'feeRatePct': rate_pct,
+        'netPnl': net,
+    }
+
+
+def should_keep_opposite_on_cross(net_pnl) -> bool:
+    """True when opposite leg NET (after fees) is loss → keep under hedge flip.
+
+    Profit or flat (0) → normal close→open. Unknown/invalid fails toward close→open.
+    Pass flip_close_net_pnl()['netPnl'], not raw unrealised alone.
+    """
+    try:
+        return float(net_pnl or 0) < 0
     except (TypeError, ValueError):
         return False
 
@@ -936,6 +982,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                 short_idx = 0
                 long_upnl = 0.0
                 short_upnl = 0.0
+                long_notional = 0.0
+                short_notional = 0.0
                 observed_position_indexes = set()
                 for row in rows:
                     if not isinstance(row, dict):
@@ -956,14 +1004,25 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         row_upnl = float(row.get('unrealisedPnl') or 0)
                     except Exception:
                         row_upnl = 0.0
+                    row_mark = 0.0
+                    for _pk in ('markPrice', 'entryPrice'):
+                        try:
+                            row_mark = abs(float(row.get(_pk) or 0))
+                            if row_mark > 0:
+                                break
+                        except Exception:
+                            row_mark = 0.0
+                    row_notional = size * row_mark
                     if row_side == 'buy' and size > 0:
                         long_size += size
                         long_upnl += row_upnl
+                        long_notional += row_notional
                         if row_idx:
                             long_idx = row_idx
                     elif row_side == 'sell' and size > 0:
                         short_size += size
                         short_upnl += row_upnl
+                        short_notional += row_notional
                         if row_idx:
                             short_idx = row_idx
                 hedged_mode_detected = any(idx in (1, 2) for idx in observed_position_indexes)
@@ -974,34 +1033,50 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     'shortPositionIdx': short_idx,
                     'longUtpnl': long_upnl,
                     'shortUtpnl': short_upnl,
+                    'longNotional': long_notional,
+                    'shortNotional': short_notional,
                     'observedPositionIdxs': sorted(observed_position_indexes),
                     'positionMode': 'hedged' if hedged_mode_detected else 'one-way',
                 }
 
                 desired_side = 'buy' if target_direction == 'long' else 'sell'
                 opposite_upnl = 0.0
+                opposite_notional = 0.0
+                opposite_open_side = ''
                 if target_direction == 'long' and short_size > 0:
                     target_mode_close_then_open = True
                     close_qty = short_size
                     close_side = 'buy'
                     close_position_idx = (short_idx or 2) if hedged_mode_detected else None
                     opposite_upnl = short_upnl
+                    opposite_notional = short_notional
+                    opposite_open_side = 'sell'
                 elif target_direction == 'short' and long_size > 0:
                     target_mode_close_then_open = True
                     close_qty = long_size
                     close_side = 'sell'
                     close_position_idx = (long_idx or 1) if hedged_mode_detected else None
                     opposite_upnl = long_upnl
+                    opposite_notional = long_notional
+                    opposite_open_side = 'buy'
                 else:
                     close_qty = 0.0
                     close_side = ''
                     close_position_idx = None
 
                 cross_enabled = bool(destination.get('cross'))
+                opposite_entry_fees = (
+                    open_lot_entry_fees(broker, symbol, opposite_open_side)
+                    if target_mode_close_then_open else 0.0
+                )
+                opposite_net = flip_close_net_pnl(
+                    opposite_upnl, opposite_entry_fees, opposite_notional, broker,
+                )
+                request_payload['oppositeNetPnl'] = opposite_net
                 keep_opposite = bool(
                     target_mode_close_then_open
                     and cross_enabled
-                    and should_keep_opposite_on_cross(opposite_upnl)
+                    and should_keep_opposite_on_cross(opposite_net.get('netPnl'))
                 )
 
                 def _mode_already_ok(resp: Any) -> bool:
@@ -1026,7 +1101,11 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'qty': close_qty,
                         'positionIdx': close_position_idx,
                         'unrealisedPnl': opposite_upnl,
-                        'reason': 'cross_loss',
+                        'entryFees': opposite_net.get('entryFees'),
+                        'exitFeeEst': opposite_net.get('exitFeeEst'),
+                        'netPnl': opposite_net.get('netPnl'),
+                        'notional': opposite_notional,
+                        'reason': 'cross_net_loss',
                     }
                     if not hedged_mode_detected:
                         # V5: POST /v5/position/switch-mode, mode=3, per symbol.
@@ -1050,6 +1129,11 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         'side': close_side,
                         'qty': close_qty,
                         'positionIdx': close_position_idx,
+                        'unrealisedPnl': opposite_upnl,
+                        'entryFees': opposite_net.get('entryFees'),
+                        'exitFeeEst': opposite_net.get('exitFeeEst'),
+                        'netPnl': opposite_net.get('netPnl'),
+                        'notional': opposite_notional,
                     }
                     close_order_result = _bybit_walk_ioc(
                         close_side, close_qty, 'contracts', True, close_position_idx,
@@ -2530,13 +2614,29 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             None,
                         )
                         opposite_upnl = _bingx_position_upnl(opposite_row)
+                        opposite_qty_f = _bingx_position_qty(opposite_row or {})
+                        opposite_mark = 0.0
+                        for _pk in ('markPrice', 'mark', 'entryPrice', 'priceAvg'):
+                            try:
+                                opposite_mark = abs(float((opposite_row or {}).get(_pk) or 0))
+                                if opposite_mark > 0:
+                                    break
+                            except Exception:
+                                opposite_mark = 0.0
+                        opposite_notional = opposite_qty_f * opposite_mark
+                        opposite_open_side = 'sell' if opposite_side == 'SHORT' else 'buy'
+                        opposite_entry_fees = open_lot_entry_fees(broker, symbol, opposite_open_side)
+                        opposite_net = flip_close_net_pnl(
+                            opposite_upnl, opposite_entry_fees, opposite_notional, broker,
+                        )
+                        request_payload['oppositeNetPnl'] = opposite_net
                         cross_enabled = bool(cross_cell)
                         keep_opposite = bool(
                             cross_enabled
-                            and should_keep_opposite_on_cross(opposite_upnl)
+                            and should_keep_opposite_on_cross(opposite_net.get('netPnl'))
                         )
                         if keep_opposite:
-                            # Hedge + losing opposite: keep both legs, open target (Bybit parity).
+                            # Hedge + net-loss opposite: keep both legs, open target (Bybit parity).
                             if current_position_mode is not True:
                                 # Force dual-side for keep (target-direction already desires True).
                                 _set_stage('set_position_mode_keep_opposite')
@@ -2570,7 +2670,11 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                                 'qty': float(opposite_qty_target),
                                 'positionSide': opposite_side,
                                 'unrealizedProfit': opposite_upnl,
-                                'reason': 'cross_loss',
+                                'entryFees': opposite_net.get('entryFees'),
+                                'exitFeeEst': opposite_net.get('exitFeeEst'),
+                                'netPnl': opposite_net.get('netPnl'),
+                                'notional': opposite_notional,
+                                'reason': 'cross_net_loss',
                             }
                             request_payload['hedgeOpenUsesReduceOnly'] = False
                         else:
@@ -2580,6 +2684,16 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                             effective_reduce_only = None
                             request_payload['positionSideNetting'] = opposite_side
                             request_payload['nettingAction'] = 'target_direction_close_opposite_then_open_target'
+                            request_payload['closeOpposite'] = {
+                                'side': 'sell' if opposite_side == 'SHORT' else 'buy',
+                                'qty': float(opposite_qty_target),
+                                'positionSide': opposite_side,
+                                'unrealizedProfit': opposite_upnl,
+                                'entryFees': opposite_net.get('entryFees'),
+                                'exitFeeEst': opposite_net.get('exitFeeEst'),
+                                'netPnl': opposite_net.get('netPnl'),
+                                'notional': opposite_notional,
+                            }
                             request_payload['hedgeCloseUsesReduceOnly'] = False
                             request_payload['targetDirectionCloseInitialQtyRaw'] = str(opposite_qty_target)
                             target_mode_close_then_open = True

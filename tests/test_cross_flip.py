@@ -13,16 +13,17 @@ sys.path.insert(0, str(ROOT / 'app'))
 from execution import (  # noqa: E402
     _bingx_position_upnl,
     bingx_cross_symbols,
+    flip_close_net_pnl,
     should_keep_opposite_on_cross,
 )
 
 
 class ShouldKeepOppositeOnCrossTest(unittest.TestCase):
-    def test_loss_keeps(self):
+    def test_net_loss_keeps(self):
         self.assertTrue(should_keep_opposite_on_cross(-1.5))
         self.assertTrue(should_keep_opposite_on_cross(-0.01))
 
-    def test_profit_closes(self):
+    def test_net_profit_closes(self):
         self.assertFalse(should_keep_opposite_on_cross(1.2))
         self.assertFalse(should_keep_opposite_on_cross(0.0))
 
@@ -30,6 +31,47 @@ class ShouldKeepOppositeOnCrossTest(unittest.TestCase):
         self.assertFalse(should_keep_opposite_on_cross(None))
         self.assertFalse(should_keep_opposite_on_cross('abc'))
         self.assertFalse(should_keep_opposite_on_cross(''))
+
+
+class FlipCloseNetPnlTest(unittest.TestCase):
+    """net = upnl − entry fees already paid − notional × close fee rate%."""
+
+    def setUp(self):
+        self._saved = {}
+        for k in ('BINGX_FLIP_FEE_RATE_PCT', 'BYBIT_FLIP_FEE_RATE_PCT', 'FLIP_FEE_RATE_PCT'):
+            self._saved[k] = os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_gross_profit_net_loss_keeps(self):
+        # upnl +0.3 but entry 0.2 + exit 0.2 → net −0.1 → keep
+        os.environ['BINGX_FLIP_FEE_RATE_PCT'] = '0.1'  # 0.1% of notional
+        net = flip_close_net_pnl(0.3, entry_fees=0.2, notional=200.0, broker='bingx')
+        self.assertAlmostEqual(net['exitFeeEst'], 0.2, places=9)
+        self.assertAlmostEqual(net['netPnl'], -0.1, places=9)
+        self.assertTrue(should_keep_opposite_on_cross(net['netPnl']))
+
+    def test_net_profit_closes(self):
+        os.environ['BYBIT_FLIP_FEE_RATE_PCT'] = '0.05'
+        net = flip_close_net_pnl(1.0, entry_fees=0.1, notional=100.0, broker='bybit')
+        # exit = 100 * 0.05/100 = 0.05; net = 1 - 0.1 - 0.05 = 0.85
+        self.assertAlmostEqual(net['netPnl'], 0.85, places=9)
+        self.assertFalse(should_keep_opposite_on_cross(net['netPnl']))
+
+    def test_no_fees_matches_upnl(self):
+        net = flip_close_net_pnl(0.5, 0, 0, 'bingx')
+        self.assertAlmostEqual(net['netPnl'], 0.5, places=9)
+        self.assertAlmostEqual(net['exitFeeEst'], 0.0, places=9)
+
+    def test_bad_inputs_zero(self):
+        net = flip_close_net_pnl(None, None, None, '')
+        self.assertAlmostEqual(net['netPnl'], 0.0, places=9)
+        self.assertFalse(should_keep_opposite_on_cross(net['netPnl']))
 
 
 class BingxCrossSymbolsTest(unittest.TestCase):

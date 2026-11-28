@@ -1,3 +1,6 @@
+## 2026.11.21-009
+- **Flip keep/close uses net PnL (fees included):** `net = unrealised − entry fees (open_lots) − exit fee est (notional × FLIP_FEE_RATE_PCT)`. Keep only when **net < 0** (gross profit that is net-of-fees loss stays open under hedge). Journal `keepOpposite`/`closeOpposite`: `entryFees`, `exitFeeEst`, `netPnl`, `notional`; reason `cross_net_loss`. Live settings `BINGX_FLIP_FEE_RATE_PCT` / `BYBIT_FLIP_FEE_RATE_PCT` (default **0.05**%). Bybit + BingX.
+
 ## 2026.11.21-008
 - **tStep base + dual hook multipliers (scheme A):** cell **`tStep`** = absolute base (legacy `smartIncTol` fallback). Webhook **`tal`** and **`w_tal`** are multipliers: `tal_eff = tal × tStep`, `wind = w_tal × tStep` (each from base). Both hook fields **required** (`tal`+`w_tal`). Cell **tal** / **w_tal** are **informational/readonly** (last hook values; `Wind_tal` kept as alias). UI: `risk … tStep` / `smart-inc ×[TF] tal w` narrow. Gate and avg_tol use effective values; journal `tStep`/`talMult`/`windMult`.
 

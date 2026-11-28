@@ -1449,6 +1449,43 @@ def bars_since_last_fill(broker: str, symbol: str, tf_minutes: float) -> float |
     return float(max(0, int(now // step) - int(last // step)))
 
 
+def open_lot_entry_fees(broker: str, symbol: str, open_side: str = '') -> float:
+    """Entry commissions still attached to open lots (already paid on open/add).
+
+    open_side: lot open side 'buy' (long) / 'sell' (short); '' = both sides.
+    Used for flip net PnL: unrealised − entry fees − estimated exit fee.
+    """
+    broker = str(broker or '').strip().lower()
+    symbol = str(symbol or '').strip()
+    side = str(open_side or '').strip().lower()
+    if not broker or not symbol:
+        return 0.0
+    try:
+        with _DB_LOCK:
+            with _connect() as conn:
+                if side in ('buy', 'sell'):
+                    row = conn.execute(
+                        '''
+                        SELECT COALESCE(SUM(remaining_commission), 0) AS fees
+                        FROM open_lots
+                        WHERE broker=? AND symbol=? AND side=? AND remaining_qty > 0
+                        ''',
+                        (broker, symbol, side),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        '''
+                        SELECT COALESCE(SUM(remaining_commission), 0) AS fees
+                        FROM open_lots
+                        WHERE broker=? AND symbol=? AND remaining_qty > 0
+                        ''',
+                        (broker, symbol),
+                    ).fetchone()
+        return abs(float(row['fees'] if row else 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
 def _logical_fill_exists(conn: sqlite3.Connection, fill: Dict[str, Any]) -> bool:
     """True if a twin fill already exists (same broker/symbol/side/qty/price/time ±1s)."""
     epoch = _fill_epoch(fill.get('observed_at'))
