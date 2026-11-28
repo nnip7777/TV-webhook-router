@@ -75,8 +75,86 @@ def smart_inc_multiplier(bars: float | None, broker: str = 'bingx') -> int:
     return min(smart_inc_max_multiplier(broker), max(0, int(bars)))
 
 
+# Exchange taker fee cache: key → {'rate_pct': float, 'at': float}. TTL 60s.
+_FEE_RATE_CACHE: Dict[str, Dict[str, Any]] = {}
+_FEE_RATE_TTL_SEC = 60.0
+
+
+def _parse_taker_rate_pct(broker: str, payload: Any, symbol: str = '') -> float | None:
+    """Extract taker fee as percent from exchange commission payload."""
+    try:
+        if broker == 'bingx':
+            data = (payload or {}).get('data') or {}
+            if isinstance(data, list):
+                # some responses list per-symbol rows
+                sym_u = str(symbol or '').replace('-', '').upper()
+                for row in data:
+                    if not isinstance(row, dict):
+                        continue
+                    row_sym = str(row.get('symbol') or '').replace('-', '').upper()
+                    if sym_u and row_sym and row_sym != sym_u:
+                        continue
+                    for key in ('takerCommissionRate', 'takerFeeRate', 'takerRate', 'feeRate'):
+                        if row.get(key) not in (None, ''):
+                            return float(row[key]) * 100.0
+                return None
+            for key in ('takerCommissionRate', 'takerFeeRate', 'takerRate', 'feeRate'):
+                if data.get(key) not in (None, ''):
+                    return float(data[key]) * 100.0
+            return None
+        if broker == 'bybit':
+            rows = ((payload or {}).get('result') or {}).get('list') or []
+            sym_u = str(symbol or '').upper()
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                if sym_u and str(row.get('symbol') or '').upper() not in ('', sym_u):
+                    continue
+                for key in ('takerFeeRate', 'takerCommissionRate', 'feeRate'):
+                    if row.get(key) not in (None, ''):
+                        return float(row[key]) * 100.0
+            return None
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return None
+
+
+def fetch_taker_fee_rate_pct(broker: str, symbol: str = '', client: Any = None) -> tuple[float, str]:
+    """Live taker fee rate (%) from exchange; fallback Settings FLIP_FEE_RATE_PCT.
+
+    Close is taker (join the book). Cached 60s. Returns (rate_pct, source).
+    """
+    broker = str(broker or '').strip().lower()
+    cache_key = f'{broker}:{str(symbol or "").upper()}' if broker == 'bybit' else broker
+    now = time.time()
+    hit = _FEE_RATE_CACHE.get(cache_key)
+    if hit and (now - float(hit.get('at') or 0)) < _FEE_RATE_TTL_SEC:
+        return float(hit.get('rate_pct') or 0.0), str(hit.get('source') or 'exchange')
+
+    rate_pct = None
+    try:
+        if broker == 'bingx':
+            cli = client if hasattr(client, 'get_commission_rate') else BingXBroker()
+            payload = cli.get_commission_rate()
+            rate_pct = _parse_taker_rate_pct('bingx', payload, symbol)
+        elif broker == 'bybit':
+            cli = client if hasattr(client, 'get_fee_rate') else BybitBroker()
+            category = 'linear'
+            payload = cli.get_fee_rate(category=category, symbol=symbol)
+            rate_pct = _parse_taker_rate_pct('bybit', payload, symbol)
+    except Exception:
+        rate_pct = None
+
+    if rate_pct is not None and rate_pct >= 0:
+        _FEE_RATE_CACHE[cache_key] = {'rate_pct': rate_pct, 'source': 'exchange', 'at': now}
+        return rate_pct, 'exchange'
+
+    fallback = flip_close_fee_rate_pct(broker) if broker else 0.05
+    return fallback, 'settings'
+
+
 def flip_close_fee_rate_pct(broker: str) -> float:
-    """Expected close-fee rate (% of notional), live per-broker Settings."""
+    """Fallback close-fee rate (% of notional) from live Settings."""
     return max(0.0, env_float_per_broker('FLIP_FEE_RATE_PCT', broker, 0.05))
 
 
@@ -85,11 +163,14 @@ def flip_close_net_pnl(
     entry_fees: Any = 0.0,
     notional: Any = 0.0,
     broker: str = '',
-) -> Dict[str, float]:
-    """Net PnL if we close now: upnl − entry fees already paid − est. exit fee.
+    symbol: str = '',
+    client: Any = None,
+    fee_rate_pct: float | None = None,
+    fee_source: str = '',
+) -> Dict[str, Any]:
+    """Net PnL if we close now (taker): upnl − entry fees paid − exit taker fee.
 
-    BingX/Bybit charge open+close. Unrealised from exchange does not include
-    entry fees already paid; exit fee is estimated as notional × rate%.
+    Exit rate prefers live exchange taker fee; fallback Settings FLIP_FEE_RATE_PCT.
     """
     try:
         upnl = float(unrealised_pnl or 0)
@@ -103,7 +184,11 @@ def flip_close_net_pnl(
         notional_abs = abs(float(notional or 0))
     except (TypeError, ValueError):
         notional_abs = 0.0
-    rate_pct = flip_close_fee_rate_pct(broker) if broker else 0.05
+    if fee_rate_pct is None:
+        rate_pct, source = fetch_taker_fee_rate_pct(broker, symbol=symbol, client=client)
+    else:
+        rate_pct = max(0.0, float(fee_rate_pct))
+        source = fee_source or 'explicit'
     exit_fee = notional_abs * rate_pct / 100.0
     net = upnl - entry - exit_fee
     return {
@@ -111,6 +196,7 @@ def flip_close_net_pnl(
         'entryFees': entry,
         'exitFeeEst': exit_fee,
         'feeRatePct': rate_pct,
+        'feeSource': source,
         'netPnl': net,
     }
 
@@ -1070,7 +1156,8 @@ async def _execute_bybit(payload: Dict[str, Any], destination: Dict[str, Any]) -
                     if target_mode_close_then_open else 0.0
                 )
                 opposite_net = flip_close_net_pnl(
-                    opposite_upnl, opposite_entry_fees, opposite_notional, broker,
+                    opposite_upnl, opposite_entry_fees, opposite_notional,
+                    broker=broker, symbol=symbol, client=client,
                 )
                 request_payload['oppositeNetPnl'] = opposite_net
                 keep_opposite = bool(
@@ -2627,7 +2714,8 @@ async def _execute_bingx(payload: Dict[str, Any], destination: Dict[str, Any]) -
                         opposite_open_side = 'sell' if opposite_side == 'SHORT' else 'buy'
                         opposite_entry_fees = open_lot_entry_fees(broker, symbol, opposite_open_side)
                         opposite_net = flip_close_net_pnl(
-                            opposite_upnl, opposite_entry_fees, opposite_notional, broker,
+                            opposite_upnl, opposite_entry_fees, opposite_notional,
+                            broker=broker, symbol=symbol, client=client,
                         )
                         request_payload['oppositeNetPnl'] = opposite_net
                         cross_enabled = bool(cross_cell)

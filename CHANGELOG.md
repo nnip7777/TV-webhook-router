@@ -1,3 +1,6 @@
+## 2026.11.21-010
+- **Flip close fee = live exchange taker rate:** BingX `commissionRate.takerCommissionRate`, Bybit `GET /v5/account/fee-rate` → `takerFeeRate` (decimal → %). Cached **60s**. Close is taker (join book). Fallback Settings `BINGX_/BYBIT_FLIP_FEE_RATE_PCT` only if API fails. Journal `feeSource=exchange|settings`. New Bybit `get_fee_rate()`.
+
 ## 2026.11.21-009
 - **Flip keep/close uses net PnL (fees included):** `net = unrealised − entry fees (open_lots) − exit fee est (notional × FLIP_FEE_RATE_PCT)`. Keep only when **net < 0** (gross profit that is net-of-fees loss stays open under hedge). Journal `keepOpposite`/`closeOpposite`: `entryFees`, `exitFeeEst`, `netPnl`, `notional`; reason `cross_net_loss`. Live settings `BINGX_FLIP_FEE_RATE_PCT` / `BYBIT_FLIP_FEE_RATE_PCT` (default **0.05**%). Bybit + BingX.
 

@@ -178,6 +178,13 @@ class BybitBroker:
     def get_wallet_balance(self, account_type: str = 'UNIFIED') -> Dict[str, Any]:
         return self._request('GET', '/v5/account/wallet-balance', params={'accountType': account_type})
 
+    def get_fee_rate(self, category: str = 'linear', symbol: str = '') -> Dict[str, Any]:
+        """V5 account fee rate: takerFeeRate/makerFeeRate as decimal fractions."""
+        params: Dict[str, Any] = {'category': category}
+        if symbol:
+            params['symbol'] = str(symbol).upper()
+        return self._request('GET', '/v5/account/fee-rate', params=params)
+
     def get_positions(self, category: str = 'linear', symbol: Optional[str] = None, settle_coin: Optional[str] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {'category': category}
         if symbol:
